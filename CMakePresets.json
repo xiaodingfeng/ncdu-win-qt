@@ -1,0 +1,25 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "x64-Debug",
+            "displayName": "VS 2022 (Debug)",
+            "generator": "Visual Studio 17 2022",
+            "architecture": { "value": "x64", "strategy": "set" },
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_CONFIGURATION_TYPES": "Debug;Release"
+            }
+        },
+        {
+            "name": "x64-Release",
+            "displayName": "VS 2022 (Release)",
+            "generator": "Visual Studio 17 2022",
+            "architecture": { "value": "x64", "strategy": "set" },
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_CONFIGURATION_TYPES": "Release"
+            }
+        }
+    ]
+}

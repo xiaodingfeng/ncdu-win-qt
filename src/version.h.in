@@ -1,0 +1,5 @@
+#pragma once
+#define APP_NAME     "@APP_NAME@"
+#define APP_VERSION  "@APP_VERSION@"
+#define HOMEPAGE     "@APP_HOMEPAGE@"
+#define SOURCE_URL   "@APP_SOURCE_URL@"

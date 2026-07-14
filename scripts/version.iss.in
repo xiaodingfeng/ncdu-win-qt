@@ -1,0 +1,4 @@
+#define MyAppName      "@APP_NAME@"
+#define MyAppVersion   "@APP_VERSION@"
+#define MyAppURL       "@APP_SOURCE_URL@"
+#define MyAppHomepage  "@APP_HOMEPAGE@"
