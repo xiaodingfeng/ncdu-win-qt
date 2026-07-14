@@ -15,6 +15,8 @@
 #include <QMap>
 #include <QAction>
 #include <QString>
+#include <QTimer>
+#include <QFutureWatcher>
 #include <memory>
 #include <vector>
 #include <tuple>
@@ -68,6 +70,10 @@ private slots:
 
     // Search
     void onSearchChanged(const QString& text);
+    void onSearchDebounceTimeout();
+    void collectSearchResults(const std::shared_ptr<FileNode>& node, const QString& query,
+                              std::vector<std::shared_ptr<FileNode>>& results, int& limit) const;
+    void populateSearchList();
 
     // Treemap
     void onTreemapHover(std::shared_ptr<FileNode> node);
@@ -96,6 +102,11 @@ private:
     CleanupScanner* m_cleanupScanner = nullptr;
     CleanupWorker* m_cleanupWorker = nullptr;
     QString m_searchText;
+    QString m_searchQueryPending;
+    std::vector<std::shared_ptr<FileNode>> m_searchResults;
+    bool m_inSearchMode = false;
+    QTimer* m_searchDebounceTimer = nullptr;
+    QFutureWatcher<std::vector<std::shared_ptr<FileNode>>>* m_searchWatcher = nullptr;
     bool m_showFiles = true;
     bool m_skipHeavyDirs = true;
     int m_sortCol = 2;

@@ -14,7 +14,7 @@
   "button.skip_heavy": "⚡ 快速扫描",
   "tooltip.skip_heavy": "跳过依赖包、缓存和构建目录的详细扫描（仍会显示它们占用的空间），大幅提升扫描速度。取消勾选可查看每个文件。\n\n跳过的目录：node_modules、vendor、.git、__pycache__、.venv、target、.gradle、.idea、.next、.nuxt、.turbo、.parcel-cache、.cache 等",
 
-  "search.placeholder": "搜索…",
+  "search.placeholder": "搜索（支持 * 模糊匹配）…",
 
   "sort.size": "大小",
   "sort.name": "名称",
@@ -26,6 +26,7 @@
   "column.percent": "%",
   "column.items": "项数",
   "column.type": "类型",
+  "column.path": "路径",
   "column.description": "说明",
 
   "breadcrumb.parent": ".. (上级)",
@@ -43,6 +44,7 @@
   "status.cleaning": "正在清理：{item}…",
   "status.moved_recycle": "已将 {n} 项移至回收站",
   "status.deleted": "已永久删除 {n} 项",
+  "status.search_results": "找到 \"{query}\" 的 {n} 个结果",
   "status.no_data": "暂无数据",
   "status.skipped": "内容已跳过（性能优化）",
   "status.items": "{n} 项",

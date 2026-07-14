@@ -48,6 +48,7 @@
 
 #include <algorithm>
 #include <set>
+#include <QtConcurrent>
 
 #include "Style.h"
 #include "I18n.h"
@@ -80,7 +81,14 @@ static const SortColInfo SORT_COLUMNS[] = {
 };
 static constexpr int SORT_COLUMNS_COUNT = 6;
 
-static QString sortKeyForColumn(int col) {
+static QString sortKeyForColumn(int col, bool searchMode = false) {
+    if (searchMode) {
+        if (col == 0) return QStringLiteral("name");
+        if (col == 1) return QStringLiteral("path");
+        if (col == 2) return QStringLiteral("size");
+        if (col == 5) return QStringLiteral("type");
+        return QStringLiteral("size");
+    }
     if (col >= 0 && col < SORT_COLUMNS_COUNT)
         return QString::fromLatin1(SORT_COLUMNS[col].key);
     return QStringLiteral("size");
@@ -278,8 +286,8 @@ void MainWindow::buildUI()
 
         m_searchBox = new QLineEdit;
         m_searchBox->setPlaceholderText(I18n::tr("search.placeholder"));
-        m_searchBox->setMinimumWidth(200);
-        m_searchBox->setMaximumWidth(300);
+        m_searchBox->setMinimumWidth(280);
+        m_searchBox->setMaximumWidth(380);
         lay->addWidget(m_searchBox);
 
         m_upBtn = new QPushButton(I18n::tr("button.up"));
@@ -490,6 +498,24 @@ void MainWindow::wireSignals()
     connect(m_skipCheckbox, &QCheckBox::toggled, this, &MainWindow::onSkipToggled);
     connect(m_searchBox, &QLineEdit::textChanged, this, &MainWindow::onSearchChanged);
 
+    // Debounce timer — delays search until the user stops typing (150ms).
+    m_searchDebounceTimer = new QTimer(this);
+    m_searchDebounceTimer->setSingleShot(true);
+    m_searchDebounceTimer->setInterval(150);
+    connect(m_searchDebounceTimer, &QTimer::timeout, this, &MainWindow::onSearchDebounceTimeout);
+
+    // Async search watcher — runs search on a background thread so the UI stays responsive.
+    m_searchWatcher = new QFutureWatcher<std::vector<std::shared_ptr<FileNode>>>(this);
+    connect(m_searchWatcher, &QFutureWatcher<std::vector<std::shared_ptr<FileNode>>>::finished,
+            this, [this]() {
+        // Only apply results if search mode is still active and text hasn't changed.
+        if (!m_inSearchMode || m_searchText != m_searchQueryPending)
+            return;
+        m_searchResults = m_searchWatcher->result();
+        populateList(m_current);
+        updateStatusForCurrent();
+    });
+
     connect(m_breadcrumb, &BreadcrumbBar::navigated, this, [this](std::shared_ptr<FileNode> node) {
         navigateTo(node);
     });
@@ -664,6 +690,12 @@ void MainWindow::navigateTo(std::shared_ptr<FileNode> node)
 {
     if (!node)
         return;
+    // Clear search when navigating.
+    if (m_inSearchMode) {
+        m_searchBox->clear();
+        m_inSearchMode = false;
+        m_searchResults.clear();
+    }
     m_current = node;
     m_breadcrumb->setNode(node);
     populateList(node);
@@ -704,6 +736,11 @@ void MainWindow::onEscape()
 {
     if (!m_searchBox->text().isEmpty()) {
         m_searchBox->clear();
+        m_inSearchMode = false;
+        m_searchResults.clear();
+        if (m_current)
+            populateList(m_current);
+        updateStatusForCurrent();
     } else {
         goUp();
     }
@@ -715,11 +752,15 @@ void MainWindow::onEnter()
     if (!item)
         return;
     auto node = item->data(0, Qt::UserRole).value<std::shared_ptr<FileNode>>();
-    if (node && node->isDir()) {
+    if (!node)
+        return;
+    if (node->isDir()) {
         if (node->skipped)
             showSkippedMsg();
         else
             navigateTo(node);
+    } else {
+        openPath(node->path);
     }
 }
 
@@ -778,29 +819,31 @@ void MainWindow::populateList(std::shared_ptr<FileNode> node)
 {
     m_tree->setSortingEnabled(false);
     m_tree->clear();
+
+    // Search-mode: show flat results with path column.
+    if (m_inSearchMode) {
+        populateSearchList();
+        return;
+    }
+
     if (!node)
         return;
 
+    // Restore normal headers (in case we were in search mode).
+    setHeaderLabels();
+    m_tree->setColumnHidden(3, false);
+    m_tree->setColumnHidden(4, false);
+    m_tree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
+
     qint64 total = std::max<qint64>(1, node->size);
     auto children = node->children;
-
-    // Filter by search text.
-    if (!m_searchText.isEmpty()) {
-        QString q = m_searchText.toLower();
-        children.erase(
-            std::remove_if(children.begin(), children.end(),
-                           [&q](const std::shared_ptr<FileNode>& c) {
-                               return !c->name.toLower().contains(q);
-                           }),
-            children.end());
-    }
 
     // Sort using the current column + order.
     children = sortChildren(children);
 
     // ".." parent entry for ncdu feel.
     auto parent = node->parent.lock();
-    if (parent && m_searchText.isEmpty()) {
+    if (parent) {
         auto* upItem = new QTreeWidgetItem(QStringList{
             I18n::tr("breadcrumb.parent"), QString(), QString(), QString(), QString(), QString()});
         upItem->setData(0, Qt::UserRole, QVariant::fromValue(parent));
@@ -861,6 +904,162 @@ void MainWindow::populateList(std::shared_ptr<FileNode> node)
     reflectSortIndicator();
 }
 
+// --------------------------------------------------------------------------- //
+// Search-mode: flat list with path column ("Everything-like")
+// --------------------------------------------------------------------------- //
+void MainWindow::populateSearchList()
+{
+    if (m_searchResults.empty())
+        return;
+
+    // Set headers for search mode: Name | Path | Size | % | Items | Type
+    // Columns 3(%) and 4(Items) are hidden in search mode.
+    QStringList labels = {
+        I18n::tr("column.name"),
+        I18n::tr("column.path"),
+        I18n::tr("column.size"),
+        QString(),
+        QString(),
+        I18n::tr("column.type"),
+    };
+    m_tree->setHeaderLabels(labels);
+    m_tree->setColumnHidden(3, true);
+    m_tree->setColumnHidden(4, true);
+    m_tree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_tree->header()->resizeSection(1, 200);
+
+    auto sorted = sortChildren(m_searchResults);
+    for (const auto& c : sorted) {
+        auto* item = new QTreeWidgetItem;
+
+        // Column 0: Name
+        item->setText(0, c->name);
+        item->setData(0, Qt::UserRole, QVariant::fromValue(c));
+        item->setIcon(0, typeIcon(c));
+        item->setToolTip(0, buildRowTooltip(c));
+
+        // Column 1: Path (relative to search root) — no BAR_ROLE, so delegate shows text.
+        auto searchRoot = m_current ? m_current : m_root;
+        QString relPath = c->path;
+        if (searchRoot && c->path.startsWith(searchRoot->path, Qt::CaseInsensitive)) {
+            relPath = c->path.mid(searchRoot->path.length());
+            if (relPath.startsWith('/') || relPath.startsWith('\\'))
+                relPath = relPath.mid(1);
+        }
+        item->setText(1, relPath);
+        item->setToolTip(1, c->path);
+        item->setForeground(1, QColor(QString::fromLatin1(C::TEXT_MUTED)));
+
+        // Column 2: Size
+        item->setText(2, humanSize(c->size));
+        item->setTextAlignment(2, Qt::AlignRight);
+        item->setForeground(2, QColor(QString::fromLatin1(C::TEXT_SEC)));
+        item->setToolTip(2, I18n::tr("size.bytes", QMap<QString, QString>{{"n", withCommas(c->size)}}));
+
+        // Column 5: Type
+        item->setText(5, I18n::tr(typeKey(c->name, c->isDir())));
+        item->setForeground(5, QColor(QString::fromLatin1(C::TEXT_MUTED)));
+
+        if (c->skipped) {
+            QFont f = item->font(0);
+            f.setItalic(true);
+            item->setFont(0, f);
+            item->setForeground(0, QColor(QString::fromLatin1(C::TEXT_SEC)));
+        }
+
+        m_tree->addTopLevelItem(item);
+    }
+
+    m_tree->header()->setSectionsClickable(true);
+    reflectSortIndicator();
+}
+
+void MainWindow::onSearchDebounceTimeout()
+{
+    auto searchRoot = m_current ? m_current : m_root;
+    if (!searchRoot || m_searchText.isEmpty())
+        return;
+
+    QString q = m_searchText.toLower();
+    m_searchQueryPending = m_searchText;
+
+    // Run the search on a background thread so typing stays responsive.
+    auto future = QtConcurrent::run([searchRoot, q]() {
+        std::vector<std::shared_ptr<FileNode>> results;
+        int limit = 500;
+
+        bool hasWildcard = q.contains(QLatin1Char('*'));
+        QRegularExpression re;
+        if (hasWildcard) {
+            re.setPattern(QRegularExpression::wildcardToRegularExpression(q));
+            re.setPatternOptions(QRegularExpression::CaseInsensitiveOption);
+        }
+        const QString lowerQuery = hasWildcard ? QString() : q;
+
+        struct SearchHelper {
+            static void search(const std::shared_ptr<FileNode>& node,
+                               bool hasWildcard, const QRegularExpression& re,
+                               const QString& lowerQuery,
+                               std::vector<std::shared_ptr<FileNode>>& results,
+                               int& limit) {
+                if (!node || limit <= 0)
+                    return;
+                for (const auto& child : node->children) {
+                    if (limit <= 0)
+                        return;
+                    bool match = hasWildcard
+                        ? re.match(child->name).hasMatch()
+                        : child->name.toLower().contains(lowerQuery);
+                    if (match) {
+                        results.push_back(child);
+                        --limit;
+                    }
+                    if (child->isDir())
+                        search(child, hasWildcard, re, lowerQuery, results, limit);
+                }
+            }
+        };
+
+        SearchHelper::search(searchRoot, hasWildcard, re, lowerQuery, results, limit);
+        return results;
+    });
+
+    m_searchWatcher->setFuture(future);
+}
+
+void MainWindow::collectSearchResults(const std::shared_ptr<FileNode>& node,
+                                       const QString& query,
+                                       std::vector<std::shared_ptr<FileNode>>& results,
+                                       int& limit) const
+{
+    if (!node || limit <= 0)
+        return;
+
+    // If query contains '*', use wildcard matching (e.g. "*.txt", "*test*")
+    // Otherwise, use case-insensitive substring match.
+    bool hasWildcard = query.contains(QLatin1Char('*'));
+    QRegularExpression re;
+    if (hasWildcard) {
+        re.setPattern(QRegularExpression::wildcardToRegularExpression(query));
+        re.setPatternOptions(QRegularExpression::CaseInsensitiveOption);
+    }
+    const QString lowerQuery = hasWildcard ? QString() : query.toLower();
+
+    for (const auto& child : node->children) {
+        if (limit <= 0)
+            return;
+        bool match = hasWildcard
+                         ? re.match(child->name).hasMatch()
+                         : child->name.toLower().contains(lowerQuery);
+        if (match) {
+            results.push_back(child);
+            --limit;
+        }
+        if (child->isDir())
+            collectSearchResults(child, query, results, limit);
+    }
+}
+
 QString MainWindow::buildRowTooltip(const std::shared_ptr<FileNode>& node) const
 {
     QStringList lines;
@@ -884,7 +1083,7 @@ QString MainWindow::buildRowTooltip(const std::shared_ptr<FileNode>& node) const
 std::vector<std::shared_ptr<FileNode>> MainWindow::sortChildren(
     const std::vector<std::shared_ptr<FileNode>>& children) const
 {
-    QString key = sortKeyForColumn(m_sortCol);
+    QString key = sortKeyForColumn(m_sortCol, m_inSearchMode);
     bool desc = m_sortOrder == Qt::DescendingOrder;
 
     auto result = children;
@@ -921,6 +1120,21 @@ std::vector<std::shared_ptr<FileNode>> MainWindow::sortChildren(
             return desc ? r > 0 : r < 0;
         };
         std::sort(result.begin(), result.end(), cmp);
+    } else if (key == "path") {
+        auto cmp = [&](const std::shared_ptr<FileNode>& a,
+                       const std::shared_ptr<FileNode>& b) {
+            QString pathA = a->path;
+            QString pathB = b->path;
+            if (m_root) {
+                pathA = a->path.mid(m_root->path.length());
+                pathB = b->path.mid(m_root->path.length());
+            }
+            int r = pathA.compare(pathB, Qt::CaseInsensitive);
+            if (r == 0)
+                r = nameCmp(a, b);
+            return desc ? r > 0 : r < 0;
+        };
+        std::sort(result.begin(), result.end(), cmp);
     } else {  // size
         auto cmp = [&](const std::shared_ptr<FileNode>& a,
                        const std::shared_ptr<FileNode>& b) {
@@ -936,6 +1150,14 @@ std::vector<std::shared_ptr<FileNode>> MainWindow::sortChildren(
 
 void MainWindow::updateStatusForCurrent()
 {
+    if (m_inSearchMode) {
+        int n = static_cast<int>(m_searchResults.size());
+        m_statusLabel->setText(I18n::tr("status.search_results", QMap<QString, QString>{
+            {"n", QString::number(n)},
+            {"query", m_searchText},
+        }));
+        return;
+    }
     auto n = m_current;
     if (!n)
         return;
@@ -953,12 +1175,45 @@ void MainWindow::updateStatusForCurrent()
 void MainWindow::onSearchChanged(const QString& text)
 {
     m_searchText = text.trimmed();
-    if (m_current)
-        populateList(m_current);
+    if (m_searchText.isEmpty()) {
+        m_searchDebounceTimer->stop();
+        m_inSearchMode = false;
+        m_searchResults.clear();
+        m_searchQueryPending.clear();
+        if (m_current)
+            populateList(m_current);
+        updateStatusForCurrent();
+        return;
+    }
+
+    m_inSearchMode = true;
+    // Restart debounce timer — search only fires after the user stops typing.
+    m_searchDebounceTimer->start();
 }
 
 void MainWindow::onHeaderClicked(int logicalIndex)
 {
+    if (m_inSearchMode) {
+        static const QMap<int, Qt::SortOrder> searchDefaults = {
+            {0, Qt::AscendingOrder},
+            {1, Qt::AscendingOrder},
+            {2, Qt::DescendingOrder},
+            {5, Qt::AscendingOrder},
+        };
+        if (logicalIndex == m_sortCol) {
+            m_sortOrder = (m_sortOrder == Qt::AscendingOrder)
+                              ? Qt::DescendingOrder
+                              : Qt::AscendingOrder;
+        } else {
+            m_sortCol = logicalIndex;
+            m_sortOrder = searchDefaults.value(logicalIndex, Qt::DescendingOrder);
+        }
+        reflectSortIndicator();
+        if (m_current)
+            populateList(m_current);
+        return;
+    }
+
     if (logicalIndex < 0 || logicalIndex >= SORT_COLUMNS_COUNT)
         return;
     if (logicalIndex == m_sortCol) {

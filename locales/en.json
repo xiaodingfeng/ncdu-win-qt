@@ -14,7 +14,7 @@
   "button.skip_heavy": "⚡ Fast scan",
   "tooltip.skip_heavy": "Skip detailed scanning of dependency, cache, and build directories (their sizes are still shown). Much faster. Uncheck to see every file.\n\nSkipped directories: node_modules, vendor, .git, __pycache__, .venv, target, .gradle, .idea, .next, .nuxt, .turbo, .parcel-cache, .cache, etc.",
 
-  "search.placeholder": "Search…",
+  "search.placeholder": "Search (* for fuzzy)…",
 
   "sort.size": "Size",
   "sort.name": "Name",
@@ -26,6 +26,7 @@
   "column.percent": "%",
   "column.items": "Items",
   "column.type": "Type",
+  "column.path": "Path",
   "column.description": "Description",
 
   "breadcrumb.parent": ".. (parent)",
@@ -43,6 +44,7 @@
   "status.cleaning": "Cleaning: {item}…",
   "status.moved_recycle": "Moved {n} item(s) to Recycle Bin",
   "status.deleted": "Permanently deleted {n} item(s)",
+  "status.search_results": "Found {n} result(s) for \"{query}\"",
   "status.no_data": "No data to display",
   "status.skipped": "Contents skipped for performance",
   "status.items": "{n} items",
