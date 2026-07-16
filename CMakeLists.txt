@@ -1,13 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(NcduWin VERSION 1.0.0 LANGUAGES CXX)
+project(NcduWin VERSION 1.0.1 LANGUAGES CXX)
 
 # Set NcduWin as the default startup target in Visual Studio
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT NcduWin)
 
 # ---- Single source of truth for app metadata ----
 set(APP_NAME        "NcduWin")
-set(APP_VERSION     "1.0.0")
+set(APP_VERSION     "1.0.1")
 set(APP_HOMEPAGE    "https://ncduwin.fengzhengx.cn/")
 set(APP_SOURCE_URL  "https://github.com/xiaodingfeng/ncdu-win-qt")
 

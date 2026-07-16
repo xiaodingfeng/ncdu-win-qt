@@ -450,11 +450,26 @@ void CleanupScanner::discoverTargets(std::vector<CleanupTarget>& out)
             DangerLevel::C, false, false, "cleanup.remark_c_system");
     }
 
-    // Recycle Bin (B-level, queryable)
-    if (pathUnder(rootNorm, normalizePath(userDir))) {
-        add("cleanup.b_recycle",
-            QDir(m_scanPath).absoluteFilePath("$Recycle.Bin"),
-            DangerLevel::B, true, false, "cleanup.remark_b_recycle");
+    // Recycle Bin (B-level) — always at the drive root, not under scan path.
+    // The previous code joined scanPath + "$Recycle.Bin" (only valid when
+    // scanning a drive root) and required the scan root to be under the user
+    // directory (inverted check). Now we compute the drive root from the scan
+    // path and add the recycle bin directly if it exists.
+    {
+        QString driveRoot;
+        if (m_scanPath.length() >= 2 && m_scanPath[1] == ':')
+            driveRoot = m_scanPath.left(2) + QStringLiteral("/");
+        else
+            driveRoot = m_scanPath;
+        const QString recycleBinPath =
+            QDir::cleanPath(driveRoot + QStringLiteral("/$Recycle.Bin"));
+        if (pathExistsAndAccessible(recycleBinPath)) {
+            const QFileInfo info(recycleBinPath);
+            out.push_back(makeTarget(
+                "cleanup.b_recycle", recycleBinPath,
+                DangerLevel::B, info.isDir(), false,
+                "cleanup.remark_b_recycle"));
+        }
     }
 }
 
@@ -653,6 +668,16 @@ DangerLevel CleanupScanner::classifyFileDanger(const QString& path, const QStrin
     if (pn == win || pn.startsWith(win + '/'))
         return DangerLevel::C;
 
+    // C-level: critical system files at the drive root (pagefile.sys,
+    // hiberfil.sys, swapfile.sys) — shown but not cleanable.
+    static const QStringList systemRootFiles = {
+        "pagefile.sys", "hiberfil.sys", "swapfile.sys"
+    };
+    for (const auto& sf : systemRootFiles) {
+        if (nameL == sf)
+            return DangerLevel::C;
+    }
+
     // A-level: cache-like files
     if (nameL.endsWith(".tmp") || nameL.endsWith(".cache") ||
         nameL.endsWith(".log") || nameL.endsWith(".pyc"))
@@ -731,6 +756,9 @@ void CleanupScanner::scanLargeFiles(std::vector<LargeFile>& out)
             lf.name = node->name;
             lf.size = node->size;
             lf.danger = classifyFileDanger(node->path, node->name);
+            // Skip system (C-level) files — must not be shown or deleted.
+            if (lf.danger == DangerLevel::C)
+                continue;
             results.push_back(lf);
         }
         for (const auto& child : node->children) {
@@ -771,12 +799,14 @@ void CleanupScanner::run()
     for (auto& t : targets) {
         if (m_cancel.load())
             return;
-        if (!m_rootNode) {
-            // Fallback: compute size directly from the filesystem
-            if (t.isDir && pathExistsAndAccessible(t.path)) {
+        // Compute size from the filesystem for targets not populated from the
+        // FileNode tree (e.g. recycle bin at drive root, browser caches outside
+        // the scan root, or when no tree is available at all).
+        if (t.size == 0 && t.fileCount == 0 && pathExistsAndAccessible(t.path)) {
+            if (t.isDir) {
                 t.size = computePathSize(t.path);
                 t.fileCount = countFiles(t.path);
-            } else if (pathExistsAndAccessible(t.path)) {
+            } else {
                 t.size = QFileInfo(t.path).size();
                 t.fileCount = 1;
             }

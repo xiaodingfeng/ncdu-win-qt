@@ -31,14 +31,11 @@ const QStringList& archiveSuffixes()
     return s;
 }
 
-// Choose the deletion strategy based on danger level.
-// S-level (system temp/cache): permanent delete.
-// A/B-level (user cache, large files): send to recycle bin for safety.
+// All cleanup deletions use permanent delete (direct delete, bypassing the
+// recycle bin) for speed and reliability. SHFileOperationW has high per-call
+// shell overhead and can stall the worker on locked files. deletePermanent
+// continues on per-file errors so one failure does not stop the rest.
 // C/D-level: never reached (caller filters them out).
-inline bool usePermanentDelete(DangerLevel danger)
-{
-    return danger == DangerLevel::S;
-}
 
 // Compute directory size before deletion (for freed-byte accounting).
 qint64 dirSize(const QString& path)
@@ -136,8 +133,8 @@ void CleanupWorker::cleanPycFilesInRoot(const QString& root,
 
         const QString path = entry.absoluteFilePath();
         const QStringList paths{path};
-        // .pyc/.pyo are A-level cache files — recycle bin for safety.
-        bool ok = WinApi::sendToRecycleBin(paths);
+        // .pyc/.pyo are A-level cache files — permanent delete.
+        bool ok = WinApi::deletePermanent(paths);
         if (ok)
             ++deleted;
         else
@@ -175,8 +172,8 @@ void CleanupWorker::cleanLargeArchivesInRoot(const QString& root,
 
         const QString path = entry.absoluteFilePath();
         const QStringList paths{path};
-        // Large archives are B-level — recycle bin for safety.
-        bool ok = WinApi::sendToRecycleBin(paths);
+        // Large archives are B-level — permanent delete.
+        bool ok = WinApi::deletePermanent(paths);
         if (ok)
             ++deleted;
         else
@@ -219,7 +216,7 @@ void CleanupWorker::cleanTarget(const CleanupTarget& target,
         return;
     }
 
-    // Real paths — delete via WinApi (recycle bin or permanent, by danger).
+    // Real paths — permanent delete (direct, bypass recycle bin).
     const QFileInfo info(target.path);
     if (!info.exists()) {
         skipped = 1;
@@ -228,15 +225,7 @@ void CleanupWorker::cleanTarget(const CleanupTarget& target,
 
     freed = target.size;
     const QStringList paths{target.path};
-    bool ok = false;
-
-    if (usePermanentDelete(target.danger)) {
-        // S-level: permanent delete (system temp/cache).
-        ok = WinApi::deletePermanent(paths);
-    } else {
-        // A/B-level: send to recycle bin for user safety.
-        ok = WinApi::sendToRecycleBin(paths);
-    }
+    bool ok = WinApi::deletePermanent(paths);
 
     if (ok && !QFileInfo::exists(target.path)) {
         deleted = 1;
@@ -268,19 +257,11 @@ void CleanupWorker::cleanLargeFile(const LargeFile& lf,
 
     if (info.isFile()) {
         freed = info.size();
-        // Large files default to B-level — recycle bin for safety.
-        if (lf.danger == DangerLevel::S) {
-            ok = WinApi::deletePermanent(paths);
-        } else {
-            ok = WinApi::sendToRecycleBin(paths);
-        }
+        // Large files — permanent delete (direct, bypass recycle bin).
+        ok = WinApi::deletePermanent(paths);
     } else if (info.isDir()) {
         freed = dirSize(lf.path);
-        if (lf.danger == DangerLevel::S) {
-            ok = WinApi::deletePermanent(paths);
-        } else {
-            ok = WinApi::sendToRecycleBin(paths);
-        }
+        ok = WinApi::deletePermanent(paths);
     }
 
     if (ok && !QFileInfo::exists(lf.path)) {
@@ -359,7 +340,7 @@ void CleanupWorker::run()
                 cleanLargeFile(*matched, d, s, f);
             } else {
                 // No matching LargeFile — clean directly using B-level
-                // defaults (recycle bin).
+                // defaults (permanent delete).
                 LargeFile lf;
                 lf.path = item.path;
                 lf.name = info.fileName();

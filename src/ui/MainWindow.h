@@ -177,6 +177,7 @@ private:
                      QString& names, QString& more) const;
     void recycleSelected();
     void deletePermanentSelected();
+    void deletePermanentAsync(const std::vector<std::shared_ptr<FileNode>>& nodes);
     void afterDelete(const std::vector<std::shared_ptr<FileNode>>& nodes);
     void recomputeSizes(std::shared_ptr<FileNode> node);
     std::shared_ptr<FileNode> findNodeByPath(const QString& path) const;

@@ -28,6 +28,8 @@
 #include <QStyle>
 #include <QTabWidget>
 #include <QTimer>
+#include <QProgressDialog>
+#include <QtConcurrent>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
@@ -1354,14 +1356,46 @@ void MainWindow::recycleSelected()
     for (const auto& n : nodes)
         paths << n->path;
 
-    bool ok = WinApi::sendToRecycleBin(paths);
-    if (ok) {
-        afterDelete(nodes);
-        m_statusLabel->setText(I18n::tr("status.moved_recycle", QMap<QString, QString>{
-            {"n", QString::number(static_cast<int>(nodes.size()))}}));
-    } else {
-        QMessageBox::warning(this, APP_NAME, I18n::tr("dialog.delete.failed"));
-    }
+    // Run in background to keep UI responsive for large selections.
+    const int n = static_cast<int>(nodes.size());
+    auto* progress = new QProgressDialog(
+        I18n::tr("dialog.recycle.progress", QMap<QString, QString>{{"n", QString::number(n)}}),
+        QString(), 0, 0, this);
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setWindowTitle(I18n::tr("dialog.recycle.title"));
+    progress->setCancelButton(nullptr);
+    progress->setMinimumDuration(0);
+    progress->show();
+
+    auto* watcher = new QFutureWatcher<bool>(this);
+    auto nodeCopy = nodes;
+    connect(watcher, &QFutureWatcher<bool>::finished, this,
+            [this, nodeCopy, n, progress, watcher]() {
+                progress->deleteLater();
+                const bool ok = watcher->result();
+                watcher->deleteLater();
+                if (ok) {
+                    afterDelete(nodeCopy);
+                    if (m_root)
+                        updateDiskFreeLabel(m_root->path);
+                    m_statusLabel->setText(I18n::tr("status.moved_recycle",
+                        QMap<QString, QString>{{"n", QString::number(n)}}));
+                } else {
+                    // Recycle bin may fail for very large files or long paths.
+                    // Offer permanent delete as a fallback.
+                    auto reply = QMessageBox::question(this,
+                        I18n::tr("dialog.recycle.fallback_title"),
+                        I18n::tr("dialog.recycle.fallback_body"),
+                        QMessageBox::Yes | QMessageBox::Cancel,
+                        QMessageBox::Cancel);
+                    if (reply == QMessageBox::Yes)
+                        deletePermanentAsync(nodeCopy);
+                }
+            });
+
+    watcher->setFuture(QtConcurrent::run([paths]() -> bool {
+        return WinApi::sendToRecycleBin(paths);
+    }));
 }
 
 void MainWindow::deletePermanentSelected()
@@ -1389,18 +1423,48 @@ void MainWindow::deletePermanentSelected()
     if (reply != QMessageBox::Yes)
         return;
 
+    deletePermanentAsync(nodes);
+}
+
+void MainWindow::deletePermanentAsync(
+    const std::vector<std::shared_ptr<FileNode>>& nodes)
+{
     QStringList paths;
     for (const auto& n : nodes)
         paths << n->path;
 
-    bool ok = WinApi::deletePermanent(paths);
-    if (ok) {
-        afterDelete(nodes);
-        m_statusLabel->setText(I18n::tr("status.deleted", QMap<QString, QString>{
-            {"n", QString::number(static_cast<int>(nodes.size()))}}));
-    } else {
-        QMessageBox::warning(this, APP_NAME, I18n::tr("dialog.delete.failed"));
-    }
+    const int n = static_cast<int>(nodes.size());
+    auto* progress = new QProgressDialog(
+        I18n::tr("dialog.delete.progress", QMap<QString, QString>{{"n", QString::number(n)}}),
+        QString(), 0, 0, this);
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setWindowTitle(I18n::tr("dialog.delete.title"));
+    progress->setCancelButton(nullptr);
+    progress->setMinimumDuration(0);
+    progress->show();
+
+    auto* watcher = new QFutureWatcher<bool>(this);
+    auto nodeCopy = nodes;
+    connect(watcher, &QFutureWatcher<bool>::finished, this,
+            [this, nodeCopy, n, progress, watcher]() {
+                progress->deleteLater();
+                const bool ok = watcher->result();
+                watcher->deleteLater();
+                if (ok) {
+                    afterDelete(nodeCopy);
+                    if (m_root)
+                        updateDiskFreeLabel(m_root->path);
+                    m_statusLabel->setText(I18n::tr("status.deleted",
+                        QMap<QString, QString>{{"n", QString::number(n)}}));
+                } else {
+                    QMessageBox::warning(this, APP_NAME,
+                        I18n::tr("dialog.delete.failed"));
+                }
+            });
+
+    watcher->setFuture(QtConcurrent::run([paths]() -> bool {
+        return WinApi::deletePermanent(paths);
+    }));
 }
 
 std::shared_ptr<FileNode> MainWindow::findNodeByPath(const QString& path) const
@@ -1865,11 +1929,9 @@ void MainWindow::onCleanupProgress(const QString& label)
 void MainWindow::onCleanupItemDone(const QString& /*key*/, int /*deleted*/,
                                    int /*skipped*/, qint64 /*freed*/)
 {
-    if (m_root) {
-        updateDiskFreeLabel(m_root->path);
-        auto [free, used, total] = WinApi::getDiskFreeSpace(m_root->path);
-        m_cleanupPanel->updateFreeSpace(free, total);
-    }
+    // Intentionally no per-item disk-space query here: GetDiskFreeSpaceExW
+    // is synchronous I/O on the UI thread and causes freezing when many items
+    // are cleaned. Disk free space is updated once in onCleanupFinished.
 }
 
 void MainWindow::onCleanupFinished(int totalDeleted, int totalSkipped, qint64 totalFreed,

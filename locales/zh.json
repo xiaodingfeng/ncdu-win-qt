@@ -12,7 +12,7 @@
   "button.no": "否",
   "button.close": "关闭",
   "button.skip_heavy": "⚡ 快速扫描",
-  "tooltip.skip_heavy": "跳过依赖包、缓存和构建目录的详细扫描（仍会显示它们占用的空间），大幅提升扫描速度。取消勾选可查看每个文件。\n\n跳过的目录：node_modules、vendor、.git、__pycache__、.venv、target、.gradle、.idea、.next、.nuxt、.turbo、.parcel-cache、.cache 等",
+  "tooltip.skip_heavy": "跳过依赖包、缓存和构建目录的详细扫描（仍会显示它们占用的空间），大幅提升扫描速度。取消勾选可查看每个文件。\n\n跳过的目录：node_modules、vendor、.git、__pycache__、.venv、target、.gradle、.idea、.next、.nuxt、.turbo、.parcel-cache、.cache 等\n\nWinSxS 目录始终跳过详细扫描（防止内存过高导致闪退）。",
 
   "search.placeholder": "搜索（支持 * 模糊匹配）…",
 
@@ -81,8 +81,12 @@
   "dialog.recycle.title": "移至回收站",
   "dialog.recycle.body": "将 {n} 项移至回收站？\n\n{names}{more}\n\n可从回收站还原。",
   "dialog.recycle.more": "\n…以及其它 {n} 项",
+  "dialog.recycle.progress": "正在将 {n} 项移至回收站，请稍候…",
+  "dialog.recycle.fallback_title": "回收站操作失败",
+  "dialog.recycle.fallback_body": "部分项目无法移至回收站（可能因文件过大或路径过长）。是否改为永久删除？\n\n此操作不可撤销，数据将永久丢失。",
   "dialog.delete.title": "永久删除",
   "dialog.delete.body": "确定要永久删除 {n} 项吗？\n\n{names}{more}\n\n此操作不可撤销，数据将永久丢失。",
+  "dialog.delete.progress": "正在永久删除 {n} 项，请稍候…",
   "dialog.delete.warn_root": "拒绝删除顶层驱动器/文件夹。",
   "dialog.delete.failed": "部分项目无法删除。",
 
@@ -148,7 +152,7 @@
   "cleanup.scanning": "正在扫描可清理项…",
   "cleanup.scan_done": "发现 {size}，共 {count} 项",
   "cleanup.clean_title": "确认清理",
-  "cleanup.clean_body": "这将释放 {size} 空间，删除以下内容：\n\n{names}\n{more}\n\n使用中的文件将被跳过。是否继续？",
+  "cleanup.clean_body": "⚠️ 此操作为永久删除，不可复原！\n\n这将释放 {size} 空间，删除以下内容：\n\n{names}\n{more}\n\n使用中的文件将被跳过。是否继续？",
   "cleanup.clean_done": "已释放 {freed}（删除 {deleted}，跳过 {skipped}）",
   "cleanup.failed_title": "清理失败提示",
   "cleanup.failed_body": "以下项清理失败或部分跳过（可能是文件被占用或权限不足）：\n\n{items}",

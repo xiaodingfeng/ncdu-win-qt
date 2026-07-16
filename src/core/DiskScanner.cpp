@@ -16,7 +16,11 @@
 // directories that typically contain thousands of tiny files and are not
 // interesting to drill into at the individual file level. The total size is
 // still computed quickly without building child nodes.
-const QStringList DiskScanner::DEFAULT_SKIP_PATTERNS = {"node_modules"};
+const QStringList DiskScanner::DEFAULT_SKIP_PATTERNS = {
+    "node_modules",
+    "WinSxS"  // Windows component store — tens of thousands of hardlinks;
+              // recursing causes high CPU/memory and crashes.
+};
 
 // ---------------------------------------------------------------------------
 // Helpers (file-local)
@@ -83,6 +87,10 @@ void DiskScanner::setSkipHeavyDirs(bool skip)
         for (const auto& p : DEFAULT_SKIP_PATTERNS)
             m_skipSet.insert(p.toLower());
     }
+    // WinSxS must always be skipped — recursing into it causes high CPU,
+    // excessive memory and crashes. Its total size is still computed via
+    // computeDirSizeFast without building per-file nodes.
+    m_skipSet.insert(QStringLiteral("winsxs"));
 }
 
 void DiskScanner::cancel()

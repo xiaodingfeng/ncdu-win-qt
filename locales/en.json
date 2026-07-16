@@ -12,7 +12,7 @@
   "button.no": "No",
   "button.close": "Close",
   "button.skip_heavy": "⚡ Fast scan",
-  "tooltip.skip_heavy": "Skip detailed scanning of dependency, cache, and build directories (their sizes are still shown). Much faster. Uncheck to see every file.\n\nSkipped directories: node_modules, vendor, .git, __pycache__, .venv, target, .gradle, .idea, .next, .nuxt, .turbo, .parcel-cache, .cache, etc.",
+  "tooltip.skip_heavy": "Skip detailed scanning of dependency, cache, and build directories (their sizes are still shown). Much faster. Uncheck to see every file.\n\nSkipped directories: node_modules, vendor, .git, __pycache__, .venv, target, .gradle, .idea, .next, .nuxt, .turbo, .parcel-cache, .cache, etc.\n\nWinSxS is always skipped (prevents high memory and crashes).",
 
   "search.placeholder": "Search (* for fuzzy)…",
 
@@ -81,8 +81,12 @@
   "dialog.recycle.title": "Move to Recycle Bin",
   "dialog.recycle.body": "Move {n} item(s) to the Recycle Bin?\n\n{names}{more}\n\nThis can be undone from the Recycle Bin.",
   "dialog.recycle.more": "\n…and {n} more",
+  "dialog.recycle.progress": "Moving {n} item(s) to Recycle Bin, please wait…",
+  "dialog.recycle.fallback_title": "Recycle Bin Failed",
+  "dialog.recycle.fallback_body": "Some items could not be moved to the Recycle Bin (possibly due to file size or path length). Would you like to permanently delete them instead?\n\nThis cannot be undone. The data will be lost forever.",
   "dialog.delete.title": "Delete permanently",
   "dialog.delete.body": "PERMANENTLY delete {n} item(s)?\n\n{names}{more}\n\nThis cannot be undone. The data will be lost forever.",
+  "dialog.delete.progress": "Permanently deleting {n} item(s), please wait…",
   "dialog.delete.warn_root": "Refusing to delete a top-level drive/folder.",
   "dialog.delete.failed": "One or more items could not be deleted.",
 
@@ -147,7 +151,7 @@
   "cleanup.scanning": "Scanning for cleanable items…",
   "cleanup.scan_done": "Found {size} in {count} items",
   "cleanup.clean_title": "Confirm Cleanup",
-  "cleanup.clean_body": "This will free up {size} by deleting:\n\n{names}\n{more}\n\nFiles in use will be skipped. Continue?",
+  "cleanup.clean_body": "⚠️ PERMANENT deletion — cannot be undone!\n\nThis will free up {size} by deleting:\n\n{names}\n{more}\n\nFiles in use will be skipped. Continue?",
   "cleanup.clean_done": "Freed {freed} (deleted {deleted}, skipped {skipped})",
   "cleanup.failed_title": "Cleanup failed",
   "cleanup.failed_body": "The following items failed to clean or were partly skipped, possibly because files are in use or permissions are insufficient:\n\n{items}",

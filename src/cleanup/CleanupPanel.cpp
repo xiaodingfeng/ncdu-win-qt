@@ -470,7 +470,8 @@ void CleanupPanel::loadTargets(const std::vector<CleanupTarget>& targets,
     }
 
     for (const auto& lf : largeFiles) {
-        if (lf.danger == DangerLevel::D)
+        // C-level (system) and D-level (user data) are hidden from large files.
+        if (lf.danger == DangerLevel::D || lf.danger == DangerLevel::C)
             continue;
         addLargeFile(lf);
     }
