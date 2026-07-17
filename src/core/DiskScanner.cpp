@@ -101,19 +101,19 @@ void DiskScanner::cancel()
 void DiskScanner::run()
 {
     if (!QFileInfo::exists(m_rootPath)) {
-        emit error("Path does not exist: " + m_rootPath);
+        emit error("disk.err.path_not_found", {{"path", m_rootPath}});
         return;
     }
     try {
         auto root = scanRoot(m_rootPath);
         if (m_cancel) {
-            emit error("cancelled");
+            emit error("scanner.err.cancelled", {});
             return;
         }
         root->sortBySizeDesc();
         emit finishedTree(root);
     } catch (...) {
-        emit error("Scan failed");
+        emit error("disk.err.scan_failed", {});
     }
 }
 
@@ -227,7 +227,7 @@ std::shared_ptr<FileNode> DiskScanner::scanDirRecursive(const QString& path)
     if (m_cancel)
         return node;
 
-    emit progress(path);
+    emit progress("disk.progress.scanning", {{"path", path}});
 
     const QString search = makeSearchPattern(path);
     WIN32_FIND_DATAW fd;
@@ -303,7 +303,7 @@ std::shared_ptr<FileNode> DiskScanner::scanDirRecursive(const QString& path)
 std::shared_ptr<FileNode> DiskScanner::scanRoot(const QString& path)
 {
     auto root = makeDirNode(path, true);
-    emit progress(path);
+    emit progress("disk.progress.scanning", {{"path", path}});
 
     const QString search = makeSearchPattern(path);
     WIN32_FIND_DATAW fd;

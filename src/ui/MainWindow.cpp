@@ -62,6 +62,7 @@
 #include "BreadcrumbBar.h"
 #include "LegendBar.h"
 #include "CleanupPanel.h"
+#include "MftScanner.h"
 #include "version.h"
 
 Q_DECLARE_METATYPE(std::shared_ptr<FileNode>)
@@ -190,7 +191,10 @@ MainWindow::~MainWindow()
 void MainWindow::closeEvent(QCloseEvent* e)
 {
     if (m_scanner) {
-        m_scanner->cancel();
+        if (auto* ds = dynamic_cast<DiskScanner*>(m_scanner))
+            ds->cancel();
+        else if (auto* ms = dynamic_cast<MftScanner*>(m_scanner))
+            ms->cancel();
         m_scanner->wait(3000);
     }
     if (m_cleanupScanner) {
@@ -602,13 +606,19 @@ void MainWindow::onBrowse()
 
 void MainWindow::startScan(const QString& path)
 {
+    // Cancel and wait for any in-flight scanner before starting a new one.
+    // The old scanner is scheduled for deletion via deleteLater (connected
+    // to QThread::finished when the scanner was created), so we just drop
+    // our pointer here — do NOT delete it manually.
     if (m_scanner) {
-        m_scanner->cancel();
+        if (auto* ds = dynamic_cast<DiskScanner*>(m_scanner))
+            ds->cancel();
+        else if (auto* ms = dynamic_cast<MftScanner*>(m_scanner))
+            ms->cancel();
         if (!m_scanner->wait(100)) {
             m_statusLabel->setText(I18n::tr("status.cancelling"));
             return;
         }
-        delete m_scanner;
         m_scanner = nullptr;
     }
 
@@ -621,21 +631,60 @@ void MainWindow::startScan(const QString& path)
     m_statusLabel->setText(I18n::tr("status.scanning", QMap<QString, QString>{{"path", path}}));
     m_tree->clear();
     m_treemap->clear();
+    // Cancel any in-flight search and clear search state so the old
+    // FileNode tree is fully released (search results hold shared_ptrs
+    // to nodes in the old tree and would otherwise keep it alive).
+    m_searchDebounceTimer->stop();
+    if (m_searchWatcher->isRunning())
+        m_searchWatcher->cancel();
+    m_searchResults.clear();
+    m_inSearchMode = false;
+    m_searchBox->clear();
     m_root.reset();
     m_current.reset();
     m_breadcrumb->setNode(nullptr);
 
-    m_scanner = new DiskScanner(path, this);
-    m_scanner->setSkipHeavyDirs(m_skipHeavyDirs);
-    connect(m_scanner, &DiskScanner::progress, this, &MainWindow::onScanProgress);
-    connect(m_scanner, &DiskScanner::finishedTree, this, &MainWindow::onScanDone);
-    connect(m_scanner, &DiskScanner::error, this, &MainWindow::onScanError);
-    m_scanner->start();
+    if (MftScanner::isSupported(path)) {
+        auto* scanner = new MftScanner(path, this);
+        scanner->setSkipHeavyDirs(m_skipHeavyDirs);
+        // Auto-delete the scanner once its run() returns. This is the Qt-
+        // recommended way to manage QThread lifetimes and prevents the
+        // memory leak where each completed scan left a scanner object
+        // (holding its internal entries/sizes maps) alive forever.
+        connect(scanner, &QThread::finished, scanner, &QObject::deleteLater);
+        connect(scanner, &MftScanner::progress, this, &MainWindow::onScanProgress);
+        connect(scanner, &MftScanner::finishedTree, this, &MainWindow::onScanDone);
+        connect(scanner, &MftScanner::error, this, &MainWindow::onScanError);
+        m_scanner = scanner;
+        m_scanner->start();
+    } else {
+        auto* scanner = new DiskScanner(path, this);
+        scanner->setSkipHeavyDirs(m_skipHeavyDirs);
+        connect(scanner, &QThread::finished, scanner, &QObject::deleteLater);
+        connect(scanner, &DiskScanner::progress, this, &MainWindow::onScanProgress);
+        connect(scanner, &DiskScanner::finishedTree, this, &MainWindow::onScanDone);
+        connect(scanner, &DiskScanner::error, this, &MainWindow::onScanError);
+        m_scanner = scanner;
+        m_scanner->start();
+    }
 }
 
-void MainWindow::onScanProgress(const QString& path)
+void MainWindow::onScanProgress(const QString& key, const QMap<QString, QString>& args)
 {
-    m_statusLabel->setText(I18n::tr("status.scanning", QMap<QString, QString>{{"path", path}}));
+    // disk.progress.scanning / mft.progress.* — translate and show in status bar.
+    // For path-style progress, use the unified "scanning {path}" template so the
+    // status bar reads naturally regardless of which scanner emitted it.
+    if (key == QLatin1String("disk.progress.scanning")) {
+        m_statusLabel->setText(I18n::tr("status.scanning", args));
+    } else if (key == QLatin1String("mft.progress.enumerating_usn")
+               || key == QLatin1String("mft.progress.reading_mft")
+               || key == QLatin1String("mft.progress.building_tree")) {
+        // Generic in-progress message; the i18n value itself is a verb phrase.
+        m_statusLabel->setText(I18n::tr(key, args));
+    } else {
+        // Records-scanned / mft-parse milestones: translate verbatim.
+        m_statusLabel->setText(I18n::tr(key, args));
+    }
 }
 
 void MainWindow::onScanDone(std::shared_ptr<FileNode> root)
@@ -660,17 +709,19 @@ void MainWindow::onScanDone(std::shared_ptr<FileNode> root)
     startCleanupScan(root->path);
 }
 
-void MainWindow::onScanError(const QString& msg)
+void MainWindow::onScanError(const QString& key, const QMap<QString, QString>& args)
 {
     m_scanner = nullptr;
     m_scanBtn->setVisible(true);
     m_cancelBtn->setVisible(false);
     m_progress->setVisible(false);
-    if (msg.toLower().contains("cancelled")) {
+    if (key == QLatin1String("scanner.err.cancelled")) {
         m_statusLabel->setText(I18n::tr("status.cancelled"));
         if (!m_lastScanPath.isEmpty())
             updateDiskFreeLabel(m_lastScanPath);
     } else {
+        // Translate the scanner error key into a user-facing message.
+        QString msg = I18n::tr(key, args);
         m_statusLabel->setText(I18n::tr("status.scan_failed", QMap<QString, QString>{{"msg", msg}}));
         QMessageBox::warning(this, APP_NAME,
             I18n::tr("msg.scan_failed", QMap<QString, QString>{{"msg", msg}}));
@@ -680,7 +731,10 @@ void MainWindow::onScanError(const QString& msg)
 void MainWindow::onCancel()
 {
     if (m_scanner) {
-        m_scanner->cancel();
+        if (auto* ds = dynamic_cast<DiskScanner*>(m_scanner))
+            ds->cancel();
+        else if (auto* ms = dynamic_cast<MftScanner*>(m_scanner))
+            ms->cancel();
         m_statusLabel->setText(I18n::tr("status.cancelling"));
     }
 }
@@ -1749,7 +1803,6 @@ void MainWindow::startCleanupScan(const QString& scanPath)
             m_statusLabel->setText(I18n::tr("status.cancelling"));
             return;
         }
-        delete m_cleanupScanner;
         m_cleanupScanner = nullptr;
     }
 
@@ -1758,6 +1811,10 @@ void MainWindow::startCleanupScan(const QString& scanPath)
     m_largeFiles.clear();
 
     m_cleanupScanner = new CleanupScanner(scanPath, m_root, this);
+    // Auto-delete the cleanup scanner once its run() returns (same pattern
+    // as the main scanner — prevents leak on every rescan).
+    connect(m_cleanupScanner, &QThread::finished,
+            m_cleanupScanner, &QObject::deleteLater);
     connect(m_cleanupScanner, &CleanupScanner::targetScanned,
             this, &MainWindow::onCleanupTargetScanned);
     connect(m_cleanupScanner, &CleanupScanner::largeFileFound,
@@ -1903,7 +1960,6 @@ void MainWindow::onCleanTargets(
             m_statusLabel->setText(I18n::tr("status.cancelling"));
             return;
         }
-        delete m_cleanupWorker;
         m_cleanupWorker = nullptr;
     }
 
@@ -1915,6 +1971,8 @@ void MainWindow::onCleanTargets(
         refs.push_back({type, key, path});
 
     m_cleanupWorker = new CleanupWorker(refs, m_cleanupTargets, m_largeFiles, this);
+    connect(m_cleanupWorker, &QThread::finished,
+            m_cleanupWorker, &QObject::deleteLater);
     connect(m_cleanupWorker, &CleanupWorker::progress, this, &MainWindow::onCleanupProgress);
     connect(m_cleanupWorker, &CleanupWorker::itemDone, this, &MainWindow::onCleanupItemDone);
     connect(m_cleanupWorker, &CleanupWorker::finished, this, &MainWindow::onCleanupFinished);

@@ -256,5 +256,27 @@
   "cleanup.a_delivery_opt": "Delivery Optimization Cache",
   "cleanup.remark_a_delivery_opt": "Windows update delivery cache, safe to clear",
   "cleanup.a_shader_cache": "DirectX Shader Cache",
-  "cleanup.remark_a_shader_cache": "GPU compiled shader cache, can be regenerated"
+  "cleanup.remark_a_shader_cache": "GPU compiled shader cache, can be regenerated",
+
+  "scanner.err.cancelled": "Scan cancelled",
+
+  "mft.progress.records_scanned": "Scanning MFT: {count} records…",
+  "mft.progress.total_records": "Total MFT records: {count}",
+  "mft.progress.mft_parse": "Parsing MFT: {valid} valid, {data} with $DATA, {nonzero} non-zero of {total}",
+  "mft.progress.enumerating_usn": "Enumerating USN journal…",
+  "mft.progress.reading_mft": "Reading MFT for file sizes…",
+  "mft.progress.building_tree": "Building tree…",
+
+  "mft.warn.privilege_failed": "Warning: failed to enable SeBackupPrivilege ({error}). Reading $MFT may fail. Run as Administrator.",
+  "mft.warn.cannot_read_mft": "Warning: cannot read $MFT ({error}); sizes may be incomplete.",
+
+  "mft.err.path_not_found": "Path does not exist: {path}",
+  "mft.err.cannot_open_volume": "Cannot open volume: {path}",
+  "mft.err.usn_enum_failed": "USN enumeration failed: {error}",
+  "mft.err.cannot_get_volume_data": "Cannot get NTFS volume data",
+  "mft.err.scan_failed": "MFT scan failed",
+
+  "disk.progress.scanning": "Scanning {path} …",
+  "disk.err.path_not_found": "Path does not exist: {path}",
+  "disk.err.scan_failed": "Disk scan failed"
 }

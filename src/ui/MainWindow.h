@@ -23,6 +23,7 @@
 
 #include "FileNode.h"
 #include "DiskScanner.h"
+#include "MftScanner.h"
 #include "CleanupTarget.h"
 #include "CleanupScanner.h"
 #include "CleanupWorker.h"
@@ -56,9 +57,9 @@ private slots:
     void onBrowse();
     void onCancel();
     void onSkipToggled(bool checked);
-    void onScanProgress(const QString& path);
+    void onScanProgress(const QString& key, const QMap<QString, QString>& args);
     void onScanDone(std::shared_ptr<FileNode> root);
-    void onScanError(const QString& msg);
+    void onScanError(const QString& key, const QMap<QString, QString>& args);
 
     // Navigation
     void onItemDoubleClicked(QTreeWidgetItem* item, int col);
@@ -98,7 +99,7 @@ private:
     // ---- State ----
     std::shared_ptr<FileNode> m_root;
     std::shared_ptr<FileNode> m_current;
-    DiskScanner* m_scanner = nullptr;
+    QThread* m_scanner = nullptr;
     CleanupScanner* m_cleanupScanner = nullptr;
     CleanupWorker* m_cleanupWorker = nullptr;
     QString m_searchText;

@@ -1,13 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(NcduWin VERSION 1.0.1 LANGUAGES CXX)
+project(NcduWin VERSION 1.0.2 LANGUAGES CXX)
 
 # Set NcduWin as the default startup target in Visual Studio
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT NcduWin)
 
 # ---- Single source of truth for app metadata ----
 set(APP_NAME        "NcduWin")
-set(APP_VERSION     "1.0.1")
+set(APP_VERSION     "1.0.2")
 set(APP_HOMEPAGE    "https://ncduwin.fengzhengx.cn/")
 set(APP_SOURCE_URL  "https://github.com/xiaodingfeng/ncdu-win-qt")
 
@@ -58,10 +58,12 @@ file(REMOVE_RECURSE "${CMAKE_SOURCE_DIR}/src/.vs")
 set(SOURCES
     src/main.cpp
     src/core/DiskScanner.cpp
+    src/core/MftScanner.cpp
     src/core/FormatHelpers.cpp
     src/core/I18n.cpp
     src/core/Identify.cpp
     src/core/WinApi.cpp
+    src/core/Logger.cpp
     src/ui/MainWindow.cpp
     src/ui/SizeBarDelegate.cpp
     src/ui/TreemapWidget.cpp
@@ -139,4 +141,26 @@ if(Qt6Test_FOUND)
         target_link_libraries(test_scanner PRIVATE kernel32 advapi32)
     endif()
     add_test(NAME test_scanner COMMAND test_scanner)
+endif()
+
+# ---- Diagnostic CLI: compare DiskScanner vs MftScanner ----
+# Usage: compare_scanners.exe [path]
+# Builds even without Qt6Test (only needs Core + Concurrent).
+add_executable(compare_scanners
+    tests/compare_scanners.cpp
+    src/core/DiskScanner.cpp
+    src/core/MftScanner.cpp
+    src/core/FormatHelpers.cpp
+    src/core/Logger.cpp
+)
+target_include_directories(compare_scanners PRIVATE src src/core src/ui src/cleanup)
+target_link_libraries(compare_scanners PRIVATE Qt6::Core Qt6::Concurrent)
+if(WIN32)
+    target_link_libraries(compare_scanners PRIVATE shell32 shlwapi ole32 user32 kernel32 advapi32)
+    if(MSVC)
+        # Match NcduWin: embed the manifest that requests UAC elevation.
+        set_target_properties(compare_scanners PROPERTIES
+            LINK_FLAGS "/MANIFEST:EMBED /MANIFESTINPUT:\"${CMAKE_CURRENT_SOURCE_DIR}/app.manifest\" /MANIFESTUAC:NO"
+        )
+    endif()
 endif()
