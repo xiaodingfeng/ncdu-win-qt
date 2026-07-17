@@ -8,6 +8,7 @@
 #include <QThread>
 #include <QString>
 #include <QStringList>
+#include <QMap>
 #include <memory>
 #include <atomic>
 #include <set>
@@ -30,9 +31,11 @@ public:
     static const QStringList DEFAULT_SKIP_PATTERNS;
 
 signals:
-    void progress(const QString& path);
+    // key: i18n key (e.g. "disk.progress.scanning")
+    // args: placeholder values for I18n::tr(key, args)
+    void progress(const QString& key, const QMap<QString, QString>& args);
     void finishedTree(std::shared_ptr<FileNode> root);
-    void error(const QString& msg);
+    void error(const QString& key, const QMap<QString, QString>& args);
 
 protected:
     void run() override;

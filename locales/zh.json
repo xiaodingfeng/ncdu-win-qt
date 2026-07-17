@@ -257,5 +257,27 @@
   "cleanup.a_delivery_opt": "传递优化缓存",
   "cleanup.remark_a_delivery_opt": "Windows 更新传递缓存，可安全清理",
   "cleanup.a_shader_cache": "DirectX 着色器缓存",
-  "cleanup.remark_a_shader_cache": "GPU 编译的着色器缓存，可重新生成"
+  "cleanup.remark_a_shader_cache": "GPU 编译的着色器缓存，可重新生成",
+
+  "scanner.err.cancelled": "扫描已取消",
+
+  "mft.progress.records_scanned": "正在扫描 MFT：已扫描 {count} 条记录…",
+  "mft.progress.total_records": "MFT 记录总数：{count}",
+  "mft.progress.mft_parse": "解析 MFT：{total} 条中有效 {valid}、含 $DATA {data}、非零 {nonzero}",
+  "mft.progress.enumerating_usn": "正在枚举 USN 日志…",
+  "mft.progress.reading_mft": "正在读取 MFT 获取文件大小…",
+  "mft.progress.building_tree": "正在构建目录树…",
+
+  "mft.warn.privilege_failed": "警告：启用 SeBackupPrivilege 失败（{error}）。直接读取 $MFT 可能失败，请以管理员身份运行。",
+  "mft.warn.cannot_read_mft": "警告：无法读取 $MFT（{error}），文件大小可能不完整。",
+
+  "mft.err.path_not_found": "路径不存在：{path}",
+  "mft.err.cannot_open_volume": "无法打开卷：{path}",
+  "mft.err.usn_enum_failed": "USN 枚举失败：{error}",
+  "mft.err.cannot_get_volume_data": "无法获取 NTFS 卷数据",
+  "mft.err.scan_failed": "MFT 扫描失败",
+
+  "disk.progress.scanning": "正在扫描 {path} …",
+  "disk.err.path_not_found": "路径不存在：{path}",
+  "disk.err.scan_failed": "磁盘扫描失败"
 }
