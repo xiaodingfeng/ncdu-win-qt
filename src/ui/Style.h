@@ -397,10 +397,11 @@ QMenuBar::item {
     color: @TEXT;
 }
 QMenuBar::item:selected {
-    background-color: @SURFACE_ALT;
+    background-color: @PRIMARY_SOFT;
+    color: @TEXT;
 }
 QMenuBar::item:pressed {
-    background-color: @PRIMARY_SOFT;
+    background-color: @SURFACE_DEEP;
 }
 
 /* ---- top bar ---- */
@@ -742,9 +743,10 @@ QMenu::item {
     padding: 6px 24px 6px 14px;
     border-radius: 6px;
     color: @TEXT;
+    background-color: transparent;
 }
-QMenu::item:selected, QMenu::item:hover {
-    background-color: @SURFACE_ALT;
+QMenu::item:selected {
+    background-color: @PRIMARY_SOFT;
     color: @TEXT;
 }
 QMenu::separator {
@@ -766,22 +768,26 @@ QLabel#about-title {
 )");
 
     // Inject the active palette. Each token maps to one palette entry.
-    s.replace(QStringLiteral("@BG"),                    QString::fromLatin1(C::BG()));
-    s.replace(QStringLiteral("@SURFACE"),               QString::fromLatin1(C::SURFACE()));
+    // IMPORTANT: Longer tokens MUST be replaced before shorter ones that are
+    // their prefixes (e.g. @SURFACE_ALT before @SURFACE), otherwise the
+    // shorter replace corrupts the longer token (e.g. @SURFACE inside
+    // @SURFACE_ALT becomes #RRGGBB_ALT, producing invalid color names).
     s.replace(QStringLiteral("@SURFACE_ALT"),           QString::fromLatin1(C::SURFACE_ALT()));
     s.replace(QStringLiteral("@SURFACE_DEEP"),          QString::fromLatin1(C::SURFACE_DEEP()));
-    s.replace(QStringLiteral("@TEXT"),                  QString::fromLatin1(C::FG()));
+    s.replace(QStringLiteral("@SURFACE"),               QString::fromLatin1(C::SURFACE()));
     s.replace(QStringLiteral("@TEXT_SEC"),              QString::fromLatin1(C::TEXT_SEC()));
     s.replace(QStringLiteral("@TEXT_MUTED"),            QString::fromLatin1(C::TEXT_MUTED()));
-    s.replace(QStringLiteral("@PRIMARY"),               QString::fromLatin1(C::PRIMARY()));
+    s.replace(QStringLiteral("@TEXT"),                  QString::fromLatin1(C::FG()));
     s.replace(QStringLiteral("@PRIMARY_HOVER"),         QString::fromLatin1(C::PRIMARY_HOVER()));
     s.replace(QStringLiteral("@PRIMARY_SOFT"),          QString::fromLatin1(C::PRIMARY_SOFT()));
+    s.replace(QStringLiteral("@PRIMARY"),               QString::fromLatin1(C::PRIMARY()));
+    s.replace(QStringLiteral("@BORDER_LIGHT"),          QString::fromLatin1(C::BORDER_LIGHT()));
+    s.replace(QStringLiteral("@BORDER"),                QString::fromLatin1(C::BORDER()));
+    s.replace(QStringLiteral("@SCROLLBAR_THUMB_HOVER"), QString::fromLatin1(C::SCROLLBAR_THUMB_HOVER()));
+    s.replace(QStringLiteral("@SCROLLBAR_THUMB"),       QString::fromLatin1(C::SCROLLBAR_THUMB()));
+    s.replace(QStringLiteral("@BG"),                    QString::fromLatin1(C::BG()));
     s.replace(QStringLiteral("@ACCENT"),                QString::fromLatin1(C::ACCENT()));
     s.replace(QStringLiteral("@DANGER"),                QString::fromLatin1(C::DANGER()));
-    s.replace(QStringLiteral("@BORDER"),                QString::fromLatin1(C::BORDER()));
-    s.replace(QStringLiteral("@BORDER_LIGHT"),          QString::fromLatin1(C::BORDER_LIGHT()));
-    s.replace(QStringLiteral("@SCROLLBAR_THUMB"),       QString::fromLatin1(C::SCROLLBAR_THUMB()));
-    s.replace(QStringLiteral("@SCROLLBAR_THUMB_HOVER"), QString::fromLatin1(C::SCROLLBAR_THUMB_HOVER()));
     return s;
 }
 
