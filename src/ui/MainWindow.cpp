@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include <QApplication>
+#include <QStyleHints>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCheckBox>
@@ -47,8 +48,13 @@
 #include <QClipboard>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QVersionNumber>
 
 #include <algorithm>
+#include <stack>
+#include <unordered_set>
 #include <set>
 #include <QtConcurrent>
 
@@ -174,6 +180,17 @@ MainWindow::MainWindow(QWidget* parent)
     populatePathCombo();
     reflectSortIndicator();
 
+    // Follow the OS color scheme at runtime when the user picked "system".
+    // Switching the Windows light/dark setting then re-applies the palette
+    // without restarting the app.
+    connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged,
+            this, [this]() {
+                if (Theme::current() == QStringLiteral("system")) {
+                    Theme::applyEffective();
+                    refreshTheme();
+                }
+            });
+
     // Auto-scan home dir on first show for instant value.
     QTimer::singleShot(120, this, [this]() {
         QString path = m_pathCombo->currentText().trimmed();
@@ -232,7 +249,7 @@ void MainWindow::buildUI()
 
         auto* logo = new QLabel(QStringLiteral("\u25CD"));  // ◍
         logo->setStyleSheet(QStringLiteral("color: %1; font-size: 22px; font-weight: 700;")
-                                .arg(QString::fromLatin1(C::PRIMARY)));
+                                .arg(QString::fromLatin1(C::PRIMARY())));
         auto* title = new QLabel(APP_NAME);
         title->setObjectName("title");
         auto* sub = new QLabel(I18n::tr("app.subtitle"));
@@ -327,6 +344,8 @@ void MainWindow::buildUI()
         m_tree->setSelectionMode(QTreeWidget::ExtendedSelection);
         m_tree->setSortingEnabled(false);
         m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
+        m_tree->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        m_tree->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         m_tree->setFocus();
         setHeaderLabels();
 
@@ -479,6 +498,18 @@ void MainWindow::buildMenu()
         connect(act, &QAction::triggered, this, [this, code]() { switchLanguage(code); });
     }
 
+    // --- Theme ---
+    auto* themeMenu = mb->addMenu(I18n::tr("menu.theme"));
+    auto* themeGroup = new QActionGroup(this);
+    themeGroup->setExclusive(true);
+    for (const auto& code : {QStringLiteral("light"), QStringLiteral("dark"), QStringLiteral("system")}) {
+        auto* act = themeMenu->addAction(Theme::displayName(code));
+        act->setCheckable(true);
+        act->setChecked(code == Theme::current());
+        themeGroup->addAction(act);
+        connect(act, &QAction::triggered, this, [this, code]() { switchTheme(code); });
+    }
+
     // --- Help ---
     auto* helpMenu = mb->addMenu(I18n::tr("menu.help"));
     m_actions["help.about"] = helpMenu->addAction(I18n::tr("menu.help.about"));
@@ -487,8 +518,12 @@ void MainWindow::buildMenu()
     m_actions["help.homepage"] = helpMenu->addAction(I18n::tr("menu.help.documentation"));
     connect(m_actions["help.homepage"], &QAction::triggered, this, QOverload<>::of(&MainWindow::openHomepage));
 
-    m_actions["help.source"] = helpMenu->addAction(I18n::tr("menu.help.source"));
-    connect(m_actions["help.source"], &QAction::triggered, this, QOverload<>::of(&MainWindow::openSourceUrl));
+    helpMenu->addSeparator();
+
+    m_actions["help.check_update"] = helpMenu->addAction(I18n::tr("menu.help.check_update"));
+    connect(m_actions["help.check_update"], &QAction::triggered, this, &MainWindow::checkForUpdate);
+
+    m_nam = new QNetworkAccessManager(this);
 }
 
 // --------------------------------------------------------------------------- //
@@ -757,6 +792,11 @@ void MainWindow::navigateTo(std::shared_ptr<FileNode> node)
     populateList(node);
     m_treemap->setNode(node, m_showFiles, 1);
     updateStatusForCurrent();
+
+    // P1c: evict off-path subtrees to release memory. Only safe when no
+    // cleanup scan/worker is running (they hold m_rootNode and walk the
+    // full tree) and we're not in search mode (already cleared above).
+    evictOffPathSubtrees();
 }
 
 void MainWindow::goUp()
@@ -772,6 +812,111 @@ void MainWindow::refresh()
 {
     if (m_current)
         startScan(m_current->path);
+}
+
+// P1c: Evict off-path subtrees to release memory when navigating into a
+// deep node. Walks from m_root down to m_current; for each level, clears
+// the children vectors of siblings that are NOT on the active path. The
+// sibling nodes themselves remain in their parent's children vector (so
+// navigation/sort still work) — only their subtrees are released. If the
+// user navigates back to an evicted node, it shows as empty (F5 rescans).
+//
+// Safety: tryEvictSubtree first walks the subtree checking use_count() > 1
+// on every node. If ANY node is held externally (QTreeWidgetItem UserRole,
+// TreemapCell, search results, cleanup scanner), the whole subtree is left
+// untouched — no dangling references, no crashes.
+void MainWindow::evictOffPathSubtrees()
+{
+    if (!m_evictionEnabled || !m_root || !m_current || m_current == m_root)
+        return;
+    // Guard: never evict while a cleanup scan/worker is running — they
+    // hold m_rootNode and walk the full tree.
+    if (m_cleanupScanner || m_cleanupWorker)
+        return;
+    if (m_inSearchMode)
+        return;
+
+    // Build the set of nodes on the active path (m_current up to m_root).
+    std::set<FileNode*> activePath;
+    for (auto n = m_current; n; n = n->parent.lock()) {
+        activePath.insert(n.get());
+        if (n.get() == m_root.get())
+            break;
+    }
+    if (activePath.count(m_root.get()) == 0)
+        return;  // m_current is not under m_root — shouldn't happen, bail.
+
+    // Walk from root down along the active path. At each level, evict
+    // siblings' subtrees (off-path children).
+    auto cur = m_root;
+    while (cur && cur.get() != m_current.get()) {
+        std::shared_ptr<FileNode> nextOnPath;
+        for (auto& child : cur->children) {
+            if (!child)
+                continue;
+            if (activePath.count(child.get())) {
+                nextOnPath = child;  // descend into this one
+            } else {
+                tryEvictSubtree(child);
+            }
+        }
+        if (!nextOnPath)
+            break;  // active path broken — stop
+        cur = nextOnPath;
+    }
+}
+
+void MainWindow::tryEvictSubtree(std::shared_ptr<FileNode>& node)
+{
+    if (!node || !node->isDir())
+        return;
+
+    // Safety pass: walk the subtree via shared_ptr ref counts and verify every
+    // node's use_count == 1 (only held by its parent's children vector). The
+    // subtree root (`node`) is skipped — its use_count is >= 2 here (cur's
+    // children vector + the `child` ref in the caller's loop), which is
+    // expected. If ANY descendant has use_count > 1, something external
+    // (QTreeWidgetItem UserRole, TreemapCell, search results, cleanup scanner)
+    // holds a reference — abort to avoid dangling pointers.
+    bool safe = true;
+    std::stack<std::shared_ptr<FileNode>> verify;
+    for (auto& c : node->children) {
+        if (c) verify.push(c);
+    }
+    while (!verify.empty()) {
+        auto n = verify.top();
+        verify.pop();
+        if (!n) continue;
+        // use_count() == 1 means only the parent's children vector holds it.
+        // If > 1, something external (QTreeWidgetItem, TreemapCell, etc.)
+        // holds a reference — abort to avoid dangling pointers.
+        if (n.use_count() > 1) {
+            safe = false;
+            break;
+        }
+        for (auto& c : n->children) {
+            if (c) verify.push(c);
+        }
+    }
+    if (!safe)
+        return;
+
+    // Second pass: safe to evict. Clear each descendant's children vector
+    // and shrink_to_fit to actually release memory.
+    std::stack<std::shared_ptr<FileNode>> clear;
+    for (auto& c : node->children) {
+        if (c) clear.push(c);
+    }
+    while (!clear.empty()) {
+        auto n = clear.top();
+        clear.pop();
+        if (!n) continue;
+        for (auto& c : n->children) {
+            if (c) clear.push(c);
+        }
+        n->children.clear();
+        n->children.shrink_to_fit();
+    }
 }
 
 void MainWindow::toggleShowFiles()
@@ -903,7 +1048,7 @@ void MainWindow::populateList(std::shared_ptr<FileNode> node)
         auto* upItem = new QTreeWidgetItem(QStringList{
             I18n::tr("breadcrumb.parent"), QString(), QString(), QString(), QString(), QString()});
         upItem->setData(0, Qt::UserRole, QVariant::fromValue(parent));
-        upItem->setForeground(0, QColor(QString::fromLatin1(C::TEXT_SEC)));
+        upItem->setForeground(0, QColor(QString::fromLatin1(C::TEXT_SEC())));
         QFont f = upItem->font(0);
         f.setItalic(true);
         upItem->setFont(0, f);
@@ -926,31 +1071,31 @@ void MainWindow::populateList(std::shared_ptr<FileNode> node)
 
         item->setText(2, humanSize(c->size));
         item->setTextAlignment(2, Qt::AlignRight);
-        item->setForeground(2, QColor(QString::fromLatin1(C::TEXT_SEC)));
+        item->setForeground(2, QColor(QString::fromLatin1(C::TEXT_SEC())));
         item->setToolTip(2, I18n::tr("size.bytes", QMap<QString, QString>{{"n", withCommas(c->size)}}));
 
         double pct = total > 0 ? 100.0 * c->size / total : 0.0;
         item->setText(3, pct >= 0.05 ? QString::number(pct, 'f', 1) + "%" : QString());
         item->setTextAlignment(3, Qt::AlignRight);
-        item->setForeground(3, QColor(QString::fromLatin1(C::TEXT_SEC)));
+        item->setForeground(3, QColor(QString::fromLatin1(C::TEXT_SEC())));
 
         if (c->isDir())
             item->setText(4, humanCount(c->totalItems()));
         else
             item->setText(4, QStringLiteral("\u2014"));
         item->setTextAlignment(4, Qt::AlignRight);
-        item->setForeground(4, QColor(QString::fromLatin1(C::TEXT_MUTED)));
+        item->setForeground(4, QColor(QString::fromLatin1(C::TEXT_MUTED())));
 
         item->setText(5, I18n::tr(typeKey(c->name, c->isDir())));
-        item->setForeground(5, QColor(QString::fromLatin1(C::TEXT_MUTED)));
+        item->setForeground(5, QColor(QString::fromLatin1(C::TEXT_MUTED())));
 
-        if (!c->error.isEmpty())
-            item->setForeground(0, QColor(QString::fromLatin1(C::TEXT_MUTED)));
+        if (c->error != NodeError::None)
+            item->setForeground(0, QColor(QString::fromLatin1(C::TEXT_MUTED())));
         if (c->skipped) {
             QFont f = item->font(0);
             f.setItalic(true);
             item->setFont(0, f);
-            item->setForeground(0, QColor(QString::fromLatin1(C::TEXT_SEC)));
+            item->setForeground(0, QColor(QString::fromLatin1(C::TEXT_SEC())));
         }
 
         m_tree->addTopLevelItem(item);
@@ -1004,23 +1149,23 @@ void MainWindow::populateSearchList()
         }
         item->setText(1, relPath);
         item->setToolTip(1, c->path);
-        item->setForeground(1, QColor(QString::fromLatin1(C::TEXT_MUTED)));
+        item->setForeground(1, QColor(QString::fromLatin1(C::TEXT_MUTED())));
 
         // Column 2: Size
         item->setText(2, humanSize(c->size));
         item->setTextAlignment(2, Qt::AlignRight);
-        item->setForeground(2, QColor(QString::fromLatin1(C::TEXT_SEC)));
+        item->setForeground(2, QColor(QString::fromLatin1(C::TEXT_SEC())));
         item->setToolTip(2, I18n::tr("size.bytes", QMap<QString, QString>{{"n", withCommas(c->size)}}));
 
         // Column 5: Type
         item->setText(5, I18n::tr(typeKey(c->name, c->isDir())));
-        item->setForeground(5, QColor(QString::fromLatin1(C::TEXT_MUTED)));
+        item->setForeground(5, QColor(QString::fromLatin1(C::TEXT_MUTED())));
 
         if (c->skipped) {
             QFont f = item->font(0);
             f.setItalic(true);
             item->setFont(0, f);
-            item->setForeground(0, QColor(QString::fromLatin1(C::TEXT_SEC)));
+            item->setForeground(0, QColor(QString::fromLatin1(C::TEXT_SEC())));
         }
 
         m_tree->addTopLevelItem(item);
@@ -1052,31 +1197,29 @@ void MainWindow::onSearchDebounceTimeout()
         }
         const QString lowerQuery = hasWildcard ? QString() : q;
 
-        struct SearchHelper {
-            static void search(const std::shared_ptr<FileNode>& node,
-                               bool hasWildcard, const QRegularExpression& re,
-                               const QString& lowerQuery,
-                               std::vector<std::shared_ptr<FileNode>>& results,
-                               int& limit) {
-                if (!node || limit <= 0)
-                    return;
-                for (const auto& child : node->children) {
-                    if (limit <= 0)
-                        return;
-                    bool match = hasWildcard
-                        ? re.match(child->name).hasMatch()
-                        : child->name.toLower().contains(lowerQuery);
-                    if (match) {
-                        results.push_back(child);
-                        --limit;
-                    }
-                    if (child->isDir())
-                        search(child, hasWildcard, re, lowerQuery, results, limit);
+        // Iterative DFS (explicit node stack) — avoids C++ stack overflow on
+        // deeply nested directory trees. The limit check stays inside the loop.
+        std::stack<std::shared_ptr<FileNode>> pending;
+        pending.push(searchRoot);
+        while (!pending.empty() && limit > 0) {
+            auto n = pending.top();
+            pending.pop();
+            if (!n)
+                continue;
+            for (const auto& child : n->children) {
+                if (limit <= 0)
+                    break;
+                bool match = hasWildcard
+                    ? re.match(child->name).hasMatch()
+                    : child->name.toLower().contains(lowerQuery);
+                if (match) {
+                    results.push_back(child);
+                    --limit;
                 }
+                if (child->isDir())
+                    pending.push(child);
             }
-        };
-
-        SearchHelper::search(searchRoot, hasWildcard, re, lowerQuery, results, limit);
+        }
         return results;
     });
 
@@ -1101,18 +1244,28 @@ void MainWindow::collectSearchResults(const std::shared_ptr<FileNode>& node,
     }
     const QString lowerQuery = hasWildcard ? QString() : query.toLower();
 
-    for (const auto& child : node->children) {
-        if (limit <= 0)
-            return;
-        bool match = hasWildcard
-                         ? re.match(child->name).hasMatch()
-                         : child->name.toLower().contains(lowerQuery);
-        if (match) {
-            results.push_back(child);
-            --limit;
+    // Iterative DFS (explicit node stack) — avoids C++ stack overflow on
+    // deeply nested directory trees.
+    std::stack<std::shared_ptr<FileNode>> pending;
+    pending.push(node);
+    while (!pending.empty() && limit > 0) {
+        auto n = pending.top();
+        pending.pop();
+        if (!n)
+            continue;
+        for (const auto& child : n->children) {
+            if (limit <= 0)
+                break;
+            bool match = hasWildcard
+                             ? re.match(child->name).hasMatch()
+                             : child->name.toLower().contains(lowerQuery);
+            if (match) {
+                results.push_back(child);
+                --limit;
+            }
+            if (child->isDir())
+                pending.push(child);
         }
-        if (child->isDir())
-            collectSearchResults(child, query, results, limit);
     }
 }
 
@@ -1129,9 +1282,9 @@ QString MainWindow::buildRowTooltip(const std::shared_ptr<FileNode>& node) const
         lines << QString();
         lines << I18n::tr("properties.note") + ": " + I18n::tr("status.skipped");
     }
-    if (!node->error.isEmpty()) {
+    if (node->error != NodeError::None) {
         lines << QString();
-        lines << I18n::tr("properties.note") + ": " + node->error;
+        lines << I18n::tr("properties.note") + ": " + node->errorText();
     }
     return lines.join("\n");
 }
@@ -1670,7 +1823,7 @@ void MainWindow::showProperties(const std::shared_ptr<FileNode>& node)
 
     auto* title = new QLabel(node->name);
     title->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700; color: %1;")
-                             .arg(QString::fromLatin1(C::TEXT)));
+                             .arg(QString::fromLatin1(C::FG())));
     lay->addWidget(title);
     lay->addSpacing(4);
 
@@ -1681,7 +1834,7 @@ void MainWindow::showProperties(const std::shared_ptr<FileNode>& node)
         rlay->setSpacing(12);
         auto* lab = new QLabel(I18n::tr(labelKey));
         lab->setStyleSheet(QStringLiteral("color: %1; min-width: 90px;")
-                               .arg(QString::fromLatin1(C::TEXT_MUTED)));
+                               .arg(QString::fromLatin1(C::TEXT_MUTED())));
         auto* val = new QLabel(value);
         val->setWordWrap(true);
         val->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -1708,8 +1861,8 @@ void MainWindow::showProperties(const std::shared_ptr<FileNode>& node)
     QString desc = Identify::describe(node, [](const QString& key) { return I18n::tr(key); });
     if (!desc.isEmpty())
         addRow("properties.identify", desc);
-    if (!node->error.isEmpty())
-        addRow("properties.note", node->error);
+    if (node->error != NodeError::None)
+        addRow("properties.note", node->errorText());
 
     lay->addStretch(1);
     auto* btnRow = new QHBoxLayout;
@@ -1748,7 +1901,7 @@ void MainWindow::showAbout()
     auto* homepageLbl = new QLabel(
         QStringLiteral("<a href=\"%1\" style=\"color:%2;text-decoration:none;\">%3</a>")
             .arg(HOMEPAGE)
-            .arg(QString::fromLatin1(C::PRIMARY))
+            .arg(QString::fromLatin1(C::PRIMARY()))
             .arg(I18n::tr("about.homepage", QMap<QString, QString>{{"url", HOMEPAGE}})));
     homepageLbl->setOpenExternalLinks(true);
     homepageLbl->setWordWrap(true);
@@ -1757,7 +1910,7 @@ void MainWindow::showAbout()
     auto* srcLbl = new QLabel(
         QStringLiteral("<a href=\"%1\" style=\"color:%2;text-decoration:none;\">%3</a>")
             .arg(SOURCE_URL)
-            .arg(QString::fromLatin1(C::PRIMARY))
+            .arg(QString::fromLatin1(C::PRIMARY()))
             .arg(I18n::tr("about.source", QMap<QString, QString>{{"url", SOURCE_URL}})));
     srcLbl->setOpenExternalLinks(true);
     srcLbl->setWordWrap(true);
@@ -1765,7 +1918,7 @@ void MainWindow::showAbout()
 
     auto* thanks = new QLabel(I18n::tr("about.thanks"));
     thanks->setStyleSheet(QStringLiteral("color: %1; font-size: 11px;")
-                              .arg(QString::fromLatin1(C::TEXT_MUTED)));
+                              .arg(QString::fromLatin1(C::TEXT_MUTED())));
     thanks->setWordWrap(true);
     lay->addWidget(thanks);
 
@@ -1787,9 +1940,86 @@ void MainWindow::openHomepage()
     QDesktopServices::openUrl(QUrl(HOMEPAGE));
 }
 
-void MainWindow::openSourceUrl()
+void MainWindow::checkForUpdate()
 {
-    QDesktopServices::openUrl(QUrl(SOURCE_URL));
+    m_statusLabel->setText(I18n::tr("update.checking"));
+    QNetworkRequest req(QUrl(QString(HOMEPAGE) + QStringLiteral("version")));
+    req.setTransferTimeout(10000);
+    auto* reply = m_nam->get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            m_statusLabel->setText(QString());
+            QMessageBox msgBox(this);
+            msgBox.setIcon(QMessageBox::Warning);
+            msgBox.setWindowTitle(I18n::tr("update.check_failed"));
+            msgBox.setText(I18n::tr("update.check_failed_body",
+                QMap<QString, QString>{{"error", reply->errorString()}}));
+            msgBox.exec();
+            return;
+        }
+        QString remoteVer = QString::fromUtf8(reply->readAll()).trimmed();
+        QVersionNumber local = QVersionNumber::fromString(APP_VERSION);
+        QVersionNumber remote = QVersionNumber::fromString(remoteVer);
+        if (remote.isNull()) {
+            m_statusLabel->setText(QString());
+            QMessageBox msgBox(this);
+            msgBox.setIcon(QMessageBox::Warning);
+            msgBox.setWindowTitle(I18n::tr("update.check_failed"));
+            msgBox.setText(I18n::tr("update.check_failed_body",
+                QMap<QString, QString>{{"error", QStringLiteral("Invalid version response")}}));
+            msgBox.exec();
+            return;
+        }
+        m_statusLabel->setText(QString());
+        if (remote > local) {
+            QDialog dlg(this);
+            dlg.setWindowTitle(I18n::tr("update.new_title"));
+            dlg.setMinimumWidth(400);
+            auto* lay = new QVBoxLayout(&dlg);
+            lay->setContentsMargins(20, 20, 20, 16);
+            lay->setSpacing(10);
+
+            auto* body = new QLabel(I18n::tr("update.new_body",
+                QMap<QString, QString>{
+                    {"version", remoteVer},
+                    {"local", APP_VERSION},
+                }));
+            body->setWordWrap(true);
+            lay->addWidget(body);
+
+            auto* urlLbl = new QLabel(
+                QStringLiteral("<a href=\"%1\" style=\"color:%2;text-decoration:none;\">%3</a>")
+                    .arg(HOMEPAGE)
+                    .arg(QString::fromLatin1(C::PRIMARY()))
+                    .arg(I18n::tr("update.download_url",
+                        QMap<QString, QString>{{"url", HOMEPAGE}})));
+            urlLbl->setOpenExternalLinks(true);
+            urlLbl->setTextInteractionFlags(Qt::TextBrowserInteraction);
+            urlLbl->setWordWrap(true);
+            urlLbl->setCursor(Qt::PointingHandCursor);
+            lay->addWidget(urlLbl);
+
+            lay->addStretch(1);
+            auto* btnRow = new QHBoxLayout;
+            btnRow->addStretch(1);
+            auto* closeBtn = new QPushButton(I18n::tr("button.ok"));
+            closeBtn->setObjectName("primary");
+            closeBtn->setCursor(Qt::PointingHandCursor);
+            connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+            btnRow->addWidget(closeBtn);
+            lay->addLayout(btnRow);
+
+            dlg.exec();
+        } else {
+            QMessageBox msgBox(this);
+            msgBox.setIcon(QMessageBox::Information);
+            msgBox.setWindowTitle(I18n::tr("update.current"));
+            msgBox.setText(I18n::tr("update.current_body",
+                QMap<QString, QString>{{"version", APP_VERSION}}));
+            msgBox.exec();
+        }
+    });
 }
 
 // --------------------------------------------------------------------------- //
@@ -2049,6 +2279,31 @@ void MainWindow::switchLanguage(const QString& lang)
         return;
     I18n::setLanguage(lang);
     retranslateUI();
+}
+
+// --------------------------------------------------------------------------- //
+// Theme switching
+// --------------------------------------------------------------------------- //
+void MainWindow::switchTheme(const QString& code)
+{
+    if (code == Theme::current())
+        return;
+    Theme::set(code);           // persist + update g_currentTheme
+    refreshTheme();
+}
+
+void MainWindow::refreshTheme()
+{
+    // Re-apply the global stylesheet (loadQSS re-reads the active palette).
+    qApp->setStyleSheet(loadQSS());
+    // Panels with baked inline styles need to recompute them.
+    m_cleanupPanel->refreshTheme();
+    m_legend->refreshTheme();
+    // List/treemap items cache colors on the item, so rebuild them.
+    if (m_current) {
+        populateList(m_current);
+        m_treemap->setNode(m_current, m_showFiles, 1);
+    }
 }
 
 void MainWindow::retranslateUI()

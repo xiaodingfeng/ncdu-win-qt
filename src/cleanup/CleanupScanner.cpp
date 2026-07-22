@@ -1,10 +1,13 @@
 #include "CleanupScanner.h"
 
+#include "MemoryMonitor.h"
+
 #include <QDir>
 #include <QFileInfo>
 #include <QSet>
 #include <algorithm>
 #include <map>
+#include <stack>
 
 // ---------------------------------------------------------------------------
 // Default constants
@@ -116,14 +119,21 @@ qint64 CleanupScanner::computePathSize(const QString& path) const
     if (info.isFile())
         return info.size();
 
+    // Iterative traversal — avoids C++ stack overflow on deeply nested trees.
     qint64 total = 0;
-    QDir dir(path);
-    const auto entries = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
-    for (const auto& e : entries) {
-        if (e.isDir())
-            total += computePathSize(e.absoluteFilePath());
-        else
-            total += e.size();
+    std::stack<QString> pending;
+    pending.push(path);
+    while (!pending.empty()) {
+        const QString cur = pending.top();
+        pending.pop();
+        QDir dir(cur);
+        const auto entries = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const auto& e : entries) {
+            if (e.isDir())
+                pending.push(e.absoluteFilePath());
+            else
+                total += e.size();
+        }
     }
     return total;
 }
@@ -136,14 +146,21 @@ int CleanupScanner::countFiles(const QString& path) const
     if (info.isFile())
         return 1;
 
+    // Iterative traversal — avoids C++ stack overflow on deeply nested trees.
     int count = 0;
-    QDir dir(path);
-    const auto entries = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
-    for (const auto& e : entries) {
-        if (e.isDir())
-            count += countFiles(e.absoluteFilePath());
-        else
-            ++count;
+    std::stack<QString> pending;
+    pending.push(path);
+    while (!pending.empty()) {
+        const QString cur = pending.top();
+        pending.pop();
+        QDir dir(cur);
+        const auto entries = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const auto& e : entries) {
+            if (e.isDir())
+                pending.push(e.absoluteFilePath());
+            else
+                ++count;
+        }
     }
     return count;
 }
@@ -707,10 +724,14 @@ void CleanupScanner::scanTargetsFromTree(std::vector<CleanupTarget>& targets)
         return;
 
     // Build a path -> FileNode map by walking the tree iteratively.
+    // (Already iterative; added memory-pressure guard so we stop walking
+    // if RAM gets low — partial target sizing is preferable to a crash.)
     std::map<QString, std::shared_ptr<FileNode>> nodeMap;
     std::vector<std::shared_ptr<FileNode>> stack;
     stack.push_back(m_rootNode);
     while (!stack.empty()) {
+        if (MemoryMonitor::isLowMemory())
+            break;
         auto node = stack.back();
         stack.pop_back();
         nodeMap[normalizePath(node->path)] = node;

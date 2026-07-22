@@ -1,10 +1,13 @@
 #include "DiskScanner.h"
 
+#include "MemoryMonitor.h"
+
 #include <QDir>
 #include <QFileInfo>
 #include <QThreadPool>
 #include <QtConcurrent>
 #include <algorithm>
+#include <stack>
 
 // NOMINMAX must precede <windows.h> to prevent min/max macro pollution.
 #ifndef NOMINMAX
@@ -21,6 +24,13 @@ const QStringList DiskScanner::DEFAULT_SKIP_PATTERNS = {
     "WinSxS"  // Windows component store — tens of thousands of hardlinks;
               // recursing causes high CPU/memory and crashes.
 };
+
+// Safety caps to prevent runaway memory use / stack growth on pathological
+// directory trees. MAX_DEPTH covers Windows MAX_LONG_PATH scenarios; reaching
+// it produces a skipped placeholder node instead of recursing further.
+namespace {
+constexpr int MAX_SCAN_DEPTH = 64;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers (file-local)
@@ -76,8 +86,12 @@ DiskScanner::DiskScanner(const QString& rootPath, QObject* parent)
     int cpu = QThread::idealThreadCount();
     if (cpu <= 0)
         cpu = 4;
-    // Fast mode: I/O-bound, many threads hide NTFS syscall latency.
-    m_maxWorkers = std::max(4, std::min(64, cpu * 8));
+    // Cap parallelism conservatively. Each worker holds multiple open
+    // FindFirstFileW handles, which consume kernel paged pool. With 64
+    // workers on a deep tree, paged pool exhaustion caused BSODs on
+    // low-spec machines. 8 threads still hides NTFS syscall latency
+    // (I/O-bound) while keeping concurrent kernel handles manageable.
+    m_maxWorkers = std::max(2, std::min(8, cpu));
 }
 
 void DiskScanner::setSkipHeavyDirs(bool skip)
@@ -140,45 +154,56 @@ void DiskScanner::computeDirSizeFast(const QString& path, qint64& size, int& fil
     fileCount = 0;
     dirCount = 0;
 
-    const QString search = makeSearchPattern(path);
-    WIN32_FIND_DATAW fd;
-    HANDLE hFind = FindFirstFileW(reinterpret_cast<LPCWSTR>(search.utf16()), &fd);
-    if (hFind == INVALID_HANDLE_VALUE)
-        return;
+    // Iterative traversal with an explicit path stack — avoids C++ stack
+    // overflow on deeply nested trees. Each stack entry is one directory
+    // whose contents we enumerate exactly once.
+    std::stack<QString> pending;
+    pending.push(path);
 
-    do {
-        if (m_cancel)
+    while (!pending.empty() && !m_cancel) {
+        const QString cur = pending.top();
+        pending.pop();
+
+        // Memory pressure: stop descending into more directories. Counts
+        // accumulated so far remain valid for the parent node.
+        if (MemoryMonitor::isLowMemory())
             break;
 
-        const QString name = fileNameFromWChar(fd.cFileName);
-        if (name == QLatin1String(".") || name == QLatin1String(".."))
+        const QString search = makeSearchPattern(cur);
+        WIN32_FIND_DATAW fd;
+        HANDLE hFind = FindFirstFileW(reinterpret_cast<LPCWSTR>(search.utf16()), &fd);
+        if (hFind == INVALID_HANDLE_VALUE)
             continue;
 
-        const DWORD attrs = fd.dwFileAttributes;
+        do {
+            if (m_cancel)
+                break;
 
-        // Never follow reparse points during fast size computation.
-        if (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
-            continue;
-
-        if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
-            if (shouldSkip(name)) {
-                dirCount++;
+            const QString name = fileNameFromWChar(fd.cFileName);
+            if (name == QLatin1String(".") || name == QLatin1String(".."))
                 continue;
-            }
-            qint64 subSize = 0;
-            int subFiles = 0;
-            int subDirs = 0;
-            computeDirSizeFast(makeChildPath(path, name), subSize, subFiles, subDirs);
-            size += subSize;
-            fileCount += subFiles;
-            dirCount += 1 + subDirs;
-        } else {
-            size += combineFileSize(fd.nFileSizeHigh, fd.nFileSizeLow);
-            fileCount++;
-        }
-    } while (FindNextFileW(hFind, &fd));
 
-    FindClose(hFind);
+            const DWORD attrs = fd.dwFileAttributes;
+
+            // Never follow reparse points during fast size computation.
+            if (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+                continue;
+
+            if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+                if (shouldSkip(name)) {
+                    dirCount++;
+                    continue;
+                }
+                dirCount++;
+                pending.push(makeChildPath(cur, name));
+            } else {
+                size += combineFileSize(fd.nFileSizeHigh, fd.nFileSizeLow);
+                fileCount++;
+            }
+        } while (FindNextFileW(hFind, &fd));
+
+        FindClose(hFind);
+    }
 }
 
 std::shared_ptr<FileNode> DiskScanner::makeDirNode(const QString& path, bool top)
@@ -223,81 +248,190 @@ std::shared_ptr<FileNode> DiskScanner::makeSkippedDirNode(const QString& name, c
 
 std::shared_ptr<FileNode> DiskScanner::scanDirRecursive(const QString& path)
 {
-    auto node = makeDirNode(path, false);
+    // Iterative traversal with an explicit stack of (parent, path, depth)
+    // tuples. Avoids C++ stack overflow on deeply nested trees. Children
+    // are attached directly to their parent; sizes/counts are accumulated
+    // in a post-order pass after the tree is built (computeSizesUpward).
+    struct WorkItem {
+        std::shared_ptr<FileNode> parent;
+        QString path;
+        int depth;
+    };
+
+    auto root = makeDirNode(path, false);
     if (m_cancel)
-        return node;
+        return root;
 
-    emit progress("disk.progress.scanning", {{"path", path}});
+    std::stack<WorkItem> pending;
+    pending.push({nullptr, path, 0});
 
-    const QString search = makeSearchPattern(path);
-    WIN32_FIND_DATAW fd;
-    HANDLE hFind = FindFirstFileW(reinterpret_cast<LPCWSTR>(search.utf16()), &fd);
-    if (hFind == INVALID_HANDLE_VALUE) {
-        const DWORD err = GetLastError();
-        if (err == ERROR_ACCESS_DENIED)
-            node->error = QStringLiteral("Access denied");
-        else
-            node->error = QStringLiteral("FindFirstFile failed (error %1)").arg(err);
-        return node;
+    while (!pending.empty() && !m_cancel) {
+        if (MemoryMonitor::isLowMemory()) {
+            emit progress("scanner.warn.low_memory", {});
+            break;
+        }
+
+        WorkItem item = std::move(pending.top());
+        pending.pop();
+
+        auto node = makeDirNode(item.path, false);
+        node->parent = item.parent;
+        if (item.parent)
+            item.parent->children.push_back(node);
+        if (item.depth == 0)
+            root = node;
+
+        emit progress("disk.progress.scanning", {{"path", item.path}});
+
+        const QString search = makeSearchPattern(item.path);
+        WIN32_FIND_DATAW fd;
+        HANDLE hFind = FindFirstFileW(reinterpret_cast<LPCWSTR>(search.utf16()), &fd);
+        if (hFind == INVALID_HANDLE_VALUE) {
+            const DWORD err = GetLastError();
+            if (err == ERROR_ACCESS_DENIED)
+                node->error = NodeError::AccessDenied;
+            else {
+                node->error = NodeError::FindFirstFailed;
+                node->lastError = static_cast<int>(err);
+            }
+            continue;
+        }
+
+        do {
+            if (m_cancel)
+                break;
+
+            const QString name = fileNameFromWChar(fd.cFileName);
+            if (name == QLatin1String(".") || name == QLatin1String(".."))
+                continue;
+
+            const DWORD attrs = fd.dwFileAttributes;
+            const qint64 fsize = combineFileSize(fd.nFileSizeHigh, fd.nFileSizeLow);
+            const QString childPath = makeChildPath(item.path, name);
+
+            if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) {
+                // Symlink/junction: record but don't recurse.
+                auto child = std::make_shared<FileNode>();
+                child->name = name;
+                child->path = childPath;
+                child->nodeType = NodeType::Symlink;
+                child->size = fsize;
+                child->isHidden = name.startsWith(QLatin1Char('.'));
+                child->parent = node;
+                node->children.push_back(child);
+                node->size += child->size;
+                // Note: symlinks do NOT increment fileCount.
+            } else if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+                if (shouldSkip(name)) {
+                    auto child = makeSkippedDirNode(name, childPath);
+                    child->parent = node;
+                    node->children.push_back(child);
+                    node->size += child->size;
+                    node->fileCount += child->fileCount;
+                    node->dirCount += 1 + child->dirCount;
+                } else if (item.depth >= MAX_SCAN_DEPTH) {
+                    // Depth cap reached: record a skipped placeholder so the
+                    // user still sees the directory exists, without recursing.
+                    auto child = makeSkippedDirNode(name, childPath);
+                    child->parent = node;
+                    node->children.push_back(child);
+                    node->size += child->size;
+                    node->fileCount += child->fileCount;
+                    node->dirCount += 1 + child->dirCount;
+                } else {
+                    // Push child for processing; size/count accumulated
+                    // upward in the post-order pass below.
+                    pending.push({node, childPath, item.depth + 1});
+                    node->dirCount++;  // provisional; refined in post-pass
+                }
+            } else {
+                // Regular file.
+                auto child = std::make_shared<FileNode>();
+                child->name = name;
+                child->path = childPath;
+                child->nodeType = NodeType::File;
+                child->size = fsize;
+                child->isHidden = name.startsWith(QLatin1Char('.'));
+                child->parent = node;
+                node->children.push_back(child);
+                node->size += child->size;
+                node->fileCount++;
+            }
+        } while (FindNextFileW(hFind, &fd));
+
+        FindClose(hFind);
     }
 
-    do {
-        if (m_cancel)
-            break;
+    // Post-order pass: propagate each directory's size/fileCount/dirCount
+    // to its parent. Iterative (explicit stack) to avoid recursion.
+    // Note: skipped/symlink subtrees already finalized their own counts
+    // inline above, so we only propagate from directories that were pushed
+    // onto the pending stack (their children were attached after the parent).
+    // The simplest correct approach: walk the whole tree bottom-up.
+    computeSizesUpward(root);
+    return root;
+}
 
-        const QString name = fileNameFromWChar(fd.cFileName);
-        if (name == QLatin1String(".") || name == QLatin1String(".."))
+void DiskScanner::computeSizesUpward(const std::shared_ptr<FileNode>& root)
+{
+    if (!root)
+        return;
+
+    // First pass: reset provisional dirCount on stack-pushed directories
+    // (we incremented them when pushing children; we'll recompute from
+    // finalized child values). Skip directories whose counts were already
+    // finalized inline (skipped/symlink children attached directly).
+    // To keep this simple and correct, we recompute size/fileCount/dirCount
+    // for every directory from scratch based on its children. Directories
+    // with no children keep their existing values (covers skipped/empty).
+    //
+    // Two-stack iterative post-order:
+    //   stack1: nodes to visit
+    //   stack2: nodes in post-order (children before parents)
+    std::stack<FileNode*> s1, s2;
+    s1.push(root.get());
+    while (!s1.empty()) {
+        FileNode* n = s1.top();
+        s1.pop();
+        s2.push(n);
+        for (auto& c : n->children) {
+            if (c)
+                s1.push(c.get());
+        }
+    }
+
+    // Process in post-order: each node is visited after all its descendants.
+    // For directories, recompute aggregated fields from children. Files and
+    // symlinks already have correct per-node values; skip them.
+    while (!s2.empty()) {
+        FileNode* n = s2.top();
+        s2.pop();
+        if (!n->isDir())
+            continue;
+        // Don't touch skipped dirs — their size/counts were computed by
+        // computeDirSizeFast and are authoritative.
+        if (n->skipped)
             continue;
 
-        const DWORD attrs = fd.dwFileAttributes;
-        const qint64 fsize = combineFileSize(fd.nFileSizeHigh, fd.nFileSizeLow);
-        const QString childPath = makeChildPath(path, name);
-
-        if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) {
-            // Symlink/junction: record but don't recurse.
-            auto child = std::make_shared<FileNode>();
-            child->name = name;
-            child->path = childPath;
-            child->nodeType = NodeType::Symlink;
-            child->size = fsize;
-            child->isHidden = name.startsWith(QLatin1Char('.'));
-            child->parent = node;
-            node->children.push_back(child);
-            node->size += child->size;
-            // Note: symlinks do NOT increment fileCount.
-        } else if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
-            if (shouldSkip(name)) {
-                auto child = makeSkippedDirNode(name, childPath);
-                child->parent = node;
-                node->children.push_back(child);
-                node->size += child->size;
-                node->fileCount += child->fileCount;
-                node->dirCount += 1 + child->dirCount;
-            } else {
-                auto child = scanDirRecursive(childPath);
-                child->parent = node;
-                node->children.push_back(child);
-                node->size += child->size;
-                node->fileCount += child->fileCount;
-                node->dirCount += 1 + child->dirCount;
+        qint64 aggSize = 0;
+        int aggFiles = 0;
+        int aggDirs = 0;
+        for (auto& c : n->children) {
+            if (!c)
+                continue;
+            aggSize += c->size;
+            if (c->isDir()) {
+                aggDirs += 1 + c->dirCount;
+                aggFiles += c->fileCount;
+            } else if (c->nodeType == NodeType::File) {
+                aggFiles++;
             }
-        } else {
-            // Regular file.
-            auto child = std::make_shared<FileNode>();
-            child->name = name;
-            child->path = childPath;
-            child->nodeType = NodeType::File;
-            child->size = fsize;
-            child->isHidden = name.startsWith(QLatin1Char('.'));
-            child->parent = node;
-            node->children.push_back(child);
-            node->size += child->size;
-            node->fileCount++;
+            // Symlinks contribute size only (already added above), no count.
         }
-    } while (FindNextFileW(hFind, &fd));
-
-    FindClose(hFind);
-    return node;
+        n->size = aggSize;
+        n->fileCount = aggFiles;
+        n->dirCount = aggDirs;
+    }
 }
 
 std::shared_ptr<FileNode> DiskScanner::scanRoot(const QString& path)
@@ -311,9 +445,11 @@ std::shared_ptr<FileNode> DiskScanner::scanRoot(const QString& path)
     if (hFind == INVALID_HANDLE_VALUE) {
         const DWORD err = GetLastError();
         if (err == ERROR_ACCESS_DENIED)
-            root->error = QStringLiteral("Access denied");
-        else
-            root->error = QStringLiteral("FindFirstFile failed (error %1)").arg(err);
+            root->error = NodeError::AccessDenied;
+        else {
+            root->error = NodeError::FindFirstFailed;
+            root->lastError = static_cast<int>(err);
+        }
         return root;
     }
 

@@ -19,6 +19,10 @@ public:
     // labels pick up new translations.
     void refreshLabels();
 
+    // Re-apply theme-dependent styling (swatch + label colors) after a theme
+    // switch. Rebuilds the bar from the current palette.
+    void refreshTheme();
+
 private:
     QHBoxLayout* m_layout;
     std::vector<QWidget*> m_items;

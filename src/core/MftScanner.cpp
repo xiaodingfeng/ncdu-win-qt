@@ -1,12 +1,14 @@
 #include "MftScanner.h"
 
 #include "Logger.h"
+#include "MemoryMonitor.h"
 
 #include <QDir>
 #include <QFileInfo>
 #include <QCoreApplication>
 #include <algorithm>
 #include <functional>
+#include <stack>
 
 #ifndef NOMINMAX
 #  define NOMINMAX
@@ -76,6 +78,11 @@ const DWORD ATTRIBUTE_TYPE_FILE_NAME = 0x30;
 const DWORD ATTRIBUTE_TYPE_VOLUME_NAME = 0x60;
 const DWORD ATTRIBUTE_TYPE_VOLUME_INFORMATION = 0x70;
 const DWORD ATTRIBUTE_TYPE_END = 0xFFFFFFFF;
+
+// Safety cap on USN record count. 5M records covers virtually every real
+// disk; reaching the cap emits a warning and stops enumeration with the
+// partial results collected so far (graceful degradation, not a crash).
+const uint64_t MAX_USN_RECORDS = 5'000'000;
 
 // --- Diagnostics logging ---
 // All MftScanner diagnostics now route through the global Logger so the
@@ -340,7 +347,10 @@ bool MftScanner::enumUsnData(HANDLE hVolume, std::vector<MftEntry>& entries, QSt
         return false;
     }
 
-    const DWORD bufferSize = 64 * 1024 * 1024;
+    // P1d: Buffer reduced from 64MB to 1MB. The kernel returns USN records
+    // in chunks; a smaller user buffer just means more DeviceIoControl calls
+    // (1MB holds ~10k records per call — plenty). Saves 63MB peak RSS.
+    const DWORD bufferSize = 1 * 1024 * 1024;
     std::vector<BYTE> buffer(bufferSize);
     PUSN_RECORD usnRecord;
 
@@ -352,6 +362,15 @@ bool MftScanner::enumUsnData(HANDLE hVolume, std::vector<MftEntry>& entries, QSt
     uint64_t totalRecords = 0;
 
     while (!m_cancel) {
+        // P0c: poll memory pressure every iteration. If low, stop adding new
+        // records and return what we have — partial result beats a crash.
+        if (MemoryMonitor::isLowMemory()) {
+            m_lowMemory = true;
+            emit progress("scanner.warn.low_memory", {});
+            logMsg(QString("enumUsnData: low memory at %1 records, stopping early").arg(totalRecords));
+            break;
+        }
+
         if (!DeviceIoControl(
             hVolume,
             FSCTL_ENUM_USN_DATA,
@@ -388,6 +407,17 @@ bool MftScanner::enumUsnData(HANDLE hVolume, std::vector<MftEntry>& entries, QSt
 
             entries.push_back(entry);
             totalRecords++;
+
+            // P0d: record-count cap. 5M covers virtually all real disks; if
+            // we hit it, emit a warning and stop (partial result).
+            if (totalRecords >= MAX_USN_RECORDS) {
+                emit progress("scanner.warn.record_cap",
+                              {{"count", QString::number(totalRecords)}});
+                logMsg(QString("enumUsnData: hit MAX_USN_RECORDS cap (%1), stopping").arg(totalRecords));
+                emit progress("mft.progress.total_records",
+                              {{"count", QString::number(totalRecords)}});
+                return true;
+            }
 
             if (totalRecords % 100000 == 0) {
                 emit progress("mft.progress.records_scanned",
@@ -491,7 +521,10 @@ bool MftScanner::getFileSizes(HANDLE hVolume, const NTFS_VOLUME_DATA_BUFFER& vol
     logMsg(QString("  total run clusters: %1 (= %2 bytes)").arg(totalRunClusters).arg(totalRunClusters * bytesPerCluster));
 
     // --- Step 2: Read all MFT records using the cluster runs ---
-    const DWORD bufferSize = 16 * 1024 * 1024;
+    // P1d: Buffer reduced from 16MB to 1MB. 1MB holds 1024 MFT records per
+    // ReadFile call (at 1024B/record). More calls, each fast (sequential
+    // I/O), but peak RSS drops by 15MB.
+    const DWORD bufferSize = 1 * 1024 * 1024;
     std::vector<BYTE> buffer(bufferSize);
 
     // Diagnostic counters
@@ -512,6 +545,15 @@ bool MftScanner::getFileSizes(HANDLE hVolume, const NTFS_VOLUME_DATA_BUFFER& vol
         qint64 runOffset = 0;
 
         while (runOffset < runLengthBytes && !m_cancel) {
+            // P0c: bail out under memory pressure. Sizes collected so far
+            // remain valid; files without a size entry default to 0B.
+            if (MemoryMonitor::isLowMemory()) {
+                m_lowMemory = true;
+                emit progress("scanner.warn.low_memory", {});
+                logMsg(QString("getFileSizes: low memory at byte %1, stopping early").arg(runOffset));
+                break;
+            }
+
             DWORD toRead = (DWORD)std::min((qint64)bufferSize, runLengthBytes - runOffset);
 
             seekPos.QuadPart = runStartByte + runOffset;
@@ -647,32 +689,24 @@ bool MftScanner::getFileSizes(HANDLE hVolume, const NTFS_VOLUME_DATA_BUFFER& vol
     return true;
 }
 
-std::shared_ptr<FileNode> MftScanner::buildTree(const std::vector<MftEntry>& entries, const QString& scanPath,
-                                                 const std::unordered_map<uint64_t, qint64>& sizes)
+std::shared_ptr<FileNode> MftScanner::buildTree(std::vector<MftEntry>& entries, const QString& scanPath,
+                                                 std::unordered_map<uint64_t, qint64>& sizes)
 {
     logMsg(QString("buildTree: entries=%1, sizes map=%2").arg(entries.size()).arg(sizes.size()));
 
-    // Plan A: avoid copying every MftEntry (with its QString) into a separate
-    // unordered_map. Instead build a sorted index of (fileRefNum -> entry index)
-    // and look up via binary search. For ~1.29M entries this saves ~120MB
-    // compared to the previous entryMap copy. The index is 16 bytes/entry.
-    std::vector<std::pair<uint64_t, size_t>> entryIndex;
-    entryIndex.reserve(entries.size());
-    for (size_t i = 0; i < entries.size(); ++i) {
-        entryIndex.emplace_back(entries[i].fileRefNum, i);
-    }
-    std::sort(entryIndex.begin(), entryIndex.end(),
-              [](const std::pair<uint64_t, size_t>& a,
-                 const std::pair<uint64_t, size_t>& b) {
-                  return a.first < b.first;
+    // P1a: sort entries in place by fileRefNum and binary-search directly,
+    // eliminating the separate entryIndex vector (16B × N ≈ 20MB@1.29M).
+    std::sort(entries.begin(), entries.end(),
+              [](const MftEntry& a, const MftEntry& b) {
+                  return a.fileRefNum < b.fileRefNum;
               });
 
-    // Binary-search lookup: returns pointer into `entries` or nullptr.
+    // Binary-search lookup: returns pointer into the sorted `entries` or nullptr.
     auto findEntry = [&](uint64_t fileRef) -> const MftEntry* {
-        auto it = std::lower_bound(entryIndex.begin(), entryIndex.end(), fileRef,
-            [](const std::pair<uint64_t, size_t>& a, uint64_t b) { return a.first < b; });
-        if (it != entryIndex.end() && it->first == fileRef)
-            return &entries[it->second];
+        auto it = std::lower_bound(entries.begin(), entries.end(), fileRef,
+            [](const MftEntry& e, uint64_t r) { return e.fileRefNum < r; });
+        if (it != entries.end() && it->fileRefNum == fileRef)
+            return &(*it);
         return nullptr;
     };
 
@@ -686,6 +720,16 @@ std::shared_ptr<FileNode> MftScanner::buildTree(const std::vector<MftEntry>& ent
     for (const auto& entry : entries) {
         if (entry.parentRefNum == 0)
             continue;
+
+        // P0c: stop creating new nodes under memory pressure. The partial
+        // tree built so far is still usable.
+        if (m_lowMemory.load() || MemoryMonitor::isLowMemory()) {
+            if (!m_lowMemory.exchange(true)) {
+                emit progress("scanner.warn.low_memory", {});
+                logMsg("buildTree: low memory during node creation, stopping early");
+            }
+            break;
+        }
 
         auto node = std::make_shared<FileNode>();
         node->name = entry.name;
@@ -713,6 +757,11 @@ std::shared_ptr<FileNode> MftScanner::buildTree(const std::vector<MftEntry>& ent
     }
 
     logMsg(QString("buildTree size matching: matched=%1, unmatched=%2").arg(matchedCount).arg(unmatchedCount));
+
+    // P1a: sizes map is no longer needed — free it now (before path-building
+    // and computeSize) to drop ~48B × N ≈ 62MB peak RSS earlier.
+    sizes.clear();
+    sizes.rehash(0);
 
     for (const auto& pair : nodeMap) {
         uint64_t fileRef = pair.first;
@@ -803,23 +852,46 @@ std::shared_ptr<FileNode> MftScanner::buildTree(const std::vector<MftEntry>& ent
         }
     }
 
-    std::function<void(std::shared_ptr<FileNode>)> computeSize = [&](std::shared_ptr<FileNode> node) {
-        if (!node->isDir())
-            return;
-        for (auto& child : node->children) {
-            computeSize(child);
-            node->size += child->size;
-            if (child->isDir()) {
-                node->dirCount += 1 + child->dirCount;
-                node->fileCount += child->fileCount;
-            } else {
-                node->fileCount++;
-            }
+    // P0a-3: iterative post-order size/count aggregation (two-stack).
+    // Replaces the recursive std::function lambda which could overflow the
+    // C++ stack on deeply nested trees.
+    // Stack1 drives the traversal; stack2 holds nodes in post-order
+    // (children pushed to s1 before parent is popped from s2).
+    std::stack<std::shared_ptr<FileNode>> s1, s2;
+    for (auto& child : root->children)
+        s1.push(child);
+    while (!s1.empty()) {
+        auto n = s1.top();
+        s1.pop();
+        s2.push(n);
+        for (auto& c : n->children) {
+            if (c)
+                s1.push(c);
         }
-    };
+    }
+    // Process in post-order: each directory's children are finalized before
+    // the directory itself, so we can safely aggregate from children.
+    while (!s2.empty()) {
+        auto n = s2.top();
+        s2.pop();
+        if (!n->isDir())
+            continue;
+        for (auto& child : n->children) {
+            if (!child)
+                continue;
+            n->size += child->size;
+            if (child->isDir()) {
+                n->dirCount += 1 + child->dirCount;
+                n->fileCount += child->fileCount;
+            } else if (child->nodeType == NodeType::File) {
+                n->fileCount++;
+            }
+            // Symlinks contribute size only (already added above), no count.
+        }
+    }
 
+    // Aggregate root's direct children into root (mirrors the original loop).
     for (auto& child : root->children) {
-        computeSize(child);
         root->size += child->size;
         root->dirCount += child->dirCount;
         root->fileCount += child->fileCount;

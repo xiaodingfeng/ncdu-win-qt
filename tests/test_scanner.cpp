@@ -24,7 +24,7 @@ private slots:
         QCOMPARE(node->dirCount, 0);
         QCOMPARE(node->isHidden, false);
         QCOMPARE(node->skipped, false);
-        QVERIFY(node->error.isEmpty());
+        QCOMPARE(node->error, NodeError::None);
         QVERIFY(node->children.empty());
         QVERIFY(node->parent.expired());
     }

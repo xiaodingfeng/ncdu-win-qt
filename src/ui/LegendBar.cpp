@@ -49,11 +49,18 @@ LegendBar::LegendBar(QWidget* parent)
         m_layout->addWidget(swatch);
         auto* txt = new QLabel(I18n::tr(key));
         txt->setStyleSheet(QStringLiteral("color: %1; font-size: 11px;")
-                               .arg(QString::fromLatin1(C::TEXT_SEC)));
+                               .arg(QString::fromLatin1(C::TEXT_SEC())));
         m_layout->addWidget(txt);
         m_items.push_back(txt);
     }
     m_layout->addStretch(1);
+}
+
+void LegendBar::refreshTheme()
+{
+    // Swatch colors and label colors both derive from the active palette, so
+    // a full rebuild picks up the new theme.
+    refreshLabels();
 }
 
 void LegendBar::refreshLabels()
@@ -75,7 +82,7 @@ void LegendBar::refreshLabels()
         m_layout->addWidget(swatch);
         auto* txt = new QLabel(I18n::tr(key));
         txt->setStyleSheet(QStringLiteral("color: %1; font-size: 11px;")
-                               .arg(QString::fromLatin1(C::TEXT_SEC)));
+                               .arg(QString::fromLatin1(C::TEXT_SEC())));
         m_layout->addWidget(txt);
         m_items.push_back(txt);
     }

@@ -1,13 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(NcduWin VERSION 1.0.2 LANGUAGES CXX)
+project(NcduWin VERSION 1.0.3 LANGUAGES CXX)
 
 # Set NcduWin as the default startup target in Visual Studio
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT NcduWin)
 
 # ---- Single source of truth for app metadata ----
 set(APP_NAME        "NcduWin")
-set(APP_VERSION     "1.0.2")
+set(APP_VERSION     "1.0.3")
 set(APP_HOMEPAGE    "https://ncduwin.fengzhengx.cn/")
 set(APP_SOURCE_URL  "https://github.com/xiaodingfeng/ncdu-win-qt")
 
@@ -39,7 +39,7 @@ if(NOT CMAKE_PREFIX_PATH AND NOT Qt6_DIR)
     endif()
 endif()
 
-find_package(Qt6 COMPONENTS Widgets Concurrent REQUIRED)
+find_package(Qt6 COMPONENTS Widgets Concurrent Network REQUIRED)
 find_package(Qt6 COMPONENTS Test QUIET)
 
 # ---- Locate windeployqt for the current Qt installation ----
@@ -96,7 +96,7 @@ target_include_directories(NcduWin PRIVATE
     src/cleanup
 )
 
-target_link_libraries(NcduWin PRIVATE Qt6::Widgets Qt6::Concurrent)
+target_link_libraries(NcduWin PRIVATE Qt6::Widgets Qt6::Concurrent Qt6::Network)
 
 if(WIN32)
     target_link_libraries(NcduWin PRIVATE shell32 shlwapi ole32 user32 kernel32 advapi32)
