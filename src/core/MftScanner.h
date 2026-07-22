@@ -50,6 +50,7 @@ private:
 
     QString m_rootPath;
     std::atomic<bool> m_cancel{false};
+    std::atomic<bool> m_lowMemory{false};  // P0c: set when MemoryMonitor triggers
     std::set<QString> m_skipSet;
 
     HANDLE openVolume(const QString& path);
@@ -57,8 +58,11 @@ private:
     bool enumUsnData(HANDLE hVolume, std::vector<MftEntry>& entries, QString& errorMsg);
     bool getFileSizes(HANDLE hVolume, const NTFS_VOLUME_DATA_BUFFER& volData,
                       std::unordered_map<uint64_t, qint64>& sizes, QString& errorMsg);
-    std::shared_ptr<FileNode> buildTree(const std::vector<MftEntry>& entries, const QString& scanPath,
-                                         const std::unordered_map<uint64_t, qint64>& sizes);
+    // entries and sizes are mutable: buildTree sorts entries in place by
+    // fileRefNum (eliminating a separate entryIndex), and frees sizes early
+    // after the node-creation loop.
+    std::shared_ptr<FileNode> buildTree(std::vector<MftEntry>& entries, const QString& scanPath,
+                                         std::unordered_map<uint64_t, qint64>& sizes);
     bool shouldSkip(const QString& name) const;
     bool isReparsePoint(DWORD fileAttributes) const;
 };

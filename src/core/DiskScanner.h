@@ -53,4 +53,8 @@ private:
     bool shouldSkip(const QString& name) const;
     bool isReparsePoint(DWORD fileAttributes, const QString& path) const;
     void computeDirSizeFast(const QString& path, qint64& size, int& fileCount, int& dirCount);
+    // Iterative post-order pass: recompute size/fileCount/dirCount for every
+    // non-skipped directory from its children. Called after scanDirRecursive
+    // finishes building the tree.
+    void computeSizesUpward(const std::shared_ptr<FileNode>& root);
 };

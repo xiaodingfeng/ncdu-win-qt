@@ -1,58 +1,160 @@
 #pragma once
 
-// Light, fresh theme for the disk analyzer.
+// Theme + style for the disk analyzer.
 //
-// Aesthetic direction: "fresh morning" - soft blue-white backgrounds, a
-// mint-teal primary, pastel file-type colors for the treemap. Mirrors
-// Color palette, file-type classification, and QSS stylesheet.
+// Color palette, file-type classification, and QSS stylesheet. Colors live in
+// a ThemeColors struct so the active palette can be swapped at runtime (light
+// / dark / follow system). The ``C::`` namespace exposes the active palette
+// via function accessors (e.g. ``C::FG()``); call sites read the current
+// theme every time they paint, so a theme switch takes effect on the next
+// refresh. The ``Theme::`` namespace persists the user's choice and resolves
+// "system" against the OS color scheme.
 
 #include <QString>
 #include <QSet>
 #include <QList>
 #include <QPair>
+#include <QSettings>
+#include <QGuiApplication>
+#include <QStyleHints>
+
+#include "I18n.h"
 
 // --------------------------------------------------------------------------- //
 // Color palette
 // --------------------------------------------------------------------------- //
-namespace C {
+
+// All colors used by the UI. Two instances are defined (LIGHT_THEME /
+// DARK_THEME); g_currentTheme points at the active one.
+struct ThemeColors {
     // Surfaces
-    inline const char* const BG            = "#F5F8FB";   // app background
-    inline const char* const SURFACE       = "#FFFFFF";   // cards / panels
-    inline const char* const SURFACE_ALT   = "#EEF3F8";   // hover / alt rows
-    inline const char* const SURFACE_DEEP  = "#E4EBF3";   // pressed / dividers
-
+    const char* BG;
+    const char* SURFACE;
+    const char* SURFACE_ALT;
+    const char* SURFACE_DEEP;
     // Text
-    inline const char* const TEXT          = "#1E2A3A";
-    inline const char* const TEXT_SEC      = "#5B6B7E";
-    inline const char* const TEXT_MUTED    = "#94A3B8";
-
+    const char* TEXT;
+    const char* TEXT_SEC;
+    const char* TEXT_MUTED;
     // Brand
-    inline const char* const PRIMARY       = "#14B8A6";   // mint-teal
-    inline const char* const PRIMARY_HOVER = "#0D9488";
-    inline const char* const PRIMARY_SOFT  = "#E3F0FF";   // light blue selection
-    inline const char* const ACCENT        = "#60A5FA";
-
+    const char* PRIMARY;
+    const char* PRIMARY_HOVER;
+    const char* PRIMARY_SOFT;
+    const char* ACCENT;
     // Status
-    inline const char* const DANGER        = "#EF4444";
-    inline const char* const WARNING       = "#F59E0B";
-    inline const char* const SUCCESS       = "#10B981";
-
+    const char* DANGER;
+    const char* WARNING;
+    const char* SUCCESS;
     // Lines
-    inline const char* const BORDER        = "#E2E8F0";
-    inline const char* const BORDER_LIGHT  = "#EEF2F6";
+    const char* BORDER;
+    const char* BORDER_LIGHT;
+    // File-type colors (for treemap)
+    const char* TYPE_DIR;
+    const char* TYPE_DOC;
+    const char* TYPE_IMAGE;
+    const char* TYPE_VIDEO;
+    const char* TYPE_AUDIO;
+    const char* TYPE_ARCHIVE;
+    const char* TYPE_CODE;
+    const char* TYPE_EXEC;
+    const char* TYPE_DATA;
+    const char* TYPE_OTHER;
+    const char* TYPE_HIDDEN;
+};
 
-    // File-type colors (pastel set for treemap)
-    inline const char* const TYPE_DIR      = "#2DD4BF";
-    inline const char* const TYPE_DOC      = "#60A5FA";
-    inline const char* const TYPE_IMAGE    = "#A78BFA";
-    inline const char* const TYPE_VIDEO    = "#F472B6";
-    inline const char* const TYPE_AUDIO    = "#34D399";
-    inline const char* const TYPE_ARCHIVE  = "#FBBF24";
-    inline const char* const TYPE_CODE     = "#22D3EE";
-    inline const char* const TYPE_EXEC     = "#FB923C";
-    inline const char* const TYPE_DATA     = "#818CF8";
-    inline const char* const TYPE_OTHER    = "#94A3B8";
-    inline const char* const TYPE_HIDDEN   = "#CBD5E1";
+inline const ThemeColors LIGHT_THEME = {
+    "#F5F8FB",   // BG            app background
+    "#FFFFFF",   // SURFACE       cards / panels
+    "#EEF3F8",   // SURFACE_ALT   hover / alt rows
+    "#E4EBF3",   // SURFACE_DEEP  pressed / dividers
+    "#1E2A3A",   // TEXT
+    "#5B6B7E",   // TEXT_SEC
+    "#94A3B8",   // TEXT_MUTED
+    "#14B8A6",   // PRIMARY       mint-teal
+    "#0D9488",   // PRIMARY_HOVER
+    "#E3F0FF",   // PRIMARY_SOFT  light blue selection
+    "#60A5FA",   // ACCENT
+    "#EF4444",   // DANGER
+    "#F59E0B",   // WARNING
+    "#10B981",   // SUCCESS
+    "#E2E8F0",   // BORDER
+    "#EEF2F6",   // BORDER_LIGHT
+    "#2DD4BF",   // TYPE_DIR
+    "#60A5FA",   // TYPE_DOC
+    "#A78BFA",   // TYPE_IMAGE
+    "#F472B6",   // TYPE_VIDEO
+    "#34D399",   // TYPE_AUDIO
+    "#FBBF24",   // TYPE_ARCHIVE
+    "#22D3EE",   // TYPE_CODE
+    "#FB923C",   // TYPE_EXEC
+    "#818CF8",   // TYPE_DATA
+    "#94A3B8",   // TYPE_OTHER
+    "#CBD5E1",   // TYPE_HIDDEN
+};
+
+inline const ThemeColors DARK_THEME = {
+    "#1E2330",   // BG
+    "#252B3A",   // SURFACE
+    "#2D3445",   // SURFACE_ALT
+    "#353D50",   // SURFACE_DEEP
+    "#E4E8F0",   // TEXT          (fixes invisible text on dark system bg)
+    "#9CA8B8",   // TEXT_SEC
+    "#6B7689",   // TEXT_MUTED
+    "#14B8A6",   // PRIMARY       (mint-teal reads well on dark)
+    "#0D9488",   // PRIMARY_HOVER
+    "#1F3A3A",   // PRIMARY_SOFT  selection bg
+    "#60A5FA",   // ACCENT
+    "#EF4444",   // DANGER
+    "#F59E0B",   // WARNING
+    "#10B981",   // SUCCESS
+    "#353D50",   // BORDER
+    "#2D3445",   // BORDER_LIGHT
+    "#2DD4BF",   // TYPE_DIR      (saturated colors stay vivid on dark)
+    "#60A5FA",   // TYPE_DOC
+    "#A78BFA",   // TYPE_IMAGE
+    "#F472B6",   // TYPE_VIDEO
+    "#34D399",   // TYPE_AUDIO
+    "#FBBF24",   // TYPE_ARCHIVE
+    "#22D3EE",   // TYPE_CODE
+    "#FB923C",   // TYPE_EXEC
+    "#818CF8",   // TYPE_DATA
+    "#94A3B8",   // TYPE_OTHER
+    "#4A5366",   // TYPE_HIDDEN   (darkened so "hidden" reads as muted on dark)
+};
+
+// The active palette. Switched by Theme::applyEffective() on the main thread.
+inline const ThemeColors* g_currentTheme = &LIGHT_THEME;
+
+// Function accessors for the active palette. Reading through these (rather
+// than a fixed constant) is what makes runtime theme switching work.
+namespace C {
+    inline const char* BG()            { return g_currentTheme->BG; }
+    inline const char* SURFACE()       { return g_currentTheme->SURFACE; }
+    inline const char* SURFACE_ALT()   { return g_currentTheme->SURFACE_ALT; }
+    inline const char* SURFACE_DEEP()  { return g_currentTheme->SURFACE_DEEP; }
+    inline const char* FG()            { return g_currentTheme->TEXT; }
+    inline const char* TEXT_SEC()      { return g_currentTheme->TEXT_SEC; }
+    inline const char* TEXT_MUTED()    { return g_currentTheme->TEXT_MUTED; }
+    inline const char* PRIMARY()       { return g_currentTheme->PRIMARY; }
+    inline const char* PRIMARY_HOVER() { return g_currentTheme->PRIMARY_HOVER; }
+    inline const char* PRIMARY_SOFT()  { return g_currentTheme->PRIMARY_SOFT; }
+    inline const char* ACCENT()        { return g_currentTheme->ACCENT; }
+    inline const char* DANGER()        { return g_currentTheme->DANGER; }
+    inline const char* WARNING()       { return g_currentTheme->WARNING; }
+    inline const char* SUCCESS()       { return g_currentTheme->SUCCESS; }
+    inline const char* BORDER()        { return g_currentTheme->BORDER; }
+    inline const char* BORDER_LIGHT()  { return g_currentTheme->BORDER_LIGHT; }
+    inline const char* TYPE_DIR()      { return g_currentTheme->TYPE_DIR; }
+    inline const char* TYPE_DOC()      { return g_currentTheme->TYPE_DOC; }
+    inline const char* TYPE_IMAGE()    { return g_currentTheme->TYPE_IMAGE; }
+    inline const char* TYPE_VIDEO()    { return g_currentTheme->TYPE_VIDEO; }
+    inline const char* TYPE_AUDIO()    { return g_currentTheme->TYPE_AUDIO; }
+    inline const char* TYPE_ARCHIVE()  { return g_currentTheme->TYPE_ARCHIVE; }
+    inline const char* TYPE_CODE()     { return g_currentTheme->TYPE_CODE; }
+    inline const char* TYPE_EXEC()     { return g_currentTheme->TYPE_EXEC; }
+    inline const char* TYPE_DATA()     { return g_currentTheme->TYPE_DATA; }
+    inline const char* TYPE_OTHER()    { return g_currentTheme->TYPE_OTHER; }
+    inline const char* TYPE_HIDDEN()   { return g_currentTheme->TYPE_HIDDEN; }
 }  // namespace C
 
 // Default UI font family.
@@ -157,19 +259,19 @@ inline QString extOf(const QString& name) {
 // Return the hex color for a file based on its extension.
 inline QString typeColor(const QString& name, bool isDir = false, bool isHidden = false) {
     if (isDir)
-        return QString::fromLatin1(C::TYPE_DIR);
+        return QString::fromLatin1(C::TYPE_DIR());
     if (isHidden)
-        return QString::fromLatin1(C::TYPE_HIDDEN);
+        return QString::fromLatin1(C::TYPE_HIDDEN());
     const QString ext = extOf(name);
-    if (docExt().contains(ext))    return QString::fromLatin1(C::TYPE_DOC);
-    if (imgExt().contains(ext))   return QString::fromLatin1(C::TYPE_IMAGE);
-    if (vidExt().contains(ext))   return QString::fromLatin1(C::TYPE_VIDEO);
-    if (audExt().contains(ext))   return QString::fromLatin1(C::TYPE_AUDIO);
-    if (arcExt().contains(ext))   return QString::fromLatin1(C::TYPE_ARCHIVE);
-    if (codeExt().contains(ext))  return QString::fromLatin1(C::TYPE_CODE);
-    if (execExt().contains(ext))  return QString::fromLatin1(C::TYPE_EXEC);
-    if (dataExt().contains(ext))  return QString::fromLatin1(C::TYPE_DATA);
-    return QString::fromLatin1(C::TYPE_OTHER);
+    if (docExt().contains(ext))    return QString::fromLatin1(C::TYPE_DOC());
+    if (imgExt().contains(ext))   return QString::fromLatin1(C::TYPE_IMAGE());
+    if (vidExt().contains(ext))   return QString::fromLatin1(C::TYPE_VIDEO());
+    if (audExt().contains(ext))   return QString::fromLatin1(C::TYPE_AUDIO());
+    if (arcExt().contains(ext))   return QString::fromLatin1(C::TYPE_ARCHIVE());
+    if (codeExt().contains(ext))  return QString::fromLatin1(C::TYPE_CODE());
+    if (execExt().contains(ext))  return QString::fromLatin1(C::TYPE_EXEC());
+    if (dataExt().contains(ext))  return QString::fromLatin1(C::TYPE_DATA());
+    return QString::fromLatin1(C::TYPE_OTHER());
 }
 
 // Return the i18n key for a file's type label.
@@ -191,16 +293,16 @@ inline QString typeKey(const QString& name, bool isDir = false) {
 // (i18n key, color) pairs for the legend.
 inline QList<QPair<QString, QString>> legendItems() {
     return {
-        { QStringLiteral("type.folder"),     QString::fromLatin1(C::TYPE_DIR) },
-        { QStringLiteral("type.document"),    QString::fromLatin1(C::TYPE_DOC) },
-        { QStringLiteral("type.image"),       QString::fromLatin1(C::TYPE_IMAGE) },
-        { QStringLiteral("type.video"),       QString::fromLatin1(C::TYPE_VIDEO) },
-        { QStringLiteral("type.audio"),       QString::fromLatin1(C::TYPE_AUDIO) },
-        { QStringLiteral("type.archive"),     QString::fromLatin1(C::TYPE_ARCHIVE) },
-        { QStringLiteral("type.code"),        QString::fromLatin1(C::TYPE_CODE) },
-        { QStringLiteral("type.executable"),  QString::fromLatin1(C::TYPE_EXEC) },
-        { QStringLiteral("type.data"),        QString::fromLatin1(C::TYPE_DATA) },
-        { QStringLiteral("type.other"),       QString::fromLatin1(C::TYPE_OTHER) },
+        { QStringLiteral("type.folder"),     QString::fromLatin1(C::TYPE_DIR()) },
+        { QStringLiteral("type.document"),    QString::fromLatin1(C::TYPE_DOC()) },
+        { QStringLiteral("type.image"),       QString::fromLatin1(C::TYPE_IMAGE()) },
+        { QStringLiteral("type.video"),       QString::fromLatin1(C::TYPE_VIDEO()) },
+        { QStringLiteral("type.audio"),       QString::fromLatin1(C::TYPE_AUDIO()) },
+        { QStringLiteral("type.archive"),     QString::fromLatin1(C::TYPE_ARCHIVE()) },
+        { QStringLiteral("type.code"),        QString::fromLatin1(C::TYPE_CODE()) },
+        { QStringLiteral("type.executable"),  QString::fromLatin1(C::TYPE_EXEC()) },
+        { QStringLiteral("type.data"),        QString::fromLatin1(C::TYPE_DATA()) },
+        { QStringLiteral("type.other"),       QString::fromLatin1(C::TYPE_OTHER()) },
     };
 }
 
@@ -208,27 +310,27 @@ inline QList<QPair<QString, QString>> legendItems() {
 // QSS stylesheet
 // --------------------------------------------------------------------------- //
 
-// The full application stylesheet. Color values are baked in (matching the
-// constants above) so it can be applied directly via qApp->setStyleSheet().
+// The full application stylesheet. Color values are injected from the active
+// palette via @TOKEN placeholders so a theme switch (qApp->setStyleSheet(
+// loadQSS())) re-reads the current theme. A few non-palette literals are left
+// baked in: the tooltip is a dark pill in both themes (an overlay element),
+// and #0B7C72 (primary pressed) reads on both light and dark.
 inline QString loadQSS() {
-    // The stylesheet is pure ASCII, so fromLatin1 is a safe, portable way to
-    // wrap a raw string literal without the u""-concatenation quirks of
-    // QStringLiteral on some compilers.
-    return QString::fromLatin1(R"(
+    QString s = QString::fromLatin1(R"(
 * {
     font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
     font-size: 13px;
-    color: #1E2A3A;
+    color: @TEXT;
     outline: none;
 }
 
 QWidget#root {
-    background-color: #F5F8FB;
+    background-color: @BG;
 }
 
 QMenuBar {
-    background-color: #FFFFFF;
-    border-bottom: 1px solid #E2E8F0;
+    background-color: @SURFACE;
+    border-bottom: 1px solid @BORDER;
     padding: 2px 4px;
     spacing: 2px;
 }
@@ -236,97 +338,97 @@ QMenuBar::item {
     background: transparent;
     padding: 6px 10px;
     border-radius: 6px;
-    color: #1E2A3A;
+    color: @TEXT;
 }
 QMenuBar::item:selected {
-    background-color: #EEF3F8;
+    background-color: @SURFACE_ALT;
 }
 QMenuBar::item:pressed {
-    background-color: #E3F0FF;
+    background-color: @PRIMARY_SOFT;
 }
 
 /* ---- top bar ---- */
 QFrame#topbar {
-    background-color: #FFFFFF;
-    border-bottom: 1px solid #E2E8F0;
+    background-color: @SURFACE;
+    border-bottom: 1px solid @BORDER;
 }
 
 QLabel#title {
     font-size: 16px;
     font-weight: 600;
-    color: #1E2A3A;
+    color: @TEXT;
 }
 
 QLabel#subtitle {
     font-size: 11px;
-    color: #94A3B8;
+    color: @TEXT_MUTED;
 }
 
 /* ---- skip checkbox (button-like) ---- */
 QCheckBox {
-    background-color: #FFFFFF;
-    border: 1px solid #E2E8F0;
+    background-color: @SURFACE;
+    border: 1px solid @BORDER;
     border-radius: 8px;
     padding: 7px 14px;
-    color: #1E2A3A;
+    color: @TEXT;
     font-weight: 500;
     spacing: 6px;
 }
 QCheckBox:hover {
-    background-color: #EEF3F8;
-    border-color: #14B8A6;
+    background-color: @SURFACE_ALT;
+    border-color: @PRIMARY;
 }
 QCheckBox:checked {
-    background-color: #E3F0FF;
-    border-color: #60A5FA;
+    background-color: @PRIMARY_SOFT;
+    border-color: @ACCENT;
 }
 
 /* ---- buttons ---- */
 QPushButton {
-    background-color: #FFFFFF;
-    border: 1px solid #E2E8F0;
+    background-color: @SURFACE;
+    border: 1px solid @BORDER;
     border-radius: 8px;
     padding: 7px 14px;
-    color: #1E2A3A;
+    color: @TEXT;
     font-weight: 500;
 }
 QPushButton:hover {
-    background-color: #EEF3F8;
-    border-color: #14B8A6;
+    background-color: @SURFACE_ALT;
+    border-color: @PRIMARY;
 }
 QPushButton:pressed {
-    background-color: #E4EBF3;
+    background-color: @SURFACE_DEEP;
 }
 QPushButton:disabled {
-    color: #94A3B8;
-    background-color: #EEF3F8;
+    color: @TEXT_MUTED;
+    background-color: @SURFACE_ALT;
 }
 
 QPushButton#primary {
-    background-color: #14B8A6;
+    background-color: @PRIMARY;
     border: none;
     color: white;
     font-weight: 600;
 }
 QPushButton#primary:hover {
-    background-color: #0D9488;
+    background-color: @PRIMARY_HOVER;
 }
 QPushButton#primary:pressed {
     background-color: #0B7C72;
 }
 QPushButton#primary:disabled {
-    background-color: #E4EBF3;
-    color: #94A3B8;
+    background-color: @SURFACE_DEEP;
+    color: @TEXT_MUTED;
 }
 
 QPushButton#danger {
     background-color: transparent;
-    border: 1px solid #EF4444;
-    color: #EF4444;
+    border: 1px solid @DANGER;
+    color: @DANGER;
     font-weight: 500;
 }
 QPushButton#danger:hover {
-    background-color: #EF4444;
+    background-color: @DANGER;
     color: white;
 }
 
@@ -335,32 +437,32 @@ QPushButton#ghost {
     background-color: transparent;
     border: none;
     padding: 6px;
-    color: #5B6B7E;
+    color: @TEXT_SEC;
     font-weight: 500;
 }
 QPushButton#ghost:hover {
-    background-color: #EEF3F8;
-    color: #14B8A6;
+    background-color: @SURFACE_ALT;
+    color: @PRIMARY;
     border-radius: 6px;
 }
 
 /* ---- combo ---- */
 QComboBox {
-    background-color: #FFFFFF;
-    border: 1px solid #E2E8F0;
+    background-color: @SURFACE;
+    border: 1px solid @BORDER;
     border-radius: 8px;
     padding: 6px 12px;
     min-height: 20px;
-    color: #1E2A3A;
+    color: @TEXT;
 }
 QComboBox:hover {
-    border-color: #14B8A6;
+    border-color: @PRIMARY;
 }
 QComboBox::drop-down {
     border: none;
     width: 28px;
-    background: #F1F5F9;
-    border-left: 1px solid #E2E8F0;
+    background: @SURFACE_ALT;
+    border-left: 1px solid @BORDER;
     border-radius: 0px 8px 8px 0px;
 }
 QComboBox::down-arrow {
@@ -369,35 +471,35 @@ QComboBox::down-arrow {
     height: 0;
     border-left: 6px solid transparent;
     border-right: 6px solid transparent;
-    border-top: 7px solid #1E2A3A;
+    border-top: 7px solid @TEXT;
     margin-right: 8px;
 }
 QComboBox QAbstractItemView {
-    background-color: #FFFFFF;
-    border: 1px solid #E2E8F0;
+    background-color: @SURFACE;
+    border: 1px solid @BORDER;
     border-radius: 6px;
-    selection-background-color: #E3F0FF;
-    selection-color: #1E2A3A;
+    selection-background-color: @PRIMARY_SOFT;
+    selection-color: @TEXT;
     padding: 4px;
     outline: none;
 }
 
 /* ---- line edit / search ---- */
 QLineEdit {
-    background-color: #FFFFFF;
-    border: 1px solid #E2E8F0;
+    background-color: @SURFACE;
+    border: 1px solid @BORDER;
     border-radius: 8px;
     padding: 7px 12px 7px 34px;
-    color: #1E2A3A;
-    selection-background-color: #E3F0FF;
-    selection-color: #1E2A3A;
+    color: @TEXT;
+    selection-background-color: @PRIMARY_SOFT;
+    selection-color: @TEXT;
 }
 QLineEdit:focus {
-    border-color: #14B8A6;
-    background-color: #FFFFFF;
+    border-color: @PRIMARY;
+    background-color: @SURFACE;
 }
 QLineEdit::placeholder {
-    color: #94A3B8;
+    color: @TEXT_MUTED;
 }
 
 /* ---- breadcrumb ---- */
@@ -407,55 +509,55 @@ QFrame#breadcrumb {
 QPushButton#crumb {
     background-color: transparent;
     border: none;
-    color: #5B6B7E;
+    color: @TEXT_SEC;
     padding: 4px 8px;
     font-weight: 500;
 }
 QPushButton#crumb:hover {
-    color: #14B8A6;
+    color: @PRIMARY;
     text-decoration: underline;
 }
 QLabel#crumb-sep {
-    color: #94A3B8;
+    color: @TEXT_MUTED;
 }
 
 /* ---- list (file list) ---- */
 QTreeWidget {
-    background-color: #FFFFFF;
-    border: 1px solid #E2E8F0;
+    background-color: @SURFACE;
+    border: 1px solid @BORDER;
     border-radius: 10px;
     padding: 4px;
     outline: none;
 }
 QTreeWidget::item {
     padding: 6px 4px;
-    border-bottom: 1px solid #EEF2F6;
+    border-bottom: 1px solid @BORDER_LIGHT;
     min-height: 22px;
 }
 QTreeWidget::item:selected {
-    background-color: #E3F0FF;
-    color: #1E2A3A;
+    background-color: @PRIMARY_SOFT;
+    color: @TEXT;
 }
 QTreeWidget::item:selected:!active {
-    background-color: #E3F0FF;
-    color: #1E2A3A;
+    background-color: @PRIMARY_SOFT;
+    color: @TEXT;
 }
 QTreeWidget::item:hover {
-    background-color: #EEF3F8;
+    background-color: @SURFACE_ALT;
 }
 QHeaderView::section {
-    background-color: #EEF3F8;
-    color: #5B6B7E;
+    background-color: @SURFACE_ALT;
+    color: @TEXT_SEC;
     padding: 8px 10px;
     border: none;
-    border-right: 1px solid #EEF2F6;
-    border-bottom: 1px solid #E2E8F0;
+    border-right: 1px solid @BORDER_LIGHT;
+    border-bottom: 1px solid @BORDER;
     font-weight: 600;
     font-size: 12px;
 }
 QHeaderView::section:hover {
-    color: #14B8A6;
-    background-color: #E4EBF3;
+    color: @PRIMARY;
+    background-color: @SURFACE_DEEP;
 }
 QHeaderView::section:first {
     border-top-left-radius: 10px;
@@ -472,12 +574,12 @@ QScrollBar:vertical {
     margin: 4px 2px;
 }
 QScrollBar::handle:vertical {
-    background: #E4EBF3;
+    background: @SURFACE_DEEP;
     border-radius: 4px;
     min-height: 32px;
 }
 QScrollBar::handle:vertical:hover {
-    background: #94A3B8;
+    background: @TEXT_MUTED;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0;
@@ -488,12 +590,12 @@ QScrollBar:horizontal {
     margin: 2px 4px;
 }
 QScrollBar::handle:horizontal {
-    background: #E4EBF3;
+    background: @SURFACE_DEEP;
     border-radius: 4px;
     min-width: 32px;
 }
 QScrollBar::handle:horizontal:hover {
-    background: #94A3B8;
+    background: @TEXT_MUTED;
 }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
     width: 0;
@@ -501,17 +603,17 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
 
 /* ---- status bar ---- */
 QFrame#statusbar {
-    background-color: #FFFFFF;
-    border-top: 1px solid #E2E8F0;
+    background-color: @SURFACE;
+    border-top: 1px solid @BORDER;
 }
 QLabel#status {
-    color: #5B6B7E;
+    color: @TEXT_SEC;
     font-size: 12px;
 }
 
 /* ---- progress ---- */
 QProgressBar {
-    background-color: #EEF3F8;
+    background-color: @SURFACE_ALT;
     border: none;
     border-radius: 4px;
     height: 6px;
@@ -519,11 +621,11 @@ QProgressBar {
     color: transparent;
 }
 QProgressBar::chunk {
-    background-color: #14B8A6;
+    background-color: @PRIMARY;
     border-radius: 4px;
 }
 
-/* ---- tooltip ---- */
+/* ---- tooltip (dark pill in both themes — an overlay element) ---- */
 QToolTip {
     background-color: #1E2A3A;
     color: #FFFFFF;
@@ -535,8 +637,8 @@ QToolTip {
 
 /* ---- menu ---- */
 QMenu {
-    background-color: #FFFFFF;
-    border: 1px solid #E2E8F0;
+    background-color: @SURFACE;
+    border: 1px solid @BORDER;
     border-radius: 8px;
     padding: 6px;
 }
@@ -545,24 +647,111 @@ QMenu::item {
     border-radius: 6px;
 }
 QMenu::item:selected {
-    background-color: #E3F0FF;
-    color: #1E2A3A;
+    background-color: @PRIMARY_SOFT;
+    color: @TEXT;
 }
 QMenu::separator {
     height: 1px;
-    background-color: #EEF2F6;
+    background-color: @BORDER_LIGHT;
     margin: 4px 8px;
 }
 
 /* ---- about dialog text ---- */
 QLabel#about-body {
     font-size: 13px;
-    color: #5B6B7E;
+    color: @TEXT_SEC;
 }
 QLabel#about-title {
     font-size: 20px;
     font-weight: 700;
-    color: #1E2A3A;
+    color: @TEXT;
 }
 )");
+
+    // Inject the active palette. Each token maps to one palette entry.
+    s.replace(QStringLiteral("@BG"),            QString::fromLatin1(C::BG()));
+    s.replace(QStringLiteral("@SURFACE"),       QString::fromLatin1(C::SURFACE()));
+    s.replace(QStringLiteral("@SURFACE_ALT"),   QString::fromLatin1(C::SURFACE_ALT()));
+    s.replace(QStringLiteral("@SURFACE_DEEP"),  QString::fromLatin1(C::SURFACE_DEEP()));
+    s.replace(QStringLiteral("@TEXT"),          QString::fromLatin1(C::FG()));
+    s.replace(QStringLiteral("@TEXT_SEC"),      QString::fromLatin1(C::TEXT_SEC()));
+    s.replace(QStringLiteral("@TEXT_MUTED"),    QString::fromLatin1(C::TEXT_MUTED()));
+    s.replace(QStringLiteral("@PRIMARY"),       QString::fromLatin1(C::PRIMARY()));
+    s.replace(QStringLiteral("@PRIMARY_HOVER"), QString::fromLatin1(C::PRIMARY_HOVER()));
+    s.replace(QStringLiteral("@PRIMARY_SOFT"),  QString::fromLatin1(C::PRIMARY_SOFT()));
+    s.replace(QStringLiteral("@ACCENT"),        QString::fromLatin1(C::ACCENT()));
+    s.replace(QStringLiteral("@DANGER"),        QString::fromLatin1(C::DANGER()));
+    s.replace(QStringLiteral("@BORDER"),        QString::fromLatin1(C::BORDER()));
+    s.replace(QStringLiteral("@BORDER_LIGHT"),  QString::fromLatin1(C::BORDER_LIGHT()));
+    return s;
 }
+
+// --------------------------------------------------------------------------- //
+// Theme management
+// --------------------------------------------------------------------------- //
+//
+// Persists the user's choice ("light"/"dark"/"system") to the same registry
+// key group as I18n (HKCU\Software\NcduWin). "system" resolves against
+// QStyleHints::colorScheme() so the app follows the Windows light/dark
+// setting automatically.
+
+namespace Theme {
+
+inline QSettings settings() {
+    return QSettings(QStringLiteral("HKEY_CURRENT_USER\\Software\\NcduWin"),
+                    QSettings::NativeFormat);
+}
+
+// The persisted choice. Defaults to "system".
+inline QString g_code = QStringLiteral("system");
+
+inline QString load() {
+    const QString stored = settings().value(QStringLiteral("theme")).toString();
+    if (stored == QStringLiteral("light") ||
+        stored == QStringLiteral("dark") ||
+        stored == QStringLiteral("system")) {
+        g_code = stored;
+    } else {
+        g_code = QStringLiteral("system");
+    }
+    return g_code;
+}
+
+inline QString current() { return g_code; }
+
+// Resolves "system" to "light"/"dark" using the OS color scheme.
+inline QString effective() {
+    if (g_code == QStringLiteral("dark"))
+        return QStringLiteral("dark");
+    if (g_code == QStringLiteral("light"))
+        return QStringLiteral("light");
+    // system
+    const auto scheme = QGuiApplication::styleHints()->colorScheme();
+    return (scheme == Qt::ColorScheme::Dark) ? QStringLiteral("dark")
+                                             : QStringLiteral("light");
+}
+
+// Points g_currentTheme at the palette for the effective theme. Call on the
+// main thread (reads QGuiApplication).
+inline void applyEffective() {
+    g_currentTheme = (effective() == QStringLiteral("dark")) ? &DARK_THEME
+                                                             : &LIGHT_THEME;
+}
+
+// Persist the choice and apply it. Does NOT refresh widgets — callers do that
+// (MainWindow::refreshTheme) so repainting happens once, on the main thread.
+inline void set(const QString& code) {
+    if (code != QStringLiteral("light") &&
+        code != QStringLiteral("dark") &&
+        code != QStringLiteral("system"))
+        return;
+    g_code = code;
+    settings().setValue(QStringLiteral("theme"), code);
+    applyEffective();
+}
+
+inline QString displayName(const QString& code) {
+    return I18n::tr(QStringLiteral("theme.") + code);
+}
+
+}  // namespace Theme

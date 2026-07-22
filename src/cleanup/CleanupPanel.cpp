@@ -138,13 +138,13 @@ void CleanupPanel::buildUI()
     m_titleLabel = new QLabel(I18n::tr("cleanup.title"));
     m_titleLabel->setStyleSheet(
         QStringLiteral("font-size: 14px; font-weight: 700; color: %1;")
-            .arg(QString::fromLatin1(C::TEXT)));
+            .arg(QString::fromLatin1(C::FG())));
     hlay->addWidget(m_titleLabel);
     hlay->addStretch(1);
     m_summaryLabel = new QLabel(QString());
     m_summaryLabel->setStyleSheet(
         QStringLiteral("color: %1; font-size: 11px;")
-            .arg(QString::fromLatin1(C::TEXT_MUTED)));
+            .arg(QString::fromLatin1(C::TEXT_MUTED())));
     hlay->addWidget(m_summaryLabel);
     lay->addWidget(header);
 
@@ -241,7 +241,7 @@ void CleanupPanel::buildUI()
         QMap<QString, QString>{{"size", QStringLiteral("0 B")}, {"count", QStringLiteral("0")}}));
     m_selectedLabel->setStyleSheet(
         QStringLiteral("color: %1; font-size: 12px;")
-            .arg(QString::fromLatin1(C::TEXT_SEC)));
+            .arg(QString::fromLatin1(C::TEXT_SEC())));
     blay->addWidget(m_selectedLabel);
     blay->addStretch(1);
     m_rescanBtn = new QPushButton(I18n::tr("cleanup.rescan"));
@@ -347,7 +347,7 @@ void CleanupPanel::addTarget(const CleanupTarget& target)
     item->setText(2, sizeText);
     item->setToolTip(2, sizeText);
     item->setTextAlignment(2, Qt::AlignRight);
-    item->setForeground(2, QColor(QString::fromLatin1(C::TEXT_SEC)));
+    item->setForeground(2, QColor(QString::fromLatin1(C::TEXT_SEC())));
 
     // Col 3: Item count
     QString countText = target.fileCount > 0 ? humanCount(target.fileCount)
@@ -355,13 +355,13 @@ void CleanupPanel::addTarget(const CleanupTarget& target)
     item->setText(3, countText);
     item->setToolTip(3, countText);
     item->setTextAlignment(3, Qt::AlignRight);
-    item->setForeground(3, QColor(QString::fromLatin1(C::TEXT_MUTED)));
+    item->setForeground(3, QColor(QString::fromLatin1(C::TEXT_MUTED())));
 
     // Col 4: Remark
     QString remark = target.remark.isEmpty() ? QString() : I18n::tr(target.remark);
     item->setText(4, remark);
     item->setToolTip(4, remark);
-    item->setForeground(4, QColor(QString::fromLatin1(C::TEXT_MUTED)));
+    item->setForeground(4, QColor(QString::fromLatin1(C::TEXT_MUTED())));
 
     // Checkbox: enabled targets are user-checkable; disabled (C level) are
     // shown with an unchecked, non-toggleable checkbox and a grayed name.
@@ -370,11 +370,11 @@ void CleanupPanel::addTarget(const CleanupTarget& target)
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
     } else {
         item->setCheckState(0, Qt::Unchecked);
-        item->setForeground(1, QColor(QString::fromLatin1(C::TEXT_MUTED)));
+        item->setForeground(1, QColor(QString::fromLatin1(C::TEXT_MUTED())));
     }
 
     if (target.size == 0)
-        item->setForeground(1, QColor(QString::fromLatin1(C::TEXT_MUTED)));
+        item->setForeground(1, QColor(QString::fromLatin1(C::TEXT_MUTED())));
 
     m_catTree->addTopLevelItem(item);
 }
@@ -410,11 +410,11 @@ void CleanupPanel::addLargeFile(const LargeFile& lf)
     item->setText(2, sizeText);
     item->setToolTip(2, sizeText);
     item->setTextAlignment(2, Qt::AlignRight);
-    item->setForeground(2, QColor(QString::fromLatin1(C::TEXT_SEC)));
+    item->setForeground(2, QColor(QString::fromLatin1(C::TEXT_SEC())));
 
     // Col 3: Path (clickable, reveals in Explorer)
     item->setText(3, lf.path);
-    item->setForeground(3, QColor(QString::fromLatin1(C::PRIMARY)));
+    item->setForeground(3, QColor(QString::fromLatin1(C::PRIMARY())));
     item->setToolTip(3, lf.path);
 
     // Col 4: Warning text + color by level
@@ -423,7 +423,7 @@ void CleanupPanel::addLargeFile(const LargeFile& lf)
         item->setForeground(4, QColor(QStringLiteral("#ef4444")));
     } else if (lvl == QLatin1String("A")) {
         applyLargeFileWarning(item, lvl);
-        item->setForeground(4, QColor(QString::fromLatin1(C::TEXT_MUTED)));
+        item->setForeground(4, QColor(QString::fromLatin1(C::TEXT_MUTED())));
     } else if (lvl == QLatin1String("B")) {
         applyLargeFileWarning(item, lvl);
         item->setForeground(4, QColor(QStringLiteral("#eab308")));
@@ -432,7 +432,7 @@ void CleanupPanel::addLargeFile(const LargeFile& lf)
     // C/D level: checkbox disabled (not user-checkable); others checkable.
     if (lvl == QLatin1String("C") || lvl == QLatin1String("D")) {
         item->setCheckState(0, Qt::Unchecked);
-        item->setForeground(1, QColor(QString::fromLatin1(C::TEXT_MUTED)));
+        item->setForeground(1, QColor(QString::fromLatin1(C::TEXT_MUTED())));
     } else {
         item->setCheckState(0, Qt::Unchecked);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
@@ -812,6 +812,22 @@ void CleanupPanel::onCleanClicked()
 // --------------------------------------------------------------------------- //
 // Retranslation
 // --------------------------------------------------------------------------- //
+void CleanupPanel::refreshTheme()
+{
+    // Re-apply the inline styles that bake a palette color into the label.
+    // (Per-item tree foregrounds are mid-tone and stay legible on both themes;
+    // the global QSS handles the rest.)
+    m_titleLabel->setStyleSheet(
+        QStringLiteral("font-size: 14px; font-weight: 700; color: %1;")
+            .arg(QString::fromLatin1(C::FG())));
+    m_summaryLabel->setStyleSheet(
+        QStringLiteral("color: %1; font-size: 11px;")
+            .arg(QString::fromLatin1(C::TEXT_MUTED())));
+    m_selectedLabel->setStyleSheet(
+        QStringLiteral("color: %1; font-size: 12px;")
+            .arg(QString::fromLatin1(C::TEXT_SEC())));
+}
+
 void CleanupPanel::retranslate()
 {
     m_titleLabel->setText(I18n::tr("cleanup.title"));

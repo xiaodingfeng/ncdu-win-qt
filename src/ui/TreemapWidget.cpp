@@ -280,12 +280,12 @@ void TreemapWidget::paintEvent(QPaintEvent* /*e*/)
     p.setRenderHint(QPainter::TextAntialiasing, true);
 
     // Background card.
-    p.setBrush(QBrush(QColor(QString::fromLatin1(C::SURFACE))));
+    p.setBrush(QBrush(QColor(QString::fromLatin1(C::SURFACE()))));
     p.setPen(Qt::NoPen);
     p.drawRoundedRect(rect().adjusted(0, 0, -1, -1), 10, 10);
 
     if (m_cells.empty()) {
-        p.setPen(QColor(QString::fromLatin1(C::TEXT_MUTED)));
+        p.setPen(QColor(QString::fromLatin1(C::TEXT_MUTED())));
         QFont emptyFont(QString::fromLatin1(DEFAULT_FAMILY), 11);
         p.setFont(emptyFont);
         p.drawText(rect(), Qt::AlignCenter, I18n::tr("treemap.empty"));
@@ -305,12 +305,12 @@ void TreemapWidget::paintEvent(QPaintEvent* /*e*/)
         if (idx == m_hoveredIndex)
             color = color.lighter(115);
         p.setBrush(QBrush(color));
-        p.setPen(QPen(QColor(QString::fromLatin1(C::SURFACE)), 2));
+        p.setPen(QPen(QColor(QString::fromLatin1(C::SURFACE())), 2));
         p.drawRoundedRect(r, 4, 4);
 
         // Label: only when the cell is large enough.
         if (r.width() >= MIN_LABEL_W && r.height() >= MIN_LABEL_H) {
-            p.setPen(QColor(QString::fromLatin1(C::SURFACE)));
+            p.setPen(QColor(QString::fromLatin1(C::SURFACE())));
             QString name = cell.node->name;
             if (name.length() > 18)
                 name = name.left(17) + QStringLiteral("\u2026");
@@ -330,7 +330,7 @@ void TreemapWidget::paintEvent(QPaintEvent* /*e*/)
     if (m_hoveredIndex >= 0 && m_hoveredIndex < static_cast<int>(m_cells.size())) {
         QRectF r = m_cells[m_hoveredIndex].rect;
         p.setBrush(Qt::NoBrush);
-        p.setPen(QPen(QColor(QString::fromLatin1(C::TEXT)), 1.5));
+        p.setPen(QPen(QColor(QString::fromLatin1(C::FG())), 1.5));
         p.drawRoundedRect(r, 4, 4);
     }
     p.end();

@@ -42,6 +42,7 @@ public:
     void setCleaning(bool cleaning);
     void updateFreeSpace(qint64 freeBytes, qint64 totalBytes);
     void retranslate();
+    void refreshTheme();
 
 signals:
     void cleanRequested(const std::vector<std::tuple<QString, QString, QString>>& items);

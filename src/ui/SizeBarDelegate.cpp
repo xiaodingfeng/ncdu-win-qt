@@ -36,7 +36,7 @@ void SizeBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& optio
     double fraction = barData.toDouble();
     QString colorHex = index.data(COLOR_ROLE).toString();
     if (colorHex.isEmpty())
-        colorHex = QString::fromLatin1(C::PRIMARY);
+        colorHex = QString::fromLatin1(C::PRIMARY());
     if (fraction <= 0.0)
         return;
 
@@ -48,7 +48,7 @@ void SizeBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& optio
     painter->setPen(Qt::NoPen);
 
     // Track / background of the bar.
-    painter->setBrush(QColor(QString::fromLatin1(C::SURFACE_ALT)));
+    painter->setBrush(QColor(QString::fromLatin1(C::SURFACE_ALT())));
     painter->drawRoundedRect(QRectF(r.x(), barY, r.width(), barH), 4, 4);
 
     // Filled portion (at least 3px so tiny slices are still visible).

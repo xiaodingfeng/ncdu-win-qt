@@ -110,6 +110,7 @@ private:
     QFutureWatcher<std::vector<std::shared_ptr<FileNode>>>* m_searchWatcher = nullptr;
     bool m_showFiles = true;
     bool m_skipHeavyDirs = true;
+    bool m_evictionEnabled = true;
     int m_sortCol = 2;
     Qt::SortOrder m_sortOrder = Qt::DescendingOrder;
     QString m_diskFreeText;
@@ -148,6 +149,8 @@ private:
     void setHeaderLabels();
     void startScan(const QString& path);
     void navigateTo(std::shared_ptr<FileNode> node);
+    void evictOffPathSubtrees();
+    void tryEvictSubtree(std::shared_ptr<FileNode>& node);
     void goUp();
     void refresh();
     void toggleShowFiles();
@@ -160,6 +163,8 @@ private:
     void reflectSortIndicator();
     void retranslateUI();
     void switchLanguage(const QString& code);
+    void switchTheme(const QString& code);
+    void refreshTheme();
 
     // Context-menu / actions
     void openPath(const QString& path);
