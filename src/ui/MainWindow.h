@@ -17,6 +17,7 @@
 #include <QString>
 #include <QTimer>
 #include <QFutureWatcher>
+#include <QNetworkAccessManager>
 #include <memory>
 #include <vector>
 #include <tuple>
@@ -141,6 +142,8 @@ private:
     // Menu actions (kept for retranslation).
     QMap<QString, QAction*> m_actions;
 
+    QNetworkAccessManager* m_nam = nullptr;
+
     // ---- Helpers ----
     void buildUI();
     void buildMenu();
@@ -172,8 +175,8 @@ private:
     void copyPath(const QString& path);
     void showProperties(const std::shared_ptr<FileNode>& node);
     void showAbout();
+    void checkForUpdate();
     void openHomepage();
-    void openSourceUrl();
     void showSkippedMsg();
 
     // Deletion

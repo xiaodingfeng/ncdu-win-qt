@@ -22,7 +22,7 @@ int main(int argc, char* argv[])
     QApplication app(argc, argv);
     app.setApplicationName("NcduWin");
     app.setApplicationDisplayName("NcduWin");
-    app.setApplicationVersion("1.0.2");
+    app.setApplicationVersion("1.0.3");
 
     // Install global logger BEFORE any other component — captures Qt
     // warnings, C++ uncaught exceptions, and Windows SEH crashes.

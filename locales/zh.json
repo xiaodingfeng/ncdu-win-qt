@@ -66,6 +66,7 @@
   "menu.help": "帮助(&H)",
   "menu.help.about": "关于 NcduWin(&A)",
   "menu.help.documentation": "打开主页(&H)",
+  "menu.help.check_update": "检查更新(&U)",
   "menu.help.source": "查看源码(&S)",
 
   "about.title": "关于 NcduWin",
@@ -73,6 +74,15 @@
   "about.homepage": "🏠 主页：{url}",
   "about.source": "💻 源码：{url}",
   "about.thanks": "灵感来自 Yoran Heling 的 ncdu。矩形树图算法来自 Bruls、Houtman 与 van Wijk。",
+
+  "update.checking": "正在检查更新…",
+  "update.current": "已是最新版本！",
+  "update.current_body": "NcduWin {version} 是当前最新版本。",
+  "update.new_title": "发现新版本",
+  "update.new_body": "NcduWin {version} 现已发布。\n\n您当前使用的是 {local}。\n\n请前往以下地址下载最新版安装：",
+  "update.download_url": "📥 {url}",
+  "update.check_failed": "检查更新失败",
+  "update.check_failed_body": "无法检查更新。\n\n错误：{error}",
 
   "ctx.open_folder": "打开文件夹",
   "ctx.open_file": "打开文件",

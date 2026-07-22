@@ -743,8 +743,8 @@ QMenu::item {
     border-radius: 6px;
     color: @TEXT;
 }
-QMenu::item:selected {
-    background-color: @PRIMARY_SOFT;
+QMenu::item:selected, QMenu::item:hover {
+    background-color: @SURFACE_ALT;
     color: @TEXT;
 }
 QMenu::separator {

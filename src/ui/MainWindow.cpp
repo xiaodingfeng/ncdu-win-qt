@@ -48,6 +48,9 @@
 #include <QClipboard>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QVersionNumber>
 
 #include <algorithm>
 #include <stack>
@@ -515,8 +518,12 @@ void MainWindow::buildMenu()
     m_actions["help.homepage"] = helpMenu->addAction(I18n::tr("menu.help.documentation"));
     connect(m_actions["help.homepage"], &QAction::triggered, this, QOverload<>::of(&MainWindow::openHomepage));
 
-    m_actions["help.source"] = helpMenu->addAction(I18n::tr("menu.help.source"));
-    connect(m_actions["help.source"], &QAction::triggered, this, QOverload<>::of(&MainWindow::openSourceUrl));
+    helpMenu->addSeparator();
+
+    m_actions["help.check_update"] = helpMenu->addAction(I18n::tr("menu.help.check_update"));
+    connect(m_actions["help.check_update"], &QAction::triggered, this, &MainWindow::checkForUpdate);
+
+    m_nam = new QNetworkAccessManager(this);
 }
 
 // --------------------------------------------------------------------------- //
@@ -1933,9 +1940,86 @@ void MainWindow::openHomepage()
     QDesktopServices::openUrl(QUrl(HOMEPAGE));
 }
 
-void MainWindow::openSourceUrl()
+void MainWindow::checkForUpdate()
 {
-    QDesktopServices::openUrl(QUrl(SOURCE_URL));
+    m_statusLabel->setText(I18n::tr("update.checking"));
+    QNetworkRequest req(QUrl(QString(HOMEPAGE) + QStringLiteral("version")));
+    req.setTransferTimeout(10000);
+    auto* reply = m_nam->get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            m_statusLabel->setText(QString());
+            QMessageBox msgBox(this);
+            msgBox.setIcon(QMessageBox::Warning);
+            msgBox.setWindowTitle(I18n::tr("update.check_failed"));
+            msgBox.setText(I18n::tr("update.check_failed_body",
+                QMap<QString, QString>{{"error", reply->errorString()}}));
+            msgBox.exec();
+            return;
+        }
+        QString remoteVer = QString::fromUtf8(reply->readAll()).trimmed();
+        QVersionNumber local = QVersionNumber::fromString(APP_VERSION);
+        QVersionNumber remote = QVersionNumber::fromString(remoteVer);
+        if (remote.isNull()) {
+            m_statusLabel->setText(QString());
+            QMessageBox msgBox(this);
+            msgBox.setIcon(QMessageBox::Warning);
+            msgBox.setWindowTitle(I18n::tr("update.check_failed"));
+            msgBox.setText(I18n::tr("update.check_failed_body",
+                QMap<QString, QString>{{"error", QStringLiteral("Invalid version response")}}));
+            msgBox.exec();
+            return;
+        }
+        m_statusLabel->setText(QString());
+        if (remote > local) {
+            QDialog dlg(this);
+            dlg.setWindowTitle(I18n::tr("update.new_title"));
+            dlg.setMinimumWidth(400);
+            auto* lay = new QVBoxLayout(&dlg);
+            lay->setContentsMargins(20, 20, 20, 16);
+            lay->setSpacing(10);
+
+            auto* body = new QLabel(I18n::tr("update.new_body",
+                QMap<QString, QString>{
+                    {"version", remoteVer},
+                    {"local", APP_VERSION},
+                }));
+            body->setWordWrap(true);
+            lay->addWidget(body);
+
+            auto* urlLbl = new QLabel(
+                QStringLiteral("<a href=\"%1\" style=\"color:%2;text-decoration:none;\">%3</a>")
+                    .arg(HOMEPAGE)
+                    .arg(QString::fromLatin1(C::PRIMARY()))
+                    .arg(I18n::tr("update.download_url",
+                        QMap<QString, QString>{{"url", HOMEPAGE}})));
+            urlLbl->setOpenExternalLinks(true);
+            urlLbl->setTextInteractionFlags(Qt::TextBrowserInteraction);
+            urlLbl->setWordWrap(true);
+            urlLbl->setCursor(Qt::PointingHandCursor);
+            lay->addWidget(urlLbl);
+
+            lay->addStretch(1);
+            auto* btnRow = new QHBoxLayout;
+            btnRow->addStretch(1);
+            auto* closeBtn = new QPushButton(I18n::tr("button.ok"));
+            closeBtn->setObjectName("primary");
+            closeBtn->setCursor(Qt::PointingHandCursor);
+            connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+            btnRow->addWidget(closeBtn);
+            lay->addLayout(btnRow);
+
+            dlg.exec();
+        } else {
+            QMessageBox msgBox(this);
+            msgBox.setIcon(QMessageBox::Information);
+            msgBox.setWindowTitle(I18n::tr("update.current"));
+            msgBox.setText(I18n::tr("update.current_body",
+                QMap<QString, QString>{{"version", APP_VERSION}}));
+            msgBox.exec();
+        }
+    });
 }
 
 // --------------------------------------------------------------------------- //
