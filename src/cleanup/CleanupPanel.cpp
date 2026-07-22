@@ -267,7 +267,8 @@ QTreeWidget* CleanupPanel::makeTree(const QStringList& headers, bool col3Fixed)
     tree->setSelectionMode(QAbstractItemView::NoSelection);
     tree->setColumnCount(headers.size());
     tree->setHeaderLabels(headers);
-    tree->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    tree->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    tree->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 
     auto* hdr = tree->header();
     hdr->setSectionResizeMode(0, QHeaderView::Fixed);

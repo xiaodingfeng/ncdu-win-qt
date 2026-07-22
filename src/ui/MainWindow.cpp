@@ -341,6 +341,8 @@ void MainWindow::buildUI()
         m_tree->setSelectionMode(QTreeWidget::ExtendedSelection);
         m_tree->setSortingEnabled(false);
         m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
+        m_tree->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        m_tree->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         m_tree->setFocus();
         setHeaderLabels();
 

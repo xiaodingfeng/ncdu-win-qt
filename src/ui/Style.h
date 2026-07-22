@@ -22,6 +22,11 @@
 
 // --------------------------------------------------------------------------- //
 // Color palette
+#include <QPalette>
+#include <QColor>
+
+// --------------------------------------------------------------------------- //
+// Color palette
 // --------------------------------------------------------------------------- //
 
 // All colors used by the UI. Two instances are defined (LIGHT_THEME /
@@ -48,6 +53,9 @@ struct ThemeColors {
     // Lines
     const char* BORDER;
     const char* BORDER_LIGHT;
+    // Scrollbars
+    const char* SCROLLBAR_THUMB;
+    const char* SCROLLBAR_THUMB_HOVER;
     // File-type colors (for treemap)
     const char* TYPE_DIR;
     const char* TYPE_DOC;
@@ -79,6 +87,8 @@ inline const ThemeColors LIGHT_THEME = {
     "#10B981",   // SUCCESS
     "#E2E8F0",   // BORDER
     "#EEF2F6",   // BORDER_LIGHT
+    "#CBD5E1",   // SCROLLBAR_THUMB
+    "#94A3B8",   // SCROLLBAR_THUMB_HOVER
     "#2DD4BF",   // TYPE_DIR
     "#60A5FA",   // TYPE_DOC
     "#A78BFA",   // TYPE_IMAGE
@@ -97,9 +107,9 @@ inline const ThemeColors DARK_THEME = {
     "#252B3A",   // SURFACE
     "#2D3445",   // SURFACE_ALT
     "#353D50",   // SURFACE_DEEP
-    "#E4E8F0",   // TEXT          (fixes invisible text on dark system bg)
-    "#9CA8B8",   // TEXT_SEC
-    "#6B7689",   // TEXT_MUTED
+    "#F0F4F8",   // TEXT          (high-contrast crisp white-gray text)
+    "#A6B4C9",   // TEXT_SEC      (clear secondary text)
+    "#8595A8",   // TEXT_MUTED    (clear muted text)
     "#14B8A6",   // PRIMARY       (mint-teal reads well on dark)
     "#0D9488",   // PRIMARY_HOVER
     "#1F3A3A",   // PRIMARY_SOFT  selection bg
@@ -109,6 +119,8 @@ inline const ThemeColors DARK_THEME = {
     "#10B981",   // SUCCESS
     "#353D50",   // BORDER
     "#2D3445",   // BORDER_LIGHT
+    "#4B5563",   // SCROLLBAR_THUMB       (clearly visible slate thumb)
+    "#718096",   // SCROLLBAR_THUMB_HOVER
     "#2DD4BF",   // TYPE_DIR      (saturated colors stay vivid on dark)
     "#60A5FA",   // TYPE_DOC
     "#A78BFA",   // TYPE_IMAGE
@@ -128,34 +140,69 @@ inline const ThemeColors* g_currentTheme = &LIGHT_THEME;
 // Function accessors for the active palette. Reading through these (rather
 // than a fixed constant) is what makes runtime theme switching work.
 namespace C {
-    inline const char* BG()            { return g_currentTheme->BG; }
-    inline const char* SURFACE()       { return g_currentTheme->SURFACE; }
-    inline const char* SURFACE_ALT()   { return g_currentTheme->SURFACE_ALT; }
-    inline const char* SURFACE_DEEP()  { return g_currentTheme->SURFACE_DEEP; }
-    inline const char* FG()            { return g_currentTheme->TEXT; }
-    inline const char* TEXT_SEC()      { return g_currentTheme->TEXT_SEC; }
-    inline const char* TEXT_MUTED()    { return g_currentTheme->TEXT_MUTED; }
-    inline const char* PRIMARY()       { return g_currentTheme->PRIMARY; }
-    inline const char* PRIMARY_HOVER() { return g_currentTheme->PRIMARY_HOVER; }
-    inline const char* PRIMARY_SOFT()  { return g_currentTheme->PRIMARY_SOFT; }
-    inline const char* ACCENT()        { return g_currentTheme->ACCENT; }
-    inline const char* DANGER()        { return g_currentTheme->DANGER; }
-    inline const char* WARNING()       { return g_currentTheme->WARNING; }
-    inline const char* SUCCESS()       { return g_currentTheme->SUCCESS; }
-    inline const char* BORDER()        { return g_currentTheme->BORDER; }
-    inline const char* BORDER_LIGHT()  { return g_currentTheme->BORDER_LIGHT; }
-    inline const char* TYPE_DIR()      { return g_currentTheme->TYPE_DIR; }
-    inline const char* TYPE_DOC()      { return g_currentTheme->TYPE_DOC; }
-    inline const char* TYPE_IMAGE()    { return g_currentTheme->TYPE_IMAGE; }
-    inline const char* TYPE_VIDEO()    { return g_currentTheme->TYPE_VIDEO; }
-    inline const char* TYPE_AUDIO()    { return g_currentTheme->TYPE_AUDIO; }
-    inline const char* TYPE_ARCHIVE()  { return g_currentTheme->TYPE_ARCHIVE; }
-    inline const char* TYPE_CODE()     { return g_currentTheme->TYPE_CODE; }
-    inline const char* TYPE_EXEC()     { return g_currentTheme->TYPE_EXEC; }
-    inline const char* TYPE_DATA()     { return g_currentTheme->TYPE_DATA; }
-    inline const char* TYPE_OTHER()    { return g_currentTheme->TYPE_OTHER; }
-    inline const char* TYPE_HIDDEN()   { return g_currentTheme->TYPE_HIDDEN; }
+    inline const char* BG()                    { return g_currentTheme->BG; }
+    inline const char* SURFACE()               { return g_currentTheme->SURFACE; }
+    inline const char* SURFACE_ALT()           { return g_currentTheme->SURFACE_ALT; }
+    inline const char* SURFACE_DEEP()          { return g_currentTheme->SURFACE_DEEP; }
+    inline const char* FG()                    { return g_currentTheme->TEXT; }
+    inline const char* TEXT_SEC()              { return g_currentTheme->TEXT_SEC; }
+    inline const char* TEXT_MUTED()            { return g_currentTheme->TEXT_MUTED; }
+    inline const char* PRIMARY()               { return g_currentTheme->PRIMARY; }
+    inline const char* PRIMARY_HOVER()         { return g_currentTheme->PRIMARY_HOVER; }
+    inline const char* PRIMARY_SOFT()          { return g_currentTheme->PRIMARY_SOFT; }
+    inline const char* ACCENT()                { return g_currentTheme->ACCENT; }
+    inline const char* DANGER()                { return g_currentTheme->DANGER; }
+    inline const char* WARNING()               { return g_currentTheme->WARNING; }
+    inline const char* SUCCESS()               { return g_currentTheme->SUCCESS; }
+    inline const char* BORDER()                { return g_currentTheme->BORDER; }
+    inline const char* BORDER_LIGHT()          { return g_currentTheme->BORDER_LIGHT; }
+    inline const char* SCROLLBAR_THUMB()       { return g_currentTheme->SCROLLBAR_THUMB; }
+    inline const char* SCROLLBAR_THUMB_HOVER() { return g_currentTheme->SCROLLBAR_THUMB_HOVER; }
+    inline const char* TYPE_DIR()              { return g_currentTheme->TYPE_DIR; }
+    inline const char* TYPE_DOC()              { return g_currentTheme->TYPE_DOC; }
+    inline const char* TYPE_IMAGE()            { return g_currentTheme->TYPE_IMAGE; }
+    inline const char* TYPE_VIDEO()            { return g_currentTheme->TYPE_VIDEO; }
+    inline const char* TYPE_AUDIO()            { return g_currentTheme->TYPE_AUDIO; }
+    inline const char* TYPE_ARCHIVE()          { return g_currentTheme->TYPE_ARCHIVE; }
+    inline const char* TYPE_CODE()             { return g_currentTheme->TYPE_CODE; }
+    inline const char* TYPE_EXEC()             { return g_currentTheme->TYPE_EXEC; }
+    inline const char* TYPE_DATA()             { return g_currentTheme->TYPE_DATA; }
+    inline const char* TYPE_OTHER()            { return g_currentTheme->TYPE_OTHER; }
+    inline const char* TYPE_HIDDEN()           { return g_currentTheme->TYPE_HIDDEN; }
 }  // namespace C
+
+inline QPalette makePalette(const ThemeColors& colors) {
+    QPalette p;
+    QColor bg(colors.BG);
+    QColor surface(colors.SURFACE);
+    QColor surfaceAlt(colors.SURFACE_ALT);
+    QColor text(colors.TEXT);
+    QColor textSec(colors.TEXT_SEC);
+    QColor textMuted(colors.TEXT_MUTED);
+    QColor primary(colors.PRIMARY);
+    QColor primarySoft(colors.PRIMARY_SOFT);
+
+    p.setColor(QPalette::Window, bg);
+    p.setColor(QPalette::WindowText, text);
+    p.setColor(QPalette::Base, surface);
+    p.setColor(QPalette::AlternateBase, surfaceAlt);
+    p.setColor(QPalette::ToolTipBase, QColor("#1E2A3A"));
+    p.setColor(QPalette::ToolTipText, QColor("#FFFFFF"));
+    p.setColor(QPalette::Text, text);
+    p.setColor(QPalette::Button, surface);
+    p.setColor(QPalette::ButtonText, text);
+    p.setColor(QPalette::BrightText, QColor(colors.DANGER));
+    p.setColor(QPalette::Link, primary);
+    p.setColor(QPalette::Highlight, primarySoft);
+    p.setColor(QPalette::HighlightedText, text);
+    p.setColor(QPalette::PlaceholderText, textMuted);
+
+    p.setColor(QPalette::Disabled, QPalette::WindowText, textMuted);
+    p.setColor(QPalette::Disabled, QPalette::Text, textMuted);
+    p.setColor(QPalette::Disabled, QPalette::ButtonText, textMuted);
+
+    return p;
+}
 
 // Default UI font family.
 inline const char* const DEFAULT_FAMILY = "Segoe UI";
@@ -326,6 +373,15 @@ inline QString loadQSS() {
 
 QWidget#root {
     background-color: @BG;
+}
+
+QDialog, QMessageBox, QProgressDialog, QFileDialog, QInputDialog {
+    background-color: @BG;
+    color: @TEXT;
+}
+
+QDialog QLabel, QMessageBox QLabel, QProgressDialog QLabel {
+    color: @TEXT;
 }
 
 QMenuBar {
@@ -533,6 +589,7 @@ QTreeWidget::item {
     padding: 6px 4px;
     border-bottom: 1px solid @BORDER_LIGHT;
     min-height: 22px;
+    color: @TEXT;
 }
 QTreeWidget::item:selected {
     background-color: @PRIMARY_SOFT;
@@ -567,38 +624,77 @@ QHeaderView::section:last {
     border-right: none;
 }
 
+/* ---- tabs ---- */
+QTabWidget::pane {
+    border: 1px solid @BORDER;
+    background-color: @SURFACE;
+    border-radius: 8px;
+    top: -1px;
+}
+QTabBar::tab {
+    background-color: @SURFACE_ALT;
+    color: @TEXT_SEC;
+    border: 1px solid @BORDER;
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 7px 16px;
+    margin-right: 2px;
+    font-weight: 500;
+}
+QTabBar::tab:hover {
+    background-color: @SURFACE_DEEP;
+    color: @PRIMARY;
+}
+QTabBar::tab:selected {
+    background-color: @SURFACE;
+    color: @PRIMARY;
+    border-color: @BORDER;
+    border-bottom: 2px solid @PRIMARY;
+    font-weight: 600;
+}
+
 /* ---- scroll bars ---- */
 QScrollBar:vertical {
-    background: transparent;
+    background: @SURFACE_ALT;
     width: 10px;
-    margin: 4px 2px;
+    margin: 2px;
+    border-radius: 5px;
 }
 QScrollBar::handle:vertical {
-    background: @SURFACE_DEEP;
+    background: @SCROLLBAR_THUMB;
     border-radius: 4px;
-    min-height: 32px;
+    min-height: 24px;
 }
 QScrollBar::handle:vertical:hover {
-    background: @TEXT_MUTED;
+    background: @SCROLLBAR_THUMB_HOVER;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-    height: 0;
+    height: 0px;
 }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: none;
+}
+
 QScrollBar:horizontal {
-    background: transparent;
+    background: @SURFACE_ALT;
     height: 10px;
-    margin: 2px 4px;
+    margin: 2px;
+    border-radius: 5px;
 }
 QScrollBar::handle:horizontal {
-    background: @SURFACE_DEEP;
+    background: @SCROLLBAR_THUMB;
     border-radius: 4px;
-    min-width: 32px;
+    min-width: 24px;
 }
 QScrollBar::handle:horizontal:hover {
-    background: @TEXT_MUTED;
+    background: @SCROLLBAR_THUMB_HOVER;
 }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-    width: 0;
+    width: 0px;
+}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: none;
 }
 
 /* ---- status bar ---- */
@@ -645,6 +741,7 @@ QMenu {
 QMenu::item {
     padding: 6px 24px 6px 14px;
     border-radius: 6px;
+    color: @TEXT;
 }
 QMenu::item:selected {
     background-color: @PRIMARY_SOFT;
@@ -669,20 +766,22 @@ QLabel#about-title {
 )");
 
     // Inject the active palette. Each token maps to one palette entry.
-    s.replace(QStringLiteral("@BG"),            QString::fromLatin1(C::BG()));
-    s.replace(QStringLiteral("@SURFACE"),       QString::fromLatin1(C::SURFACE()));
-    s.replace(QStringLiteral("@SURFACE_ALT"),   QString::fromLatin1(C::SURFACE_ALT()));
-    s.replace(QStringLiteral("@SURFACE_DEEP"),  QString::fromLatin1(C::SURFACE_DEEP()));
-    s.replace(QStringLiteral("@TEXT"),          QString::fromLatin1(C::FG()));
-    s.replace(QStringLiteral("@TEXT_SEC"),      QString::fromLatin1(C::TEXT_SEC()));
-    s.replace(QStringLiteral("@TEXT_MUTED"),    QString::fromLatin1(C::TEXT_MUTED()));
-    s.replace(QStringLiteral("@PRIMARY"),       QString::fromLatin1(C::PRIMARY()));
-    s.replace(QStringLiteral("@PRIMARY_HOVER"), QString::fromLatin1(C::PRIMARY_HOVER()));
-    s.replace(QStringLiteral("@PRIMARY_SOFT"),  QString::fromLatin1(C::PRIMARY_SOFT()));
-    s.replace(QStringLiteral("@ACCENT"),        QString::fromLatin1(C::ACCENT()));
-    s.replace(QStringLiteral("@DANGER"),        QString::fromLatin1(C::DANGER()));
-    s.replace(QStringLiteral("@BORDER"),        QString::fromLatin1(C::BORDER()));
-    s.replace(QStringLiteral("@BORDER_LIGHT"),  QString::fromLatin1(C::BORDER_LIGHT()));
+    s.replace(QStringLiteral("@BG"),                    QString::fromLatin1(C::BG()));
+    s.replace(QStringLiteral("@SURFACE"),               QString::fromLatin1(C::SURFACE()));
+    s.replace(QStringLiteral("@SURFACE_ALT"),           QString::fromLatin1(C::SURFACE_ALT()));
+    s.replace(QStringLiteral("@SURFACE_DEEP"),          QString::fromLatin1(C::SURFACE_DEEP()));
+    s.replace(QStringLiteral("@TEXT"),                  QString::fromLatin1(C::FG()));
+    s.replace(QStringLiteral("@TEXT_SEC"),              QString::fromLatin1(C::TEXT_SEC()));
+    s.replace(QStringLiteral("@TEXT_MUTED"),            QString::fromLatin1(C::TEXT_MUTED()));
+    s.replace(QStringLiteral("@PRIMARY"),               QString::fromLatin1(C::PRIMARY()));
+    s.replace(QStringLiteral("@PRIMARY_HOVER"),         QString::fromLatin1(C::PRIMARY_HOVER()));
+    s.replace(QStringLiteral("@PRIMARY_SOFT"),          QString::fromLatin1(C::PRIMARY_SOFT()));
+    s.replace(QStringLiteral("@ACCENT"),                QString::fromLatin1(C::ACCENT()));
+    s.replace(QStringLiteral("@DANGER"),                QString::fromLatin1(C::DANGER()));
+    s.replace(QStringLiteral("@BORDER"),                QString::fromLatin1(C::BORDER()));
+    s.replace(QStringLiteral("@BORDER_LIGHT"),          QString::fromLatin1(C::BORDER_LIGHT()));
+    s.replace(QStringLiteral("@SCROLLBAR_THUMB"),       QString::fromLatin1(C::SCROLLBAR_THUMB()));
+    s.replace(QStringLiteral("@SCROLLBAR_THUMB_HOVER"), QString::fromLatin1(C::SCROLLBAR_THUMB_HOVER()));
     return s;
 }
 
@@ -736,6 +835,7 @@ inline QString effective() {
 inline void applyEffective() {
     g_currentTheme = (effective() == QStringLiteral("dark")) ? &DARK_THEME
                                                              : &LIGHT_THEME;
+    QGuiApplication::setPalette(makePalette(*g_currentTheme));
 }
 
 // Persist the choice and apply it. Does NOT refresh widgets — callers do that
