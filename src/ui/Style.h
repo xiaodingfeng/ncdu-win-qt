@@ -14,6 +14,7 @@
 #include <QSet>
 #include <QList>
 #include <QPair>
+#include <QMap>
 #include <QSettings>
 #include <QGuiApplication>
 #include <QStyleHints>
@@ -133,6 +134,60 @@ inline const ThemeColors DARK_THEME = {
     "#94A3B8",   // TYPE_OTHER
     "#4A5366",   // TYPE_HIDDEN   (darkened so "hidden" reads as muted on dark)
 };
+
+// --------------------------------------------------------------------------- //
+// Custom theme storage
+// --------------------------------------------------------------------------- //
+//
+// A user-defined theme derived from a base (light/dark). ThemeColors uses
+// const char* fields, which require stable addresses, so each color is held
+// in a QByteArray and the embedded ``theme`` member's pointers are repointed
+// at them via sync(). Only 16 tokens are exposed in the customize dialog
+// (10 file-type colors + 6 core UI colors); the remaining 13 are copied from
+// the base and left untouched.
+
+struct CustomThemeData {
+    QByteArray BG, SURFACE, SURFACE_ALT, SURFACE_DEEP;
+    QByteArray TEXT, TEXT_SEC, TEXT_MUTED;
+    QByteArray PRIMARY, PRIMARY_HOVER, PRIMARY_SOFT, ACCENT;
+    QByteArray DANGER, WARNING, SUCCESS;
+    QByteArray BORDER, BORDER_LIGHT;
+    QByteArray SCROLLBAR_THUMB, SCROLLBAR_THUMB_HOVER;
+    QByteArray TYPE_DIR, TYPE_DOC, TYPE_IMAGE, TYPE_VIDEO, TYPE_AUDIO;
+    QByteArray TYPE_ARCHIVE, TYPE_CODE, TYPE_EXEC, TYPE_DATA, TYPE_OTHER;
+    QByteArray TYPE_HIDDEN;
+
+    ThemeColors theme;   // const char* fields point into the QByteArrays above
+    QString base = QStringLiteral("dark");
+    bool loaded = false; // true once a custom theme has been persisted
+
+    void copyFrom(const ThemeColors& src) {
+        BG = src.BG; SURFACE = src.SURFACE; SURFACE_ALT = src.SURFACE_ALT; SURFACE_DEEP = src.SURFACE_DEEP;
+        TEXT = src.TEXT; TEXT_SEC = src.TEXT_SEC; TEXT_MUTED = src.TEXT_MUTED;
+        PRIMARY = src.PRIMARY; PRIMARY_HOVER = src.PRIMARY_HOVER; PRIMARY_SOFT = src.PRIMARY_SOFT; ACCENT = src.ACCENT;
+        DANGER = src.DANGER; WARNING = src.WARNING; SUCCESS = src.SUCCESS;
+        BORDER = src.BORDER; BORDER_LIGHT = src.BORDER_LIGHT;
+        SCROLLBAR_THUMB = src.SCROLLBAR_THUMB; SCROLLBAR_THUMB_HOVER = src.SCROLLBAR_THUMB_HOVER;
+        TYPE_DIR = src.TYPE_DIR; TYPE_DOC = src.TYPE_DOC; TYPE_IMAGE = src.TYPE_IMAGE; TYPE_VIDEO = src.TYPE_VIDEO; TYPE_AUDIO = src.TYPE_AUDIO;
+        TYPE_ARCHIVE = src.TYPE_ARCHIVE; TYPE_CODE = src.TYPE_CODE; TYPE_EXEC = src.TYPE_EXEC; TYPE_DATA = src.TYPE_DATA; TYPE_OTHER = src.TYPE_OTHER;
+        TYPE_HIDDEN = src.TYPE_HIDDEN;
+        sync();
+    }
+
+    void sync() {
+        theme.BG = BG.constData(); theme.SURFACE = SURFACE.constData(); theme.SURFACE_ALT = SURFACE_ALT.constData(); theme.SURFACE_DEEP = SURFACE_DEEP.constData();
+        theme.TEXT = TEXT.constData(); theme.TEXT_SEC = TEXT_SEC.constData(); theme.TEXT_MUTED = TEXT_MUTED.constData();
+        theme.PRIMARY = PRIMARY.constData(); theme.PRIMARY_HOVER = PRIMARY_HOVER.constData(); theme.PRIMARY_SOFT = PRIMARY_SOFT.constData(); theme.ACCENT = ACCENT.constData();
+        theme.DANGER = DANGER.constData(); theme.WARNING = WARNING.constData(); theme.SUCCESS = SUCCESS.constData();
+        theme.BORDER = BORDER.constData(); theme.BORDER_LIGHT = BORDER_LIGHT.constData();
+        theme.SCROLLBAR_THUMB = SCROLLBAR_THUMB.constData(); theme.SCROLLBAR_THUMB_HOVER = SCROLLBAR_THUMB_HOVER.constData();
+        theme.TYPE_DIR = TYPE_DIR.constData(); theme.TYPE_DOC = TYPE_DOC.constData(); theme.TYPE_IMAGE = TYPE_IMAGE.constData(); theme.TYPE_VIDEO = TYPE_VIDEO.constData(); theme.TYPE_AUDIO = TYPE_AUDIO.constData();
+        theme.TYPE_ARCHIVE = TYPE_ARCHIVE.constData(); theme.TYPE_CODE = TYPE_CODE.constData(); theme.TYPE_EXEC = TYPE_EXEC.constData(); theme.TYPE_DATA = TYPE_DATA.constData(); theme.TYPE_OTHER = TYPE_OTHER.constData();
+        theme.TYPE_HIDDEN = TYPE_HIDDEN.constData();
+    }
+};
+
+inline CustomThemeData g_customTheme;
 
 // The active palette. Switched by Theme::applyEffective() on the main thread.
 inline const ThemeColors* g_currentTheme = &LIGHT_THEME;
@@ -795,10 +850,11 @@ QLabel#about-title {
 // Theme management
 // --------------------------------------------------------------------------- //
 //
-// Persists the user's choice ("light"/"dark"/"system") to the same registry
-// key group as I18n (HKCU\Software\NcduWin). "system" resolves against
-// QStyleHints::colorScheme() so the app follows the Windows light/dark
-// setting automatically.
+// Persists the user's choice ("light"/"dark"/"system"/"custom") to the same
+// registry key group as I18n (HKCU\Software\NcduWin). "system" resolves
+// against QStyleHints::colorScheme() so the app follows the Windows light/dark
+// setting automatically. "custom" is a user-defined theme persisted as
+// "themeCustom" (base + 16 editable color overrides).
 
 namespace Theme {
 
@@ -810,22 +866,201 @@ inline QSettings settings() {
 // The persisted choice. Defaults to "system".
 inline QString g_code = QStringLiteral("system");
 
+// Editable color tokens exposed in the customize dialog.
+inline QStringList editableFileTypeTokens() {
+    return {
+        QStringLiteral("TYPE_DIR"), QStringLiteral("TYPE_DOC"),
+        QStringLiteral("TYPE_IMAGE"), QStringLiteral("TYPE_VIDEO"),
+        QStringLiteral("TYPE_AUDIO"), QStringLiteral("TYPE_ARCHIVE"),
+        QStringLiteral("TYPE_CODE"), QStringLiteral("TYPE_EXEC"),
+        QStringLiteral("TYPE_DATA"), QStringLiteral("TYPE_OTHER"),
+        QStringLiteral("TYPE_HIDDEN"),
+    };
+}
+inline QStringList editableUITokens() {
+    return {
+        QStringLiteral("BG"), QStringLiteral("SURFACE"),
+        QStringLiteral("TEXT"), QStringLiteral("TEXT_SEC"), QStringLiteral("TEXT_MUTED"),
+        QStringLiteral("PRIMARY"), QStringLiteral("ACCENT"), QStringLiteral("BORDER"),
+    };
+}
+
+// i18n key for an editable token's display label.
+inline QString tokenLabelKey(const QString& token) {
+    static const QMap<QString, QString> m = {
+        {QStringLiteral("BG"),           QStringLiteral("theme.color.bg")},
+        {QStringLiteral("SURFACE"),      QStringLiteral("theme.color.surface")},
+        {QStringLiteral("TEXT"),         QStringLiteral("theme.color.text")},
+        {QStringLiteral("TEXT_SEC"),     QStringLiteral("theme.color.text_sec")},
+        {QStringLiteral("TEXT_MUTED"),   QStringLiteral("theme.color.text_muted")},
+        {QStringLiteral("PRIMARY"),      QStringLiteral("theme.color.primary")},
+        {QStringLiteral("ACCENT"),       QStringLiteral("theme.color.accent")},
+        {QStringLiteral("BORDER"),       QStringLiteral("theme.color.border")},
+        {QStringLiteral("TYPE_DIR"),     QStringLiteral("type.folder")},
+        {QStringLiteral("TYPE_DOC"),     QStringLiteral("type.document")},
+        {QStringLiteral("TYPE_IMAGE"),   QStringLiteral("type.image")},
+        {QStringLiteral("TYPE_VIDEO"),   QStringLiteral("type.video")},
+        {QStringLiteral("TYPE_AUDIO"),   QStringLiteral("type.audio")},
+        {QStringLiteral("TYPE_ARCHIVE"), QStringLiteral("type.archive")},
+        {QStringLiteral("TYPE_CODE"),    QStringLiteral("type.code")},
+        {QStringLiteral("TYPE_EXEC"),    QStringLiteral("type.executable")},
+        {QStringLiteral("TYPE_DATA"),    QStringLiteral("type.data")},
+        {QStringLiteral("TYPE_OTHER"),   QStringLiteral("type.other")},
+        {QStringLiteral("TYPE_HIDDEN"),  QStringLiteral("type.hidden")},
+    };
+    return m.value(token, token);
+}
+
+// Read a single token's color from a ThemeColors instance (by token name).
+inline QString colorFromTheme(const ThemeColors& src, const QString& token) {
+    if (token == QStringLiteral("BG"))           return QString::fromLatin1(src.BG);
+    if (token == QStringLiteral("SURFACE"))      return QString::fromLatin1(src.SURFACE);
+    if (token == QStringLiteral("TEXT"))         return QString::fromLatin1(src.TEXT);
+    if (token == QStringLiteral("TEXT_SEC"))     return QString::fromLatin1(src.TEXT_SEC);
+    if (token == QStringLiteral("TEXT_MUTED"))   return QString::fromLatin1(src.TEXT_MUTED);
+    if (token == QStringLiteral("PRIMARY"))      return QString::fromLatin1(src.PRIMARY);
+    if (token == QStringLiteral("ACCENT"))       return QString::fromLatin1(src.ACCENT);
+    if (token == QStringLiteral("BORDER"))       return QString::fromLatin1(src.BORDER);
+    if (token == QStringLiteral("TYPE_DIR"))     return QString::fromLatin1(src.TYPE_DIR);
+    if (token == QStringLiteral("TYPE_DOC"))     return QString::fromLatin1(src.TYPE_DOC);
+    if (token == QStringLiteral("TYPE_IMAGE"))   return QString::fromLatin1(src.TYPE_IMAGE);
+    if (token == QStringLiteral("TYPE_VIDEO"))   return QString::fromLatin1(src.TYPE_VIDEO);
+    if (token == QStringLiteral("TYPE_AUDIO"))   return QString::fromLatin1(src.TYPE_AUDIO);
+    if (token == QStringLiteral("TYPE_ARCHIVE")) return QString::fromLatin1(src.TYPE_ARCHIVE);
+    if (token == QStringLiteral("TYPE_CODE"))    return QString::fromLatin1(src.TYPE_CODE);
+    if (token == QStringLiteral("TYPE_EXEC"))    return QString::fromLatin1(src.TYPE_EXEC);
+    if (token == QStringLiteral("TYPE_DATA"))    return QString::fromLatin1(src.TYPE_DATA);
+    if (token == QStringLiteral("TYPE_OTHER"))   return QString::fromLatin1(src.TYPE_OTHER);
+    if (token == QStringLiteral("TYPE_HIDDEN"))  return QString::fromLatin1(src.TYPE_HIDDEN);
+    return {};
+}
+
+// Read the current custom color for a token (from g_customTheme storage).
+inline QString customColor(const QString& token) {
+    if (token == QStringLiteral("BG"))           return QString::fromLatin1(g_customTheme.BG);
+    if (token == QStringLiteral("SURFACE"))      return QString::fromLatin1(g_customTheme.SURFACE);
+    if (token == QStringLiteral("TEXT"))         return QString::fromLatin1(g_customTheme.TEXT);
+    if (token == QStringLiteral("TEXT_SEC"))     return QString::fromLatin1(g_customTheme.TEXT_SEC);
+    if (token == QStringLiteral("TEXT_MUTED"))   return QString::fromLatin1(g_customTheme.TEXT_MUTED);
+    if (token == QStringLiteral("PRIMARY"))      return QString::fromLatin1(g_customTheme.PRIMARY);
+    if (token == QStringLiteral("ACCENT"))       return QString::fromLatin1(g_customTheme.ACCENT);
+    if (token == QStringLiteral("BORDER"))       return QString::fromLatin1(g_customTheme.BORDER);
+    if (token == QStringLiteral("TYPE_DIR"))     return QString::fromLatin1(g_customTheme.TYPE_DIR);
+    if (token == QStringLiteral("TYPE_DOC"))     return QString::fromLatin1(g_customTheme.TYPE_DOC);
+    if (token == QStringLiteral("TYPE_IMAGE"))   return QString::fromLatin1(g_customTheme.TYPE_IMAGE);
+    if (token == QStringLiteral("TYPE_VIDEO"))   return QString::fromLatin1(g_customTheme.TYPE_VIDEO);
+    if (token == QStringLiteral("TYPE_AUDIO"))   return QString::fromLatin1(g_customTheme.TYPE_AUDIO);
+    if (token == QStringLiteral("TYPE_ARCHIVE")) return QString::fromLatin1(g_customTheme.TYPE_ARCHIVE);
+    if (token == QStringLiteral("TYPE_CODE"))    return QString::fromLatin1(g_customTheme.TYPE_CODE);
+    if (token == QStringLiteral("TYPE_EXEC"))    return QString::fromLatin1(g_customTheme.TYPE_EXEC);
+    if (token == QStringLiteral("TYPE_DATA"))    return QString::fromLatin1(g_customTheme.TYPE_DATA);
+    if (token == QStringLiteral("TYPE_OTHER"))   return QString::fromLatin1(g_customTheme.TYPE_OTHER);
+    if (token == QStringLiteral("TYPE_HIDDEN"))  return QString::fromLatin1(g_customTheme.TYPE_HIDDEN);
+    return {};
+}
+
+// Apply a single color override to g_customTheme storage and re-sync pointers.
+inline void setCustomColor(const QString& token, const QString& color) {
+    const QByteArray c = color.toLatin1();
+    if (token == QStringLiteral("BG"))           g_customTheme.BG = c;
+    else if (token == QStringLiteral("SURFACE")) g_customTheme.SURFACE = c;
+    else if (token == QStringLiteral("TEXT"))    g_customTheme.TEXT = c;
+    else if (token == QStringLiteral("TEXT_SEC"))     g_customTheme.TEXT_SEC = c;
+    else if (token == QStringLiteral("TEXT_MUTED"))   g_customTheme.TEXT_MUTED = c;
+    else if (token == QStringLiteral("PRIMARY")) g_customTheme.PRIMARY = c;
+    else if (token == QStringLiteral("ACCENT"))  g_customTheme.ACCENT = c;
+    else if (token == QStringLiteral("BORDER"))  g_customTheme.BORDER = c;
+    else if (token == QStringLiteral("TYPE_DIR"))     g_customTheme.TYPE_DIR = c;
+    else if (token == QStringLiteral("TYPE_DOC"))     g_customTheme.TYPE_DOC = c;
+    else if (token == QStringLiteral("TYPE_IMAGE"))   g_customTheme.TYPE_IMAGE = c;
+    else if (token == QStringLiteral("TYPE_VIDEO"))   g_customTheme.TYPE_VIDEO = c;
+    else if (token == QStringLiteral("TYPE_AUDIO"))   g_customTheme.TYPE_AUDIO = c;
+    else if (token == QStringLiteral("TYPE_ARCHIVE")) g_customTheme.TYPE_ARCHIVE = c;
+    else if (token == QStringLiteral("TYPE_CODE"))    g_customTheme.TYPE_CODE = c;
+    else if (token == QStringLiteral("TYPE_EXEC"))    g_customTheme.TYPE_EXEC = c;
+    else if (token == QStringLiteral("TYPE_DATA"))    g_customTheme.TYPE_DATA = c;
+    else if (token == QStringLiteral("TYPE_OTHER"))   g_customTheme.TYPE_OTHER = c;
+    else if (token == QStringLiteral("TYPE_HIDDEN"))  g_customTheme.TYPE_HIDDEN = c;
+    g_customTheme.sync();
+}
+
+// Populate g_customTheme from a base theme + overrides, mark as loaded.
+inline void applyCustom(const QString& base, const QMap<QString, QString>& colors) {
+    g_customTheme.copyFrom(base == QStringLiteral("light") ? LIGHT_THEME : DARK_THEME);
+    g_customTheme.base = (base == QStringLiteral("light")) ? QStringLiteral("light")
+                                                          : QStringLiteral("dark");
+    for (auto it = colors.begin(); it != colors.end(); ++it)
+        setCustomColor(it.key(), it.value());
+    g_customTheme.loaded = true;
+}
+
+// Persist the custom theme to the registry as "base=...;TOKEN=#RRGGBB;...".
+inline void saveCustom(const QString& base, const QMap<QString, QString>& colors) {
+    QString s = QStringLiteral("base=") + base;
+    for (auto it = colors.begin(); it != colors.end(); ++it)
+        s += QStringLiteral(";") + it.key() + QStringLiteral("=") + it.value();
+    settings().setValue(QStringLiteral("themeCustom"), s);
+    applyCustom(base, colors);
+}
+
+// Load the persisted custom theme. Returns true if a saved custom theme exists.
+inline bool loadCustom(QString& base, QMap<QString, QString>& colors) {
+    const QString s = settings().value(QStringLiteral("themeCustom")).toString();
+    if (s.isEmpty())
+        return false;
+    base = QStringLiteral("dark");
+    colors.clear();
+    const auto parts = s.split(QStringLiteral(";"));
+    for (const QString& p : parts) {
+        const int eq = p.indexOf(QStringLiteral("="));
+        if (eq < 0)
+            continue;
+        const QString k = p.left(eq);
+        const QString v = p.mid(eq + 1);
+        if (k == QStringLiteral("base"))
+            base = v;
+        else
+            colors[k] = v;
+    }
+    return true;
+}
+
+inline bool hasCustom() { return g_customTheme.loaded; }
+inline QString customBase() { return g_customTheme.base; }
+
 inline QString load() {
+    // Always seed custom storage from dark so it is never empty, even before
+    // the user opens the customize dialog.
+    g_customTheme.copyFrom(DARK_THEME);
     const QString stored = settings().value(QStringLiteral("theme")).toString();
     if (stored == QStringLiteral("light") ||
         stored == QStringLiteral("dark") ||
-        stored == QStringLiteral("system")) {
+        stored == QStringLiteral("system") ||
+        stored == QStringLiteral("custom")) {
         g_code = stored;
     } else {
         g_code = QStringLiteral("system");
+    }
+    if (g_code == QStringLiteral("custom")) {
+        QString base;
+        QMap<QString, QString> colors;
+        if (loadCustom(base, colors)) {
+            applyCustom(base, colors);
+        } else {
+            // No saved custom theme — fall back to system.
+            g_code = QStringLiteral("system");
+        }
     }
     return g_code;
 }
 
 inline QString current() { return g_code; }
 
-// Resolves "system" to "light"/"dark" using the OS color scheme.
+// Resolves "system" to "light"/"dark" using the OS color scheme. "custom"
+// resolves to itself (handled separately in applyEffective).
 inline QString effective() {
+    if (g_code == QStringLiteral("custom"))
+        return QStringLiteral("custom");
     if (g_code == QStringLiteral("dark"))
         return QStringLiteral("dark");
     if (g_code == QStringLiteral("light"))
@@ -839,8 +1074,13 @@ inline QString effective() {
 // Points g_currentTheme at the palette for the effective theme. Call on the
 // main thread (reads QGuiApplication).
 inline void applyEffective() {
-    g_currentTheme = (effective() == QStringLiteral("dark")) ? &DARK_THEME
-                                                             : &LIGHT_THEME;
+    const QString eff = effective();
+    if (eff == QStringLiteral("custom"))
+        g_currentTheme = &g_customTheme.theme;
+    else if (eff == QStringLiteral("dark"))
+        g_currentTheme = &DARK_THEME;
+    else
+        g_currentTheme = &LIGHT_THEME;
     QGuiApplication::setPalette(makePalette(*g_currentTheme));
 }
 
@@ -849,7 +1089,8 @@ inline void applyEffective() {
 inline void set(const QString& code) {
     if (code != QStringLiteral("light") &&
         code != QStringLiteral("dark") &&
-        code != QStringLiteral("system"))
+        code != QStringLiteral("system") &&
+        code != QStringLiteral("custom"))
         return;
     g_code = code;
     settings().setValue(QStringLiteral("theme"), code);

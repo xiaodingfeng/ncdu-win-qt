@@ -175,6 +175,7 @@ private:
     void copyPath(const QString& path);
     void showProperties(const std::shared_ptr<FileNode>& node);
     void showAbout();
+    void showThemeCustomize();
     void checkForUpdate();
     void openHomepage();
     void showSkippedMsg();

@@ -5,8 +5,11 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCheckBox>
+#include <QColorDialog>
 #include <QCursor>
 #include <QDialog>
+#include <QButtonGroup>
+#include <QRadioButton>
 #include <QFileDialog>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -135,6 +138,13 @@ static QIcon makeTypeIcon(const QString& colorHex, bool isDir) {
     return QIcon(pm);
 }
 
+// File-scope icon cache (cleared on theme switch so type colors re-render).
+static QMap<QString, QIcon> g_typeIconCache;
+
+static void clearTypeIconCache() {
+    g_typeIconCache.clear();
+}
+
 static QIcon typeIcon(const std::shared_ptr<FileNode>& node) {
     QString ext;
     int dot = node->name.lastIndexOf('.');
@@ -146,14 +156,13 @@ static QIcon typeIcon(const std::shared_ptr<FileNode>& node) {
         .arg(ext)
         .arg(node->isHidden)
         .arg(node->isDir());
-    static QMap<QString, QIcon> cache;
-    auto it = cache.find(cacheKey);
-    if (it != cache.end())
+    auto it = g_typeIconCache.find(cacheKey);
+    if (it != g_typeIconCache.end())
         return it.value();
 
     QString color = typeColor(node->name, node->isDir(), node->isHidden);
     QIcon icon = makeTypeIcon(color, node->isDir());
-    cache[cacheKey] = icon;
+    g_typeIconCache[cacheKey] = icon;
     return icon;
 }
 // --------------------------------------------------------------------------- //
@@ -502,13 +511,17 @@ void MainWindow::buildMenu()
     auto* themeMenu = mb->addMenu(I18n::tr("menu.theme"));
     auto* themeGroup = new QActionGroup(this);
     themeGroup->setExclusive(true);
-    for (const auto& code : {QStringLiteral("light"), QStringLiteral("dark"), QStringLiteral("system")}) {
+    for (const auto& code : {QStringLiteral("light"), QStringLiteral("dark"),
+                             QStringLiteral("system"), QStringLiteral("custom")}) {
         auto* act = themeMenu->addAction(Theme::displayName(code));
         act->setCheckable(true);
         act->setChecked(code == Theme::current());
         themeGroup->addAction(act);
         connect(act, &QAction::triggered, this, [this, code]() { switchTheme(code); });
     }
+    themeMenu->addSeparator();
+    m_actions["theme.customize"] = themeMenu->addAction(I18n::tr("menu.theme.customize"));
+    connect(m_actions["theme.customize"], &QAction::triggered, this, &MainWindow::showThemeCustomize);
 
     // --- Help ---
     auto* helpMenu = mb->addMenu(I18n::tr("menu.help"));
@@ -1935,6 +1948,157 @@ void MainWindow::showAbout()
     dlg.exec();
 }
 
+void MainWindow::showThemeCustomize()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(I18n::tr("theme_dialog.title"));
+    dlg.setMinimumWidth(460);
+    auto* lay = new QVBoxLayout(&dlg);
+    lay->setContentsMargins(20, 20, 20, 16);
+    lay->setSpacing(12);
+
+    // ---- Working copy of the custom theme ----
+    const QStringList ftTokens = Theme::editableFileTypeTokens();
+    const QStringList uiTokens = Theme::editableUITokens();
+    const QStringList allTokens = uiTokens + ftTokens;
+
+    QString base = Theme::hasCustom() ? Theme::customBase() : QStringLiteral("dark");
+    if (base != QStringLiteral("light") && base != QStringLiteral("dark"))
+        base = QStringLiteral("dark");
+    QMap<QString, QString> colors;
+    if (Theme::hasCustom()) {
+        for (const auto& t : allTokens)
+            colors[t] = Theme::customColor(t);
+    } else {
+        const ThemeColors& src = (base == QStringLiteral("light")) ? LIGHT_THEME : DARK_THEME;
+        for (const auto& t : allTokens)
+            colors[t] = Theme::colorFromTheme(src, t);
+    }
+
+    // ---- Base theme selector ----
+    auto* baseRow = new QHBoxLayout;
+    auto* baseLbl = new QLabel(I18n::tr("theme_dialog.base_label"));
+    auto* lightRadio = new QRadioButton(I18n::tr("theme.light"));
+    auto* darkRadio = new QRadioButton(I18n::tr("theme.dark"));
+    auto* baseGroup = new QButtonGroup(this);
+    baseGroup->addButton(lightRadio);
+    baseGroup->addButton(darkRadio);
+    if (base == QStringLiteral("light"))
+        lightRadio->setChecked(true);
+    else
+        darkRadio->setChecked(true);
+    baseRow->addWidget(baseLbl);
+    baseRow->addWidget(lightRadio);
+    baseRow->addWidget(darkRadio);
+    baseRow->addStretch(1);
+    lay->addLayout(baseRow);
+
+    // ---- Color rows ----
+    QMap<QString, QPushButton*> swatches;
+    QMap<QString, QLabel*> hexLabels;
+
+    auto addSection = [&](const QString& titleKey, const QStringList& tokens) {
+        auto* title = new QLabel(I18n::tr(titleKey));
+        title->setStyleSheet(QStringLiteral("color:%1; font-weight:600;")
+                                 .arg(QString::fromLatin1(C::TEXT_SEC())));
+        lay->addWidget(title);
+        for (const auto& token : tokens) {
+            auto* row = new QHBoxLayout;
+            auto* swatch = new QPushButton;
+            swatch->setFixedSize(48, 24);
+            swatch->setCursor(Qt::PointingHandCursor);
+            swatches[token] = swatch;
+            auto* nameLbl = new QLabel(I18n::tr(Theme::tokenLabelKey(token)));
+            auto* hexLbl = new QLabel(colors.value(token));
+            hexLbl->setStyleSheet(QStringLiteral("color:%1; font-family:Consolas,monospace;")
+                                      .arg(QString::fromLatin1(C::TEXT_MUTED())));
+            hexLabels[token] = hexLbl;
+            row->addWidget(swatch);
+            row->addSpacing(8);
+            row->addWidget(nameLbl);
+            row->addStretch(1);
+            row->addWidget(hexLbl);
+            lay->addLayout(row);
+        }
+    };
+
+    addSection(QStringLiteral("theme_dialog.filetype_colors"), ftTokens);
+    addSection(QStringLiteral("theme_dialog.ui_colors"), uiTokens);
+
+    auto refreshSwatch = [&colors, &swatches, &hexLabels](const QString& token) {
+        const QString c = colors.value(token);
+        swatches[token]->setStyleSheet(QStringLiteral(
+            "QPushButton { background-color:%1; border:1px solid %2; border-radius:4px; }")
+            .arg(c).arg(QString::fromLatin1(C::BORDER())));
+        hexLabels[token]->setText(c);
+    };
+    auto refreshAllSwatches = [&]() {
+        for (const auto& token : allTokens)
+            refreshSwatch(token);
+    };
+    refreshAllSwatches();
+
+    // Wire swatch clicks to the color picker.
+    for (const auto& token : allTokens) {
+        QPushButton* swatch = swatches[token];
+        connect(swatch, &QPushButton::clicked, this, [this, token, &colors, &refreshSwatch]() {
+            const QColor initial(colors.value(token));
+            const QColor picked = QColorDialog::getColor(
+                initial, this, I18n::tr(Theme::tokenLabelKey(token)));
+            if (picked.isValid()) {
+                colors[token] = picked.name().toUpper();
+                refreshSwatch(token);
+            }
+        });
+    }
+
+    // Base radio change -> reset editable colors from the new base.
+    auto resetFromBase = [&]() {
+        const ThemeColors& src = (base == QStringLiteral("light")) ? LIGHT_THEME : DARK_THEME;
+        for (const auto& t : allTokens)
+            colors[t] = Theme::colorFromTheme(src, t);
+        refreshAllSwatches();
+    };
+    connect(lightRadio, &QRadioButton::toggled, this, [&](bool checked) {
+        if (!checked) return;
+        base = QStringLiteral("light");
+        resetFromBase();
+    });
+    connect(darkRadio, &QRadioButton::toggled, this, [&](bool checked) {
+        if (!checked) return;
+        base = QStringLiteral("dark");
+        resetFromBase();
+    });
+
+    lay->addStretch(1);
+
+    // ---- Buttons ----
+    auto* btnRow = new QHBoxLayout;
+    auto* resetBtn = new QPushButton(I18n::tr("theme_dialog.reset"));
+    auto* okBtn = new QPushButton(I18n::tr("button.ok"));
+    okBtn->setObjectName("primary");
+    okBtn->setCursor(Qt::PointingHandCursor);
+    auto* cancelBtn = new QPushButton(I18n::tr("button.cancel"));
+    cancelBtn->setCursor(Qt::PointingHandCursor);
+    connect(resetBtn, &QPushButton::clicked, this, [&]() { resetFromBase(); });
+    connect(okBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+    btnRow->addWidget(resetBtn);
+    btnRow->addStretch(1);
+    btnRow->addWidget(cancelBtn);
+    btnRow->addWidget(okBtn);
+    lay->addLayout(btnRow);
+
+    if (dlg.exec() == QDialog::Accepted) {
+        Theme::saveCustom(base, colors);   // populate g_customTheme + persist
+        Theme::set(QStringLiteral("custom"));  // switch + apply
+        refreshTheme();
+        // Rebuild the menu so the "custom" radio shows as checked.
+        menuBar()->clear();
+        buildMenu();
+    }
+}
+
 void MainWindow::openHomepage()
 {
     QDesktopServices::openUrl(QUrl(HOMEPAGE));
@@ -2286,6 +2450,12 @@ void MainWindow::switchLanguage(const QString& lang)
 // --------------------------------------------------------------------------- //
 void MainWindow::switchTheme(const QString& code)
 {
+    // Selecting "custom" without a saved custom theme opens the editor instead
+    // of applying an unconfigured palette.
+    if (code == QStringLiteral("custom") && !Theme::hasCustom()) {
+        showThemeCustomize();
+        return;
+    }
     if (code == Theme::current())
         return;
     Theme::set(code);           // persist + update g_currentTheme
@@ -2299,6 +2469,8 @@ void MainWindow::refreshTheme()
     // Panels with baked inline styles need to recompute them.
     m_cleanupPanel->refreshTheme();
     m_legend->refreshTheme();
+    // Type icons cache by color, so clear before rebuilding the list.
+    clearTypeIconCache();
     // List/treemap items cache colors on the item, so rebuild them.
     if (m_current) {
         populateList(m_current);
