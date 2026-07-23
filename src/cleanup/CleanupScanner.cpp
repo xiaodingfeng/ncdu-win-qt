@@ -685,6 +685,26 @@ DangerLevel CleanupScanner::classifyFileDanger(const QString& path, const QStrin
     if (pn == win || pn.startsWith(win + '/'))
         return DangerLevel::C;
 
+    // C-level: installed program directories — deleting files from here can
+    // break installed applications. Covers Program Files, Program Files (x86),
+    // and ProgramData (shared application state).
+    const QString progFiles = normalizePath(
+        !qEnvironmentVariable("ProgramFiles").isEmpty()
+            ? qEnvironmentVariable("ProgramFiles")
+            : QStringLiteral("C:/Program Files"));
+    const QString progFilesX86 = normalizePath(
+        !qEnvironmentVariable("ProgramFiles(x86)").isEmpty()
+            ? qEnvironmentVariable("ProgramFiles(x86)")
+            : QStringLiteral("C:/Program Files (x86)"));
+    const QString programData = normalizePath(
+        !qEnvironmentVariable("ProgramData").isEmpty()
+            ? qEnvironmentVariable("ProgramData")
+            : QStringLiteral("C:/ProgramData"));
+    if (pn == progFiles || pn.startsWith(progFiles + '/') ||
+        pn == progFilesX86 || pn.startsWith(progFilesX86 + '/') ||
+        pn == programData || pn.startsWith(programData + '/'))
+        return DangerLevel::C;
+
     // C-level: critical system files at the drive root (pagefile.sys,
     // hiberfil.sys, swapfile.sys) — shown but not cleanable.
     static const QStringList systemRootFiles = {

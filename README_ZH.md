@@ -4,7 +4,7 @@
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![Qt6](https://img.shields.io/badge/GUI-Qt6-green.svg)](https://www.qt.io)
 [![Platform: Windows](https://img.shields.io/badge/platform-windows-lightgrey.svg)](#支持的平台)
-[![Version](https://img.shields.io/badge/version-1.0.3-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-1.0.4-blue.svg)](#)
 
 **[English](README.md)** | **[中文](README_ZH.md)**
 
@@ -16,7 +16,9 @@ NcduWin 是一个原生桌面应用，它扫描您的磁盘并使用 ncdu 风格
 
 ## ✨ 功能特性
 
-- **极速扫描** — 多线程磁盘扫描，即使是大硬盘也能快速完成。
+- **极速扫描** — 直接读取 NTFS 磁盘索引表（MFT）枚举文件，扫描速度比传统目录遍历方式快数倍；多线程处理让大容量硬盘依然保持流畅响应。
+- **重复文件查找** — 采用三级漏斗算法（大小分组 → 前 4KB 哈希 → 全文件哈希），以极低的 I/O 与内存开销精准识别重复文件。自动跳过系统二进制文件与用户数据，每组默认保留首个文件。
+- **主题切换** — 支持深色 / 浅色主题切换，并可自定义主题色，打造个性化视觉体验。
 - **跳过重型目录** — 可选择性跳过 `node_modules`、`.git` 等大型文件夹的深度扫描，同时仍显示其大小。
 - **完整系统访问** — 自动请求管理员权限，支持扫描 `C:\Windows` 和其他用户目录等受保护的系统文件夹。
 - **双重视图** — 左侧 ncdu 风格文件列表，右侧交互式树图，直观分析空间占用。
@@ -28,7 +30,8 @@ NcduWin 是一个原生桌面应用，它扫描您的磁盘并使用 ncdu 风格
 - **一键磁盘清理** — 专门的清理标签页检测并移除：
   - 常见垃圾：临时文件、浏览器缓存、pip/npm 缓存
   - 大文件（>50MB），带安全等级分类
-- **安全优先删除** — 五级安全系统确保不会误删重要文件。
+  - 重复文件，支持分组选择清理
+- **安全优先删除** — 五级安全系统（S/A/B/C/D）确保不会误删重要文件，系统状态与用户数据永不自动选中。
 - **启动自动扫描** — 首次启动立即显示用户主目录的空间使用情况。
 - **中英双语** — 内置本地化支持，语言选择自动保存。
 - **清新现代界面** — 柔和配色、圆角设计、清晰的视觉层次。
@@ -66,7 +69,7 @@ cd ncdu-win-qt
 scripts\build.bat
 ```
 
-构建脚本产出 `dist\NcduWin_1.0.3_Setup.exe` 安装包（含所有 Qt 依赖）。
+构建脚本产出 `dist\NcduWin_1.0.4_Setup.exe` 安装包（含所有 Qt 依赖）。
 
 ### 选项 C — 在 Visual Studio 中打开
 
@@ -94,6 +97,9 @@ ncdu-win-qt/
 │   │   ├── FormatHelpers.h/cpp
 │   │   ├── I18n.h/cpp
 │   │   ├── Identify.h/cpp
+│   │   ├── Logger.h/cpp
+│   │   ├── MemoryMonitor.h
+│   │   ├── MftScanner.h/cpp    # NTFS MFT 直读（快速通道）
 │   │   └── WinApi.h/cpp
 │   ├── ui/                 # UI 组件
 │   │   ├── BreadcrumbBar.h/cpp
@@ -106,7 +112,8 @@ ncdu-win-qt/
 │       ├── CleanupPanel.h/cpp
 │       ├── CleanupScanner.h/cpp
 │       ├── CleanupTarget.h
-│       └── CleanupWorker.h/cpp
+│       ├── CleanupWorker.h/cpp
+│       └── DuplicateScanner.h/cpp  # 重复文件检测
 ├── locales/                # i18n JSON 文件
 │       ├── en.json
 │       └── zh.json
@@ -116,6 +123,7 @@ ncdu-win-qt/
 │   └── version.iss.in      # 安装包版本模板
 ├── tests/
 │   ├── test_scanner.cpp    # C++ 单元测试 (Qt Test)
+│   └── compare_scanners.cpp  # 扫描器对比基准测试
 ├── docs/
 │   └── screenshots/
 │       ├── treeMap.png
@@ -123,6 +131,8 @@ ncdu-win-qt/
 ├── app.ico
 ├── app.manifest
 ├── CMakeLists.txt
+├── CMakePresets.json
+├── CMakeSettings.json
 ├── LICENSE
 ├── README.md
 └── README_ZH.md

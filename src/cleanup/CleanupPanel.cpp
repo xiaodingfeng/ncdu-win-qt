@@ -131,23 +131,6 @@ void CleanupPanel::buildUI()
     lay->setContentsMargins(4, 4, 4, 4);
     lay->setSpacing(6);
 
-    // ── Header: title + summary ──────────────────────────────────
-    auto* header = new QFrame;
-    auto* hlay = new QHBoxLayout(header);
-    hlay->setContentsMargins(8, 4, 8, 4);
-    m_titleLabel = new QLabel(I18n::tr("cleanup.title"));
-    m_titleLabel->setStyleSheet(
-        QStringLiteral("font-size: 14px; font-weight: 700; color: %1;")
-            .arg(QString::fromLatin1(C::FG())));
-    hlay->addWidget(m_titleLabel);
-    hlay->addStretch(1);
-    m_summaryLabel = new QLabel(QString());
-    m_summaryLabel->setStyleSheet(
-        QStringLiteral("color: %1; font-size: 11px;")
-            .arg(QString::fromLatin1(C::TEXT_MUTED())));
-    hlay->addWidget(m_summaryLabel);
-    lay->addWidget(header);
-
     // ── Progress bar (hidden by default) ─────────────────────────
     m_scanProgress = new QProgressBar;
     m_scanProgress->setRange(0, 0);
@@ -163,7 +146,7 @@ void CleanupPanel::buildUI()
     {
         auto* catTab = new QWidget;
         auto* catLay = new QVBoxLayout(catTab);
-        catLay->setContentsMargins(0, 4, 0, 0);
+        catLay->setContentsMargins(0, 5, 0, 4);
         catLay->setSpacing(4);
 
         m_catSelBtn = new QPushButton(I18n::tr("cleanup.select_all"));
@@ -182,11 +165,15 @@ void CleanupPanel::buildUI()
             I18n::tr("cleanup.col_remark"),
         }, true);
 
-        auto* catHdr = new QHBoxLayout;
-        catHdr->setContentsMargins(0, 0, 0, 0);
+        auto* catBar = new QFrame;
+        catBar->setFixedHeight(28);
+        auto* catHdr = new QHBoxLayout(catBar);
+        catHdr->setContentsMargins(0, 1, 0, 1);
+        catHdr->setSpacing(8);
         catHdr->addStretch(1);
         catHdr->addWidget(m_catSelBtn);
-        catLay->addLayout(catHdr);
+        catLay->addWidget(catBar);
+        catLay->addSpacing(4);
         catLay->addWidget(m_catTree, 1);
 
         m_tabs->addTab(catTab, I18n::tr("cleanup.tab_categories"));
@@ -196,7 +183,7 @@ void CleanupPanel::buildUI()
     {
         auto* lfTab = new QWidget;
         auto* lfLay = new QVBoxLayout(lfTab);
-        lfLay->setContentsMargins(0, 4, 0, 0);
+        lfLay->setContentsMargins(0, 5, 0, 4);
         lfLay->setSpacing(4);
 
         m_lfSelBtn = new QPushButton(I18n::tr("cleanup.select_all"));
@@ -213,16 +200,92 @@ void CleanupPanel::buildUI()
             I18n::tr("cleanup.col_size"),
             I18n::tr("cleanup.col_path"),
             I18n::tr("cleanup.col_warning"),
+            I18n::tr("cleanup.col_type"),
         });
+        // Col 5 (Type): fixed width, fits short labels like "Image", "Video".
+        m_lfTree->header()->setSectionResizeMode(5, QHeaderView::Fixed);
+        m_lfTree->header()->resizeSection(5, 90);
 
-        auto* lfHdr = new QHBoxLayout;
-        lfHdr->setContentsMargins(0, 0, 0, 0);
+        m_lfTypeFilter = new QComboBox;
+        m_lfTypeFilter->setObjectName("typeFilter");
+        m_lfTypeFilter->setFixedHeight(22);
+        m_lfTypeFilter->setMinimumWidth(120);
+        connect(m_lfTypeFilter, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, &CleanupPanel::onLfTypeFilterChanged);
+
+        m_lfTypeLabel = new QLabel(I18n::tr("cleanup.filter_type"));
+        auto* lfBar = new QFrame;
+        lfBar->setFixedHeight(28);
+        auto* lfHdr = new QHBoxLayout(lfBar);
+        lfHdr->setContentsMargins(0, 1, 0, 1);
+        lfHdr->setSpacing(8);
         lfHdr->addStretch(1);
+        lfHdr->addWidget(m_lfTypeLabel);
+        lfHdr->addWidget(m_lfTypeFilter);
         lfHdr->addWidget(m_lfSelBtn);
-        lfLay->addLayout(lfHdr);
+        lfLay->addWidget(lfBar);
+        lfLay->addSpacing(4);
         lfLay->addWidget(m_lfTree, 1);
 
         m_tabs->addTab(lfTab, I18n::tr("cleanup.tab_large_files"));
+    }
+
+    // Tab 3: Duplicate files (grouped, two-level tree: group → files)
+    {
+        auto* dupTab = new QWidget;
+        auto* dupLay = new QVBoxLayout(dupTab);
+        dupLay->setContentsMargins(0, 5, 0, 4);
+        dupLay->setSpacing(4);
+
+        m_dupSelBtn = new QPushButton(I18n::tr("cleanup.select_all"));
+        m_dupSelBtn->setObjectName("ghost");
+        m_dupSelBtn->setCursor(Qt::PointingHandCursor);
+        m_dupSelBtn->setFixedHeight(24);
+        m_dupSelBtn->setCheckable(true);
+        connect(m_dupSelBtn, &QPushButton::clicked,
+                this, &CleanupPanel::onDupSelectAllToggled);
+
+        m_dupTree = makeTree({
+            I18n::tr("cleanup.col_level"),
+            I18n::tr("cleanup.col_dup_group"),
+            I18n::tr("cleanup.col_size"),
+            I18n::tr("cleanup.col_dup_wasted"),
+            I18n::tr("cleanup.col_paths"),
+            I18n::tr("cleanup.col_type"),
+        });
+        // Two-level tree: top-level = group, children = files in the group.
+        m_dupTree->setRootIsDecorated(true);
+        // Child rows need room for: indentation + checkbox + level badge.
+        // makeTree sets col 0 to 56px (enough only for flat rows); widen it
+        // so the checkbox and badge are both visible on indented child rows.
+        m_dupTree->setIndentation(20);
+        m_dupTree->header()->resizeSection(0, 96);
+        // Col 5 (Type): fixed width, fits short labels like "Image", "Video".
+        m_dupTree->header()->setSectionResizeMode(5, QHeaderView::Fixed);
+        m_dupTree->header()->resizeSection(5, 90);
+
+        m_dupTypeFilter = new QComboBox;
+        m_dupTypeFilter->setObjectName("typeFilter");
+        m_dupTypeFilter->setFixedHeight(22);
+        m_dupTypeFilter->setMinimumWidth(120);
+        connect(m_dupTypeFilter, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, &CleanupPanel::onDupTypeFilterChanged);
+
+        m_dupTypeLabel = new QLabel(I18n::tr("cleanup.filter_type"));
+        auto* dupBar = new QFrame;
+        dupBar->setFixedHeight(28);
+        auto* dupHdr = new QHBoxLayout(dupBar);
+        dupHdr->setContentsMargins(0, 1, 0, 1);
+        dupHdr->setSpacing(8);
+        dupHdr->addStretch(1);
+        dupHdr->addWidget(m_dupTypeLabel);
+        dupHdr->addWidget(m_dupTypeFilter);
+        dupHdr->addWidget(m_dupSelBtn);
+        dupLay->addWidget(dupBar);
+        dupLay->addSpacing(4);
+        dupLay->addWidget(m_dupTree, 1);
+
+        m_tabs->addTab(dupTab, I18n::tr("cleanup.tab_duplicates"));
     }
 
     // Connect item-change signals so the selected-size label and select-all
@@ -230,13 +293,21 @@ void CleanupPanel::buildUI()
     connect(m_catTree, &QTreeWidget::itemChanged, this, &CleanupPanel::onCatItemChanged);
     connect(m_lfTree, &QTreeWidget::itemChanged, this, &CleanupPanel::onLfItemChanged);
     connect(m_lfTree, &QTreeWidget::itemClicked, this, &CleanupPanel::onLfItemClicked);
+    connect(m_dupTree, &QTreeWidget::itemChanged, this, &CleanupPanel::onDupItemChanged);
+    connect(m_dupTree, &QTreeWidget::itemClicked, this, &CleanupPanel::onDupItemClicked);
 
     lay->addWidget(m_tabs, 1);
 
-    // ── Bottom: selected label + rescan + clean ──────────────────
+    // ── Bottom: total label + selected label + rescan + clean ────
     auto* bottom = new QFrame;
     auto* blay = new QHBoxLayout(bottom);
     blay->setContentsMargins(8, 4, 8, 4);
+    m_totalLabel = new QLabel(QString());
+    m_totalLabel->setStyleSheet(
+        QStringLiteral("color: %1; font-size: 12px;")
+            .arg(QString::fromLatin1(C::TEXT_MUTED())));
+    blay->addWidget(m_totalLabel);
+    blay->addSpacing(16);
     m_selectedLabel = new QLabel(I18n::tr("cleanup.selected",
         QMap<QString, QString>{{"size", QStringLiteral("0 B")}, {"count", QStringLiteral("0")}}));
     m_selectedLabel->setStyleSheet(
@@ -256,6 +327,12 @@ void CleanupPanel::buildUI()
     connect(m_cleanBtn, &QPushButton::clicked, this, &CleanupPanel::onCleanClicked);
     blay->addWidget(m_cleanBtn);
     lay->addWidget(bottom);
+
+    // Update total/selected labels when the active tab changes.
+    connect(m_tabs, &QTabWidget::currentChanged, this, [this](int) {
+        updateTotalLabel();
+        updateSelectedLabel();
+    });
 }
 
 QTreeWidget* CleanupPanel::makeTree(const QStringList& headers, bool col3Fixed)
@@ -295,20 +372,21 @@ QTreeWidget* CleanupPanel::makeTree(const QStringList& headers, bool col3Fixed)
 void CleanupPanel::startScanProgress()
 {
     m_scanProgress->setVisible(true);
-    m_summaryLabel->setText(I18n::tr("cleanup.scanning"));
     m_catTree->setSortingEnabled(false);
     m_lfTree->setSortingEnabled(false);
+    m_dupTree->setSortingEnabled(false);
     m_catTree->clear();
     m_lfTree->clear();
+    m_dupTree->clear();
     m_targets.clear();
     m_largeFiles.clear();
+    m_duplicateGroups.clear();
     m_cleanBtn->setEnabled(false);
 }
 
 void CleanupPanel::stopScanProgress()
 {
     m_scanProgress->setVisible(false);
-    m_summaryLabel->setText(QString());
     m_catTree->setSortingEnabled(true);
     m_lfTree->setSortingEnabled(true);
     updateSelectedLabel();
@@ -393,6 +471,11 @@ void CleanupPanel::addLargeFile(const LargeFile& lf)
     item->setSortData(2, lf.size);
     item->setSortData(3, lf.path);
     item->setSortData(4, largeFileWarning(lvl));
+    // Store the type KEY (e.g. "type.document") — language-independent — so
+    // the filter and sort survive retranslate(); the visible text is set
+    // from the translated label below and refreshed in retranslate().
+    const QString tKey = typeKey(lf.name);
+    item->setSortData(5, tKey);
 
     // Col 0: Level badge
     item->setText(0, QStringLiteral(" %1 ").arg(lvl));
@@ -430,6 +513,10 @@ void CleanupPanel::addLargeFile(const LargeFile& lf)
         item->setForeground(4, QColor(QStringLiteral("#eab308")));
     }
 
+    // Col 5: File type label (Document/Image/Video/...) with type color.
+    item->setText(5, I18n::tr(tKey.toLatin1().constData()));
+    item->setForeground(5, QColor(typeColor(lf.name)));
+
     // C/D level: checkbox disabled (not user-checkable); others checkable.
     if (lvl == QLatin1String("C") || lvl == QLatin1String("D")) {
         item->setCheckState(0, Qt::Unchecked);
@@ -440,6 +527,116 @@ void CleanupPanel::addLargeFile(const LargeFile& lf)
     }
 
     m_lfTree->addTopLevelItem(item);
+}
+
+void CleanupPanel::addDuplicateGroup(const DuplicateGroup& group)
+{
+    int groupIdx = static_cast<int>(m_duplicateGroups.size());
+    m_duplicateGroups.push_back(group);
+
+    const DangerLevel dl = DangerLevel::B;  // duplicates are always B-level
+    const QString lvl = dangerLevelToString(dl);
+    const QString color = dangerColor(dl);
+    const QString groupLabel = I18n::tr("cleanup.dup_group_label",
+        QMap<QString, QString>{{"count", QString::number(group.files.size())}});
+    const QString sizeText = humanSize(group.size);
+    const QString wastedText = humanSize(group.wastedSpace());
+
+    // Top-level row = the group.
+    auto* topItem = new SortableTreeWidgetItem();
+    // Store group index in UserRole for later lookup.
+    topItem->setData(0, Qt::UserRole, groupIdx);
+    topItem->setSortData(0, dangerLevelOrder(dl));
+    topItem->setSortData(2, group.size);
+    topItem->setSortData(3, group.wastedSpace());
+    // Col 5 (Type): use the first file's type key so the group sorts by type
+    // when the user clicks the Type column header. Without this, sortData(5)
+    // is invalid and sorting falls back to empty-text comparison → no effect.
+    if (!group.files.empty())
+        topItem->setSortData(5, typeKey(group.files.front().name));
+
+    topItem->setText(0, QStringLiteral(" %1 ").arg(lvl));
+    topItem->setForeground(0, QColor(color));
+    QFont f0 = topItem->font(0);
+    f0.setBold(true);
+    f0.setPointSize(10);
+    topItem->setFont(0, f0);
+
+    topItem->setText(1, groupLabel);
+    topItem->setToolTip(1, groupLabel);
+
+    topItem->setText(2, sizeText);
+    topItem->setToolTip(2, sizeText);
+    topItem->setTextAlignment(2, Qt::AlignRight);
+    topItem->setForeground(2, QColor(QString::fromLatin1(C::TEXT_SEC())));
+
+    topItem->setText(3, wastedText);
+    topItem->setToolTip(3, wastedText);
+    topItem->setTextAlignment(3, Qt::AlignRight);
+    topItem->setForeground(3, QColor(QStringLiteral("#eab308")));
+
+    topItem->setText(4, QString());
+    // Top-level group row is not checkable (only individual files are).
+    topItem->setFlags(topItem->flags() & ~Qt::ItemIsUserCheckable);
+
+    m_dupTree->addTopLevelItem(topItem);
+
+    // Child rows = individual files in the group.
+    // Every file is checkable; none is checked by default. The user picks
+    // which copies to delete (may be any subset, including all of them).
+    for (int i = 0; i < static_cast<int>(group.files.size()); ++i) {
+        const auto& df = group.files[i];
+        auto* child = new SortableTreeWidgetItem(topItem);
+        child->setData(0, Qt::UserRole, df.path);
+        child->setSortData(2, df.size);
+
+        // Col 0: per-file danger level badge (S/A/B/C/D).
+        // The checkbox renders left of the badge text.
+        const QString childLvl = dangerLevelToString(df.danger);
+        const QString childColor = dangerColor(df.danger);
+        child->setText(0, QStringLiteral(" %1 ").arg(childLvl));
+        child->setForeground(0, QColor(childColor));
+        child->setSortData(0, dangerLevelOrder(df.danger));
+
+        child->setText(1, df.name);
+        child->setToolTip(1, df.name);
+
+        child->setText(2, humanSize(df.size));
+        child->setTextAlignment(2, Qt::AlignRight);
+        child->setForeground(2, QColor(QString::fromLatin1(C::TEXT_SEC())));
+
+        child->setText(3, QString());  // wasted only shown on group row
+        child->setText(4, df.path);
+        child->setForeground(4, QColor(QString::fromLatin1(C::PRIMARY())));
+        child->setToolTip(4, df.path);
+
+        // Col 5: File type label with type color. Store the language-
+        // independent type key for filter/sort; text is refreshed in
+        // retranslate().
+        const QString tKey = typeKey(df.name);
+        child->setText(5, I18n::tr(tKey.toLatin1().constData()));
+        child->setForeground(5, QColor(typeColor(df.name)));
+        child->setSortData(5, tKey);
+
+        // All files are checkable and unchecked by default.
+        // IMPORTANT: set ItemIsUserCheckable flag BEFORE setCheckState,
+        // otherwise the checkbox is not rendered on child items.
+        child->setFlags(child->flags() | Qt::ItemIsUserCheckable);
+        child->setCheckState(0, Qt::Unchecked);
+    }
+    topItem->setExpanded(true);
+}
+
+void CleanupPanel::loadDuplicates(const std::vector<DuplicateGroup>& groups)
+{
+    m_dupTree->setSortingEnabled(false);
+    m_dupTree->clear();
+    m_duplicateGroups.clear();
+    for (const auto& g : groups)
+        addDuplicateGroup(g);
+    repopulateTypeFilters();
+    m_dupTree->setSortingEnabled(true);
+    updateSelectedLabel();
 }
 
 void CleanupPanel::loadTargets(const std::vector<CleanupTarget>& targets,
@@ -477,6 +674,7 @@ void CleanupPanel::loadTargets(const std::vector<CleanupTarget>& targets,
         addLargeFile(lf);
     }
 
+    repopulateTypeFilters();
     updateSummary(freeBytes, totalBytes);
     updateSelectedLabel();
     m_catTree->setSortingEnabled(true);
@@ -504,6 +702,23 @@ void CleanupPanel::removeCleanedItems(const std::vector<CleanupWorker::ItemRef>&
                 if (item->data(0, Qt::UserRole).toString() == ref.path) {
                     m_lfTree->takeTopLevelItem(i);
                     break;
+                }
+            }
+            // Also remove from the duplicates tree (child rows store paths).
+            for (int gi = m_dupTree->topLevelItemCount() - 1; gi >= 0; --gi) {
+                auto* groupItem = m_dupTree->topLevelItem(gi);
+                for (int ci = groupItem->childCount() - 1; ci >= 0; --ci) {
+                    auto* child = groupItem->child(ci);
+                    if (child->data(0, Qt::UserRole).toString() == ref.path) {
+                        groupItem->removeChild(child);
+                        delete child;
+                        break;
+                    }
+                }
+                // If ≤1 file remains, the group is no longer a duplicate set.
+                if (groupItem->childCount() <= 1) {
+                    m_dupTree->takeTopLevelItem(gi);
+                    delete groupItem;
                 }
             }
         }
@@ -565,17 +780,11 @@ void CleanupPanel::applyLargeFileWarning(QTreeWidgetItem* item, const QString& l
 
 void CleanupPanel::updateSummary(qint64 freeBytes, qint64 totalBytes)
 {
+    // Disk free space is now shown only in the main window's status bar;
+    // the cleanup panel no longer has its own title/summary header. Keep
+    // the values cached in case future UI needs them.
     m_freeBytes = freeBytes;
     m_totalBytes = totalBytes;
-    if (totalBytes > 0) {
-        double pct = static_cast<double>(freeBytes) / totalBytes * 100.0;
-        m_summaryLabel->setText(
-            I18n::tr("cleanup.free_space", QMap<QString, QString>{
-                {"free", humanSize(freeBytes)},
-                {"total", humanSize(totalBytes)},
-                {"pct", QString::number(pct, 'f', 0)},
-            }));
-    }
 }
 
 void CleanupPanel::updateSelectedLabel()
@@ -613,12 +822,172 @@ void CleanupPanel::updateSelectedLabel()
             }
         }
     }
+    // Duplicate files: child items that are checked.
+    for (int gi = 0; gi < m_dupTree->topLevelItemCount(); ++gi) {
+        auto* groupItem = m_dupTree->topLevelItem(gi);
+        for (int ci = 0; ci < groupItem->childCount(); ++ci) {
+            auto* child = groupItem->child(ci);
+            if (child->checkState(0) != Qt::Checked)
+                continue;
+            QString path = child->data(0, Qt::UserRole).toString();
+            for (const auto& dg : m_duplicateGroups) {
+                for (const auto& df : dg.files) {
+                    if (df.path == path) {
+                        totalSize += df.size;
+                        totalCount += 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     m_selectedLabel->setText(
         I18n::tr("cleanup.selected", QMap<QString, QString>{
             {"size", humanSize(totalSize)},
             {"count", humanCount(totalCount)},
         }));
+    // Keep the total-items label in sync with the active tab.
+    updateTotalLabel();
+}
+
+void CleanupPanel::updateTotalLabel()
+{
+    // Show total item count + total size for the currently active tab.
+    int totalItems = 0;
+    qint64 totalSize = 0;
+    const int idx = m_tabs ? m_tabs->currentIndex() : 0;
+
+    if (idx == 0) {
+        // Categories tab — count targets and sum their sizes.
+        for (const auto& t : m_targets) {
+            if (t.danger == DangerLevel::D)
+                continue;
+            ++totalItems;
+            totalSize += t.size;
+        }
+    } else if (idx == 1) {
+        // Large files tab.
+        for (const auto& lf : m_largeFiles) {
+            if (lf.danger == DangerLevel::D || lf.danger == DangerLevel::C)
+                continue;
+            ++totalItems;
+            totalSize += lf.size;
+        }
+    } else if (idx == 2) {
+        // Duplicates tab — count all files across all groups.
+        for (const auto& dg : m_duplicateGroups) {
+            totalItems += static_cast<int>(dg.files.size());
+            totalSize += dg.size * static_cast<qint64>(dg.files.size());
+        }
+    }
+
+    m_totalLabel->setText(
+        I18n::tr("cleanup.total_items", QMap<QString, QString>{
+            {"count", humanCount(totalItems)},
+            {"size", humanSize(totalSize)},
+        }));
+}
+
+// ---- Type filter implementation ------------------------------------------- //
+
+// Collect distinct type keys present in the trees and populate the filter
+// combos. Each combo item's data holds the language-independent type key
+// (e.g. "type.document"); the visible text is the translated label and is
+// refreshed in retranslate(). Preserves the user's current selection.
+void CleanupPanel::repopulateTypeFilters()
+{
+    // Large files: collect from top-level items' col-5 sort data (type key).
+    if (m_lfTypeFilter) {
+        QStringList keys;
+        for (int i = 0; i < m_lfTree->topLevelItemCount(); ++i) {
+            auto* it = dynamic_cast<SortableTreeWidgetItem*>(m_lfTree->topLevelItem(i));
+            if (!it) continue;
+            const QString k = it->sortData(5).toString();
+            if (!k.isEmpty() && !keys.contains(k))
+                keys << k;
+        }
+        keys.sort();
+        const QString prev = m_lfTypeFilter->currentData().toString();
+        QSignalBlocker b(m_lfTypeFilter);
+        m_lfTypeFilter->clear();
+        m_lfTypeFilter->addItem(I18n::tr("cleanup.filter_all_types"), QString());
+        for (const QString& k : keys)
+            m_lfTypeFilter->addItem(I18n::tr(k.toLatin1().constData()), k);
+        const int idx = prev.isEmpty() ? 0 : m_lfTypeFilter->findData(prev);
+        m_lfTypeFilter->setCurrentIndex(idx >= 0 ? idx : 0);
+    }
+
+    // Duplicates: collect from child items' col-5 sort data (type key).
+    if (m_dupTypeFilter) {
+        QStringList keys;
+        for (int i = 0; i < m_dupTree->topLevelItemCount(); ++i) {
+            auto* grp = m_dupTree->topLevelItem(i);
+            for (int j = 0; j < grp->childCount(); ++j) {
+                auto* it = dynamic_cast<SortableTreeWidgetItem*>(grp->child(j));
+                if (!it) continue;
+                const QString k = it->sortData(5).toString();
+                if (!k.isEmpty() && !keys.contains(k))
+                    keys << k;
+            }
+        }
+        keys.sort();
+        const QString prev = m_dupTypeFilter->currentData().toString();
+        QSignalBlocker b(m_dupTypeFilter);
+        m_dupTypeFilter->clear();
+        m_dupTypeFilter->addItem(I18n::tr("cleanup.filter_all_types"), QString());
+        for (const QString& k : keys)
+            m_dupTypeFilter->addItem(I18n::tr(k.toLatin1().constData()), k);
+        const int idx = prev.isEmpty() ? 0 : m_dupTypeFilter->findData(prev);
+        m_dupTypeFilter->setCurrentIndex(idx >= 0 ? idx : 0);
+    }
+}
+
+void CleanupPanel::onLfTypeFilterChanged(int)
+{
+    applyLfTypeFilter();
+    updateSelectedLabel();  // counts/labels reflect filtered view
+}
+
+void CleanupPanel::onDupTypeFilterChanged(int)
+{
+    applyDupTypeFilter();
+    updateSelectedLabel();
+}
+
+void CleanupPanel::applyLfTypeFilter()
+{
+    if (!m_lfTypeFilter)
+        return;
+    const QString want = m_lfTypeFilter->currentData().toString();
+    for (int i = 0; i < m_lfTree->topLevelItemCount(); ++i) {
+        auto* it = m_lfTree->topLevelItem(i);
+        auto* sw = dynamic_cast<SortableTreeWidgetItem*>(it);
+        const QString lbl = sw ? sw->sortData(5).toString() : QString();
+        it->setHidden(!want.isEmpty() && lbl != want);
+    }
+}
+
+void CleanupPanel::applyDupTypeFilter()
+{
+    if (!m_dupTypeFilter)
+        return;
+    const QString want = m_dupTypeFilter->currentData().toString();
+    for (int i = 0; i < m_dupTree->topLevelItemCount(); ++i) {
+        auto* grp = m_dupTree->topLevelItem(i);
+        int visibleChildren = 0;
+        for (int j = 0; j < grp->childCount(); ++j) {
+            auto* child = grp->child(j);
+            auto* sw = dynamic_cast<SortableTreeWidgetItem*>(child);
+            const QString lbl = sw ? sw->sortData(5).toString() : QString();
+            const bool hide = !want.isEmpty() && lbl != want;
+            child->setHidden(hide);
+            if (!hide)
+                ++visibleChildren;
+        }
+        // Hide the group row itself if all of its children are filtered out.
+        grp->setHidden(visibleChildren == 0);
+    }
 }
 
 std::vector<std::tuple<QString, QString, QString>> CleanupPanel::getCheckedTargets() const
@@ -652,6 +1021,23 @@ std::vector<std::tuple<QString, QString, QString>> CleanupPanel::getCheckedLarge
     return result;
 }
 
+std::vector<std::tuple<QString, QString, QString>> CleanupPanel::getCheckedDuplicates() const
+{
+    std::vector<std::tuple<QString, QString, QString>> result;
+    for (int gi = 0; gi < m_dupTree->topLevelItemCount(); ++gi) {
+        auto* groupItem = m_dupTree->topLevelItem(gi);
+        for (int ci = 0; ci < groupItem->childCount(); ++ci) {
+            auto* child = groupItem->child(ci);
+            if (child->checkState(0) != Qt::Checked)
+                continue;
+            QString path = child->data(0, Qt::UserRole).toString();
+            if (!path.isEmpty())
+                result.emplace_back(QStringLiteral("file"), QString(), path);
+        }
+    }
+    return result;
+}
+
 qint64 CleanupPanel::getCheckedTotalSize() const
 {
     qint64 total = 0;
@@ -680,6 +1066,24 @@ qint64 CleanupPanel::getCheckedTotalSize() const
             if (lf.path == path) {
                 total += lf.size;
                 break;
+            }
+        }
+    }
+    // Duplicate files.
+    for (int gi = 0; gi < m_dupTree->topLevelItemCount(); ++gi) {
+        auto* groupItem = m_dupTree->topLevelItem(gi);
+        for (int ci = 0; ci < groupItem->childCount(); ++ci) {
+            auto* child = groupItem->child(ci);
+            if (child->checkState(0) != Qt::Checked)
+                continue;
+            QString path = child->data(0, Qt::UserRole).toString();
+            for (const auto& dg : m_duplicateGroups) {
+                for (const auto& df : dg.files) {
+                    if (df.path == path) {
+                        total += df.size;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -768,14 +1172,87 @@ void CleanupPanel::onLfSelectAllToggled(bool checked)
 {
     Qt::CheckState state = checked ? Qt::Checked : Qt::Unchecked;
     m_lfTree->blockSignals(true);
+    // Only affect visible items so a type filter is respected: hidden rows
+    // (filtered out) keep their current state.
     for (int i = 0; i < m_lfTree->topLevelItemCount(); ++i) {
         auto* item = m_lfTree->topLevelItem(i);
+        if (item->isHidden())
+            continue;
         if (item->flags() & Qt::ItemIsUserCheckable)
             item->setCheckState(0, state);
     }
     m_lfTree->blockSignals(false);
     m_lfSelBtn->setText(checked ? I18n::tr("cleanup.deselect_all")
                                   : I18n::tr("cleanup.select_all"));
+    updateSelectedLabel();
+}
+
+void CleanupPanel::onDupItemChanged()
+{
+    updateSelectedLabel();
+
+    // Reflect "all visible checkable children checked" state on the select-all
+    // button. Hidden (filtered-out) children are ignored so the button reflects
+    // the visible subset.
+    bool allChecked = false;
+    int checkable = 0;
+    int checked = 0;
+    for (int gi = 0; gi < m_dupTree->topLevelItemCount(); ++gi) {
+        auto* groupItem = m_dupTree->topLevelItem(gi);
+        if (groupItem->isHidden())
+            continue;
+        for (int ci = 0; ci < groupItem->childCount(); ++ci) {
+            auto* child = groupItem->child(ci);
+            if (child->isHidden())
+                continue;
+            if (child->flags() & Qt::ItemIsUserCheckable) {
+                ++checkable;
+                if (child->checkState(0) == Qt::Checked)
+                    ++checked;
+            }
+        }
+    }
+    if (checkable > 0 && checkable == checked)
+        allChecked = true;
+
+    m_dupSelBtn->blockSignals(true);
+    m_dupSelBtn->setChecked(allChecked);
+    m_dupSelBtn->setText(allChecked ? I18n::tr("cleanup.deselect_all")
+                                     : I18n::tr("cleanup.select_all"));
+    m_dupSelBtn->blockSignals(false);
+}
+
+void CleanupPanel::onDupItemClicked(QTreeWidgetItem* item, int column)
+{
+    // Path is in column 4 for child rows; clicking it reveals in Explorer.
+    if (column != 4 || !item->parent())
+        return;
+    QString path = item->data(0, Qt::UserRole).toString();
+    if (!path.isEmpty())
+        emit pathRevealRequested(path);
+}
+
+void CleanupPanel::onDupSelectAllToggled(bool checked)
+{
+    Qt::CheckState state = checked ? Qt::Checked : Qt::Unchecked;
+    m_dupTree->blockSignals(true);
+    // Only affect visible children so a type filter is respected: hidden
+    // children (filtered out) keep their current state.
+    for (int gi = 0; gi < m_dupTree->topLevelItemCount(); ++gi) {
+        auto* groupItem = m_dupTree->topLevelItem(gi);
+        if (groupItem->isHidden())
+            continue;
+        for (int ci = 0; ci < groupItem->childCount(); ++ci) {
+            auto* child = groupItem->child(ci);
+            if (child->isHidden())
+                continue;
+            if (child->flags() & Qt::ItemIsUserCheckable)
+                child->setCheckState(0, state);
+        }
+    }
+    m_dupTree->blockSignals(false);
+    m_dupSelBtn->setText(checked ? I18n::tr("cleanup.deselect_all")
+                                   : I18n::tr("cleanup.select_all"));
     updateSelectedLabel();
 }
 
@@ -805,6 +1282,18 @@ void CleanupPanel::onCleanClicked()
         if (!path.isEmpty())
             items.emplace_back(QStringLiteral("file"), QString(), path);
     }
+    // Duplicate files (child rows in m_dupTree).
+    for (int gi = 0; gi < m_dupTree->topLevelItemCount(); ++gi) {
+        auto* groupItem = m_dupTree->topLevelItem(gi);
+        for (int ci = 0; ci < groupItem->childCount(); ++ci) {
+            auto* child = groupItem->child(ci);
+            if (child->checkState(0) != Qt::Checked)
+                continue;
+            QString path = child->data(0, Qt::UserRole).toString();
+            if (!path.isEmpty())
+                items.emplace_back(QStringLiteral("file"), QString(), path);
+        }
+    }
 
     if (!items.empty())
         emit cleanRequested(items);
@@ -818,21 +1307,16 @@ void CleanupPanel::refreshTheme()
     // Re-apply the inline styles that bake a palette color into the label.
     // (Per-item tree foregrounds are mid-tone and stay legible on both themes;
     // the global QSS handles the rest.)
-    m_titleLabel->setStyleSheet(
-        QStringLiteral("font-size: 14px; font-weight: 700; color: %1;")
-            .arg(QString::fromLatin1(C::FG())));
-    m_summaryLabel->setStyleSheet(
-        QStringLiteral("color: %1; font-size: 11px;")
-            .arg(QString::fromLatin1(C::TEXT_MUTED())));
     m_selectedLabel->setStyleSheet(
         QStringLiteral("color: %1; font-size: 12px;")
             .arg(QString::fromLatin1(C::TEXT_SEC())));
+    m_totalLabel->setStyleSheet(
+        QStringLiteral("color: %1; font-size: 12px;")
+            .arg(QString::fromLatin1(C::TEXT_MUTED())));
 }
 
 void CleanupPanel::retranslate()
 {
-    m_titleLabel->setText(I18n::tr("cleanup.title"));
-
     m_catTree->setHeaderLabels({
         I18n::tr("cleanup.col_level"),
         I18n::tr("cleanup.col_category"),
@@ -846,10 +1330,20 @@ void CleanupPanel::retranslate()
         I18n::tr("cleanup.col_size"),
         I18n::tr("cleanup.col_path"),
         I18n::tr("cleanup.col_warning"),
+        I18n::tr("cleanup.col_type"),
+    });
+    m_dupTree->setHeaderLabels({
+        I18n::tr("cleanup.col_level"),
+        I18n::tr("cleanup.col_dup_group"),
+        I18n::tr("cleanup.col_size"),
+        I18n::tr("cleanup.col_dup_wasted"),
+        I18n::tr("cleanup.col_paths"),
+        I18n::tr("cleanup.col_type"),
     });
 
     m_tabs->setTabText(0, I18n::tr("cleanup.tab_categories"));
     m_tabs->setTabText(1, I18n::tr("cleanup.tab_large_files"));
+    m_tabs->setTabText(2, I18n::tr("cleanup.tab_duplicates"));
 
     m_cleanBtn->setText(I18n::tr("cleanup.clean_selected"));
     m_rescanBtn->setText(I18n::tr("cleanup.rescan"));
@@ -861,6 +1355,12 @@ void CleanupPanel::retranslate()
     m_lfSelBtn->setText(m_lfSelBtn->isChecked()
                              ? I18n::tr("cleanup.deselect_all")
                              : I18n::tr("cleanup.select_all"));
+    m_dupSelBtn->setText(m_dupSelBtn->isChecked()
+                             ? I18n::tr("cleanup.deselect_all")
+                             : I18n::tr("cleanup.select_all"));
+    // Re-translate type-filter labels.
+    m_lfTypeLabel->setText(I18n::tr("cleanup.filter_type"));
+    m_dupTypeLabel->setText(I18n::tr("cleanup.filter_type"));
 
     // Re-translate each category item.
     for (int i = 0; i < m_catTree->topLevelItemCount(); ++i) {
@@ -877,9 +1377,10 @@ void CleanupPanel::retranslate()
             }
         }
     }
-    // Re-translate each large-file item's warning.
+    // Re-translate each large-file item's warning + type label.
     for (int i = 0; i < m_lfTree->topLevelItemCount(); ++i) {
         auto* item = m_lfTree->topLevelItem(i);
+        auto* sw = dynamic_cast<SortableTreeWidgetItem*>(item);
         QString path = item->data(0, Qt::UserRole).toString();
         for (const auto& lf : m_largeFiles) {
             if (lf.path == path) {
@@ -887,7 +1388,35 @@ void CleanupPanel::retranslate()
                 break;
             }
         }
+        // Refresh col-5 type text from the stored language-independent key.
+        if (sw) {
+            const QString tKey = sw->sortData(5).toString();
+            if (!tKey.isEmpty())
+                item->setText(5, I18n::tr(tKey.toLatin1().constData()));
+        }
     }
+    // Re-translate each duplicate group's label and per-file type label.
+    for (int gi = 0; gi < m_dupTree->topLevelItemCount(); ++gi) {
+        auto* groupItem = m_dupTree->topLevelItem(gi);
+        int groupIdx = groupItem->data(0, Qt::UserRole).toInt();
+        if (groupIdx >= 0 && groupIdx < static_cast<int>(m_duplicateGroups.size())) {
+            const auto& dg = m_duplicateGroups[groupIdx];
+            groupItem->setText(1, I18n::tr("cleanup.dup_group_label",
+                QMap<QString, QString>{{"count", QString::number(dg.files.size())}}));
+        }
+        for (int ci = 0; ci < groupItem->childCount(); ++ci) {
+            auto* child = groupItem->child(ci);
+            auto* sw = dynamic_cast<SortableTreeWidgetItem*>(child);
+            if (sw) {
+                const QString tKey = sw->sortData(5).toString();
+                if (!tKey.isEmpty())
+                    child->setText(5, I18n::tr(tKey.toLatin1().constData()));
+            }
+        }
+    }
+    // Rebuild filter combos so their visible labels use the new language
+    // (the underlying type-key data is preserved).
+    repopulateTypeFilters();
 
     updateSummary(m_freeBytes, m_totalBytes);
     updateSelectedLabel();

@@ -595,6 +595,15 @@ QComboBox QAbstractItemView {
     padding: 4px;
     outline: none;
 }
+/* Compact combo for inline toolbars (e.g. type filter in cleanup panel).
+   The default padding (6px) + min-height (20px) yields a 32px sizeHint,
+   which gets clipped when setFixedHeight(22) is applied, making the combo
+   look as if it is overlapped by the table header below. Use a tighter
+   padding/min-height so the combo renders fully inside 22px. */
+QComboBox#typeFilter {
+    padding: 1px 8px;
+    min-height: 14px;
+}
 
 /* ---- line edit / search ---- */
 QLineEdit {

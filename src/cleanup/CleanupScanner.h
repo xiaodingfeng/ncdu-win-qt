@@ -24,6 +24,10 @@ public:
                    QObject* parent = nullptr);
     void cancel();
 
+    // Classify a file's danger level (S/A/B/C/D) by its path/name.
+    // Used by both CleanupScanner and DuplicateScanner to skip C/D-level files.
+    static DangerLevel classifyFileDanger(const QString& path, const QString& name);
+
 signals:
     void targetScanned(CleanupTarget target);
     void largeFileFound(LargeFile lf);
@@ -82,5 +86,4 @@ private:
     // Path normalization helpers (_norm / _path_under).
     static QString normalizePath(const QString& path);
     static bool pathUnder(const QString& path, const QString& rootNorm);
-    static DangerLevel classifyFileDanger(const QString& path, const QString& name);
 };

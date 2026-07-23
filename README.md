@@ -4,7 +4,7 @@
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![Qt6](https://img.shields.io/badge/GUI-Qt6-green.svg)](https://www.qt.io)
 [![Platform: Windows](https://img.shields.io/badge/platform-windows-lightgrey.svg)](#supported-platforms)
-[![Version](https://img.shields.io/badge/version-1.0.3-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-1.0.4-blue.svg)](#)
 
 **[English](README.md)** | **[中文](README_ZH.md)**
 
@@ -19,8 +19,16 @@ dependencies bundled, and supports English / 简体中文 out of the box.
 
 ## ✨ Features
 
-- **Blazing fast scanning** — multi-threaded disk scanning for maximum speed,
-  even on large drives.
+- **Blazing fast scanning** — directly reads the NTFS Master File Table
+  (MFT) to enumerate files, delivering scan speeds several times faster
+  than traditional directory-walking approaches. Multi-threaded processing
+  keeps large drives responsive.
+- **Duplicate file finder** — three-stage funnel (size grouping →
+  first-4KB hash → full hash) identifies duplicate files with minimal
+  I/O and memory. Safely skips system binaries and user data; the first
+  file in each group is kept by default.
+- **Theme switching** — switch between light and dark themes, or define
+  your own custom accent colors for a personalized look.
 - **Skip heavy directories** — optionally skip deep scanning of large
   folders like `node_modules` and `.git` while still showing their sizes.
 - **Full system access** — auto-requests admin privileges to scan protected
@@ -39,8 +47,10 @@ dependencies bundled, and supports English / 简体中文 out of the box.
 - **One-click disk cleanup** — dedicated Cleanup tab detects and removes:
   - Common junk: temp files, browser caches, pip/npm caches
   - Large files (>50MB) with safety-level classification
-- **Safety-first deletion** — five-level safety system ensures you won't
-  accidentally delete important files.
+  - Duplicate files with grouped selection
+- **Safety-first deletion** — five-level safety system (S/A/B/C/D) ensures
+  you won't accidentally delete important files. System state and user
+  data are never auto-selected.
 - **Auto-scan on startup** — instantly shows your home directory usage
   on first launch.
 - **English and Chinese** — built-in localization with persistent language
@@ -82,7 +92,7 @@ cd ncdu-win-qt
 scripts\build.bat
 ```
 
-The script produces `dist\NcduWin_1.0.3_Setup.exe` — an installer with
+The script produces `dist\NcduWin_1.0.4_Setup.exe` — an installer with
 all Qt dependencies bundled.
 
 ### Option C — Open in Visual Studio
@@ -111,6 +121,9 @@ ncdu-win-qt/
 │   │   ├── FormatHelpers.h/cpp
 │   │   ├── I18n.h/cpp
 │   │   ├── Identify.h/cpp
+│   │   ├── Logger.h/cpp
+│   │   ├── MemoryMonitor.h
+│   │   ├── MftScanner.h/cpp    # NTFS MFT direct reader (fast path)
 │   │   └── WinApi.h/cpp
 │   ├── ui/                 # UI components
 │   │   ├── BreadcrumbBar.h/cpp
@@ -123,7 +136,8 @@ ncdu-win-qt/
 │       ├── CleanupPanel.h/cpp
 │       ├── CleanupScanner.h/cpp
 │       ├── CleanupTarget.h
-│       └── CleanupWorker.h/cpp
+│       ├── CleanupWorker.h/cpp
+│       └── DuplicateScanner.h/cpp  # Duplicate file detection
 ├── locales/                # i18n JSON files
 │       ├── en.json
 │       └── zh.json
@@ -133,6 +147,7 @@ ncdu-win-qt/
 │   └── version.iss.in      # Version template for installer
 ├── tests/
 │   ├── test_scanner.cpp    # C++ unit tests (Qt Test)
+│   └── compare_scanners.cpp  # Scanner comparison benchmarks
 ├── docs/
 │   └── screenshots/
 │       ├── treeMap.png
@@ -140,6 +155,8 @@ ncdu-win-qt/
 ├── app.ico
 ├── app.manifest
 ├── CMakeLists.txt
+├── CMakePresets.json
+├── CMakeSettings.json
 ├── LICENSE
 ├── README.md
 └── README_ZH.md

@@ -28,6 +28,7 @@
 #include "CleanupTarget.h"
 #include "CleanupScanner.h"
 #include "CleanupWorker.h"
+#include "DuplicateScanner.h"
 
 // Forward declarations - implementations are created by other tasks.
 class TreemapWidget;
@@ -35,6 +36,9 @@ class BreadcrumbBar;
 class LegendBar;
 class CleanupPanel;
 class SizeBarDelegate;
+class QFrame;
+class QFile;
+class QNetworkReply;
 
 // MainWindow - the application's primary window.
 //
@@ -89,6 +93,9 @@ private slots:
                            std::vector<LargeFile> largeFiles,
                            qint64 totalSize, int totalCount,
                            qint64 largeTotal);
+    void onDupScanProgress(int phase, int processed, int total);
+    void onDupScanDone(std::vector<DuplicateGroup> groups,
+                       qint64 totalWasted, int totalFiles);
     void onCleanupProgress(const QString& label);
     void onCleanupItemDone(const QString& key, int deleted, int skipped, qint64 freed);
     void onCleanupFinished(int totalDeleted, int totalSkipped, qint64 totalFreed,
@@ -102,6 +109,7 @@ private:
     std::shared_ptr<FileNode> m_current;
     QThread* m_scanner = nullptr;
     CleanupScanner* m_cleanupScanner = nullptr;
+    DuplicateScanner* m_dupScanner = nullptr;
     CleanupWorker* m_cleanupWorker = nullptr;
     QString m_searchText;
     QString m_searchQueryPending;
@@ -118,6 +126,7 @@ private:
     QString m_lastScanPath;
     std::vector<CleanupTarget> m_cleanupTargets;
     std::vector<LargeFile> m_largeFiles;
+    std::vector<DuplicateGroup> m_duplicateGroups;
 
     // ---- UI controls ----
     QComboBox* m_pathCombo = nullptr;
@@ -138,6 +147,18 @@ private:
     QLabel* m_hoverLabel = nullptr;
     QLabel* m_subtitleLabel = nullptr;
     QProgressBar* m_progress = nullptr;
+
+    // Auto-update toast (bottom-right notification).
+    QFrame* m_updateToast = nullptr;
+    QLabel* m_updateToastTitle = nullptr;
+    QLabel* m_updateToastBody = nullptr;
+    QProgressBar* m_updateToastProgress = nullptr;
+    QLabel* m_updateToastStatus = nullptr;
+    QPushButton* m_updateToastInstallBtn = nullptr;
+    QPushButton* m_updateToastCloseBtn = nullptr;
+    QNetworkReply* m_updateDownloadReply = nullptr;
+    std::unique_ptr<QFile> m_updateDownloadFile;
+    QString m_updateRemoteVer;
 
     // Menu actions (kept for retranslation).
     QMap<QString, QAction*> m_actions;
@@ -176,9 +197,21 @@ private:
     void showProperties(const std::shared_ptr<FileNode>& node);
     void showAbout();
     void showThemeCustomize();
-    void checkForUpdate();
+    void checkForUpdate(bool silent = false);
     void openHomepage();
     void showSkippedMsg();
+
+    // Auto-update toast.
+    void buildUpdateToast();
+    void showUpdateToast(const QString& remoteVer);
+    void repositionUpdateToast();
+    void applyUpdateToastStyle();
+    void closeUpdateToast();
+    void retranslateUpdateToast();
+    void downloadAndInstall();
+    void onUpdateDownloadReady();
+    void onUpdateDownloadProgress(qint64 received, qint64 total);
+    void onUpdateDownloadFinished();
 
     // Deletion
     void collectDeletable(std::vector<std::shared_ptr<FileNode>>& deletable,

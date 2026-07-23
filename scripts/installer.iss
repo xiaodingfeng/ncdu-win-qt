@@ -54,4 +54,11 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"; IconFilename
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+; Non-silent: postinstall checkbox lets the user opt-in to launching the app.
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: postinstall nowait skipifsilent unchecked
+; Silent: auto-launch the new version after the auto-update install, since
+; there is no UI for the postinstall checkbox. Using [Run] (instead of a
+; [Code] ShellExec) lets Inno Setup handle the requireAdministrator manifest
+; of NcduWin.exe via the elevated installer context - no UAC prompt appears
+; because the installer itself is already running elevated.
+Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Flags: nowait skipifnotsilent

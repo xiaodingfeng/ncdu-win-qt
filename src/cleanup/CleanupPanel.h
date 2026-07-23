@@ -6,6 +6,7 @@
 #include <QPushButton>
 #include <QProgressBar>
 #include <QLabel>
+#include <QComboBox>
 #include <QTabWidget>
 #include <vector>
 #include <memory>
@@ -13,6 +14,7 @@
 
 #include "CleanupTarget.h"
 #include "CleanupWorker.h"
+#include "DuplicateScanner.h"
 
 // CleanupPanel - panel showing cleanup targets by S/A/B/C/D safety level and
 // large files.
@@ -35,9 +37,11 @@ public:
     void stopScanProgress();
     void addTarget(const CleanupTarget& target);
     void addLargeFile(const LargeFile& lf);
+    void addDuplicateGroup(const DuplicateGroup& group);
     void loadTargets(const std::vector<CleanupTarget>& targets,
                      const std::vector<LargeFile>& largeFiles,
                      qint64 freeBytes, qint64 totalBytes);
+    void loadDuplicates(const std::vector<DuplicateGroup>& groups);
     void removeCleanedItems(const std::vector<CleanupWorker::ItemRef>& items);
     void setCleaning(bool cleaning);
     void updateFreeSpace(qint64 freeBytes, qint64 totalBytes);
@@ -56,22 +60,33 @@ private slots:
     void onCatSelectAllToggled(bool checked);
     void onLfSelectAllToggled(bool checked);
     void onCleanClicked();
+    void onDupItemChanged();
+    void onDupItemClicked(QTreeWidgetItem* item, int column);
+    void onDupSelectAllToggled(bool checked);
+    void onLfTypeFilterChanged(int index);
+    void onDupTypeFilterChanged(int index);
 
 private:
     QTreeWidget* m_catTree = nullptr;
     QTreeWidget* m_lfTree = nullptr;
+    QTreeWidget* m_dupTree = nullptr;
     QTabWidget* m_tabs = nullptr;
     QPushButton* m_cleanBtn = nullptr;
     QPushButton* m_rescanBtn = nullptr;
     QPushButton* m_catSelBtn = nullptr;
     QPushButton* m_lfSelBtn = nullptr;
+    QPushButton* m_dupSelBtn = nullptr;
+    QComboBox* m_lfTypeFilter = nullptr;
+    QComboBox* m_dupTypeFilter = nullptr;
+    QLabel* m_lfTypeLabel = nullptr;
+    QLabel* m_dupTypeLabel = nullptr;
     QProgressBar* m_scanProgress = nullptr;
-    QLabel* m_titleLabel = nullptr;
-    QLabel* m_summaryLabel = nullptr;
     QLabel* m_selectedLabel = nullptr;
+    QLabel* m_totalLabel = nullptr;
     bool m_cleaning = false;
     std::vector<CleanupTarget> m_targets;
     std::vector<LargeFile> m_largeFiles;
+    std::vector<DuplicateGroup> m_duplicateGroups;
     qint64 m_freeBytes = 0;
     qint64 m_totalBytes = 0;
 
@@ -81,8 +96,13 @@ private:
     void applyLargeFileWarning(QTreeWidgetItem* item, const QString& level);
     void updateSummary(qint64 freeBytes, qint64 totalBytes);
     void updateSelectedLabel();
+    void updateTotalLabel();
+    void applyLfTypeFilter();
+    void applyDupTypeFilter();
+    void repopulateTypeFilters();
     std::vector<std::tuple<QString, QString, QString>> getCheckedTargets() const;
     std::vector<std::tuple<QString, QString, QString>> getCheckedLargeFiles() const;
+    std::vector<std::tuple<QString, QString, QString>> getCheckedDuplicates() const;
     qint64 getCheckedTotalSize() const;
     QString largeFileWarning(const QString& level) const;
 };

@@ -54,6 +54,21 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QVersionNumber>
+#include <QApplication>
+#include <QFile>
+#include <QScreen>
+#include <QGuiApplication>
+
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#  include <shellapi.h>
+#endif
 
 #include <algorithm>
 #include <stack>
@@ -65,6 +80,7 @@
 #include "I18n.h"
 #include "Identify.h"
 #include "WinApi.h"
+#include "Logger.h"
 #include "FormatHelpers.h"
 #include "SizeBarDelegate.h"
 #include "TreemapWidget.h"
@@ -182,6 +198,8 @@ MainWindow::MainWindow(QWidget* parent)
     qRegisterMetaType<std::vector<CleanupTarget>>("std::vector<CleanupTarget>");
     qRegisterMetaType<std::vector<LargeFile>>("std::vector<LargeFile>");
     qRegisterMetaType<std::vector<CleanupWorker::ItemRef>>("std::vector<CleanupWorker::ItemRef>");
+    qRegisterMetaType<DuplicateGroup>("DuplicateGroup");
+    qRegisterMetaType<std::vector<DuplicateGroup>>("std::vector<DuplicateGroup>");
 
     buildUI();
     buildMenu();
@@ -207,6 +225,11 @@ MainWindow::MainWindow(QWidget* parent)
             path = getHomeDir();
         startScan(path);
     });
+
+    // Check for updates shortly after launch. Runs silently: only surfaces a
+    // result when a newer version is available (bottom-right toast). Uses the
+    // same version endpoint + comparison as Help -> Check for Updates.
+    QTimer::singleShot(3000, this, [this]() { checkForUpdate(true); });
 }
 
 MainWindow::~MainWindow()
@@ -226,6 +249,10 @@ void MainWindow::closeEvent(QCloseEvent* e)
     if (m_cleanupScanner) {
         m_cleanupScanner->cancel();
         m_cleanupScanner->wait(3000);
+    }
+    if (m_dupScanner) {
+        m_dupScanner->cancel();
+        m_dupScanner->wait(3000);
     }
     if (m_cleanupWorker) {
         m_cleanupWorker->cancel();
@@ -2104,86 +2131,378 @@ void MainWindow::openHomepage()
     QDesktopServices::openUrl(QUrl(HOMEPAGE));
 }
 
-void MainWindow::checkForUpdate()
+void MainWindow::checkForUpdate(bool silent)
 {
-    m_statusLabel->setText(I18n::tr("update.checking"));
+    if (!silent)
+        m_statusLabel->setText(I18n::tr("update.checking"));
     QNetworkRequest req(QUrl(QString(HOMEPAGE) + QStringLiteral("version")));
     req.setTransferTimeout(10000);
     auto* reply = m_nam->get(req);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, silent]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
-            m_statusLabel->setText(QString());
-            QMessageBox msgBox(this);
-            msgBox.setIcon(QMessageBox::Warning);
-            msgBox.setWindowTitle(I18n::tr("update.check_failed"));
-            msgBox.setText(I18n::tr("update.check_failed_body",
-                QMap<QString, QString>{{"error", reply->errorString()}}));
-            msgBox.exec();
+            if (!silent) {
+                m_statusLabel->setText(QString());
+                QMessageBox msgBox(this);
+                msgBox.setIcon(QMessageBox::Warning);
+                msgBox.setWindowTitle(I18n::tr("update.check_failed"));
+                msgBox.setText(I18n::tr("update.check_failed_body",
+                    QMap<QString, QString>{{"error", reply->errorString()}}));
+                msgBox.exec();
+            } else {
+                Logger::warn(QStringLiteral("Silent update check failed: %1")
+                                 .arg(reply->errorString()));
+            }
             return;
         }
         QString remoteVer = QString::fromUtf8(reply->readAll()).trimmed();
         QVersionNumber local = QVersionNumber::fromString(APP_VERSION);
         QVersionNumber remote = QVersionNumber::fromString(remoteVer);
         if (remote.isNull()) {
-            m_statusLabel->setText(QString());
-            QMessageBox msgBox(this);
-            msgBox.setIcon(QMessageBox::Warning);
-            msgBox.setWindowTitle(I18n::tr("update.check_failed"));
-            msgBox.setText(I18n::tr("update.check_failed_body",
-                QMap<QString, QString>{{"error", QStringLiteral("Invalid version response")}}));
-            msgBox.exec();
+            if (!silent) {
+                m_statusLabel->setText(QString());
+                QMessageBox msgBox(this);
+                msgBox.setIcon(QMessageBox::Warning);
+                msgBox.setWindowTitle(I18n::tr("update.check_failed"));
+                msgBox.setText(I18n::tr("update.check_failed_body",
+                    QMap<QString, QString>{{"error", QStringLiteral("Invalid version response")}}));
+                msgBox.exec();
+            } else {
+                Logger::warn(QStringLiteral("Silent update check: invalid version response"));
+            }
             return;
         }
-        m_statusLabel->setText(QString());
+        if (!silent)
+            m_statusLabel->setText(QString());
         if (remote > local) {
-            QDialog dlg(this);
-            dlg.setWindowTitle(I18n::tr("update.new_title"));
-            dlg.setMinimumWidth(400);
-            auto* lay = new QVBoxLayout(&dlg);
-            lay->setContentsMargins(20, 20, 20, 16);
-            lay->setSpacing(10);
+            if (silent) {
+                // Non-intrusive bottom-right toast; user can dismiss or click
+                // "download & install" to auto-update.
+                showUpdateToast(remoteVer);
+            } else {
+                QDialog dlg(this);
+                dlg.setWindowTitle(I18n::tr("update.new_title"));
+                dlg.setMinimumWidth(420);
+                auto* lay = new QVBoxLayout(&dlg);
+                lay->setContentsMargins(20, 20, 20, 16);
+                lay->setSpacing(10);
 
-            auto* body = new QLabel(I18n::tr("update.new_body",
-                QMap<QString, QString>{
-                    {"version", remoteVer},
-                    {"local", APP_VERSION},
-                }));
-            body->setWordWrap(true);
-            lay->addWidget(body);
+                auto* body = new QLabel(I18n::tr("update.new_body",
+                    QMap<QString, QString>{
+                        {"version", remoteVer},
+                        {"local", APP_VERSION},
+                    }));
+                body->setWordWrap(true);
+                lay->addWidget(body);
 
-            auto* urlLbl = new QLabel(
-                QStringLiteral("<a href=\"%1\" style=\"color:%2;text-decoration:none;\">%3</a>")
-                    .arg(HOMEPAGE)
-                    .arg(QString::fromLatin1(C::PRIMARY()))
-                    .arg(I18n::tr("update.download_url",
-                        QMap<QString, QString>{{"url", HOMEPAGE}})));
-            urlLbl->setOpenExternalLinks(true);
-            urlLbl->setTextInteractionFlags(Qt::TextBrowserInteraction);
-            urlLbl->setWordWrap(true);
-            urlLbl->setCursor(Qt::PointingHandCursor);
-            lay->addWidget(urlLbl);
+                auto* urlLbl = new QLabel(
+                    QStringLiteral("<a href=\"%1\" style=\"color:%2;text-decoration:none;\">%3</a>")
+                        .arg(HOMEPAGE)
+                        .arg(QString::fromLatin1(C::PRIMARY()))
+                        .arg(I18n::tr("update.download_url",
+                            QMap<QString, QString>{{"url", HOMEPAGE}})));
+                urlLbl->setOpenExternalLinks(true);
+                urlLbl->setTextInteractionFlags(Qt::TextBrowserInteraction);
+                urlLbl->setWordWrap(true);
+                urlLbl->setCursor(Qt::PointingHandCursor);
+                lay->addWidget(urlLbl);
 
-            lay->addStretch(1);
-            auto* btnRow = new QHBoxLayout;
-            btnRow->addStretch(1);
-            auto* closeBtn = new QPushButton(I18n::tr("button.ok"));
-            closeBtn->setObjectName("primary");
-            closeBtn->setCursor(Qt::PointingHandCursor);
-            connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
-            btnRow->addWidget(closeBtn);
-            lay->addLayout(btnRow);
+                lay->addStretch(1);
+                auto* btnRow = new QHBoxLayout;
+                btnRow->addStretch(1);
+                auto* closeBtn = new QPushButton(I18n::tr("button.close"));
+                closeBtn->setCursor(Qt::PointingHandCursor);
+                connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+                btnRow->addWidget(closeBtn);
+                auto* downloadBtn = new QPushButton(I18n::tr("update.download_install"));
+                downloadBtn->setObjectName("primary");
+                downloadBtn->setCursor(Qt::PointingHandCursor);
+                btnRow->addWidget(downloadBtn);
+                lay->addLayout(btnRow);
 
-            dlg.exec();
+                bool wantDownload = false;
+                connect(downloadBtn, &QPushButton::clicked, this, [&]() {
+                    wantDownload = true;
+                    dlg.accept();
+                });
+                dlg.exec();
+
+                if (wantDownload) {
+                    // Hand off to the same toast-based download/install flow
+                    // used by the silent startup check. The toast surfaces
+                    // progress, status, and installer launch.
+                    m_updateRemoteVer = remoteVer;
+                    showUpdateToast(remoteVer);
+                    downloadAndInstall();
+                }
+            }
         } else {
-            QMessageBox msgBox(this);
-            msgBox.setIcon(QMessageBox::Information);
-            msgBox.setWindowTitle(I18n::tr("update.current"));
-            msgBox.setText(I18n::tr("update.current_body",
-                QMap<QString, QString>{{"version", APP_VERSION}}));
-            msgBox.exec();
+            if (!silent) {
+                QMessageBox msgBox(this);
+                msgBox.setIcon(QMessageBox::Information);
+                msgBox.setWindowTitle(I18n::tr("update.current"));
+                msgBox.setText(I18n::tr("update.current_body",
+                    QMap<QString, QString>{{"version", APP_VERSION}}));
+                msgBox.exec();
+            }
+            // silent + up-to-date: nothing to show.
         }
     });
+}
+
+// --------------------------------------------------------------------------- //
+// Auto-update toast
+// --------------------------------------------------------------------------- //
+// A frameless top-level tool window pinned to the bottom-right of the screen.
+// Shown when a silent startup update check finds a newer version. The user can
+// dismiss it with the "x" button or click "download & install" to fetch the
+// installer and run it silently. The app quits right after launching the
+// installer so the .exe lock is released; the installer (built with the
+// [Code] relaunch step in installer.iss) restarts the new version when done.
+
+void MainWindow::buildUpdateToast()
+{
+    m_updateToast = new QFrame(this,
+        Qt::FramelessWindowHint | Qt::Tool | Qt::WindowStaysOnTopHint);
+    m_updateToast->setObjectName("updateToast");
+    m_updateToast->setFixedWidth(340);
+    m_updateToast->setAttribute(Qt::WA_ShowWithoutActivating);
+    m_updateToast->setFocusPolicy(Qt::NoFocus);
+    m_updateToast->setVisible(false);
+
+    auto* lay = new QVBoxLayout(m_updateToast);
+    lay->setContentsMargins(16, 12, 12, 12);
+    lay->setSpacing(8);
+
+    // Title row.
+    auto* titleRow = new QHBoxLayout;
+    titleRow->setSpacing(8);
+    m_updateToastTitle = new QLabel(QStringLiteral("🔄 ") + I18n::tr("update.new_title"));
+    m_updateToastTitle->setObjectName("toast-title");
+    titleRow->addWidget(m_updateToastTitle);
+    titleRow->addStretch(1);
+    m_updateToastCloseBtn = new QPushButton(QStringLiteral("×"));
+    m_updateToastCloseBtn->setObjectName("ghost");
+    m_updateToastCloseBtn->setFixedSize(24, 24);
+    m_updateToastCloseBtn->setCursor(Qt::PointingHandCursor);
+    m_updateToastCloseBtn->setToolTip(I18n::tr("button.close"));
+    connect(m_updateToastCloseBtn, &QPushButton::clicked, this, &MainWindow::closeUpdateToast);
+    titleRow->addWidget(m_updateToastCloseBtn);
+    lay->addLayout(titleRow);
+
+    m_updateToastBody = new QLabel;
+    m_updateToastBody->setObjectName("toast-body");
+    m_updateToastBody->setWordWrap(true);
+    m_updateToastBody->setTextFormat(Qt::PlainText);
+    lay->addWidget(m_updateToastBody);
+
+    m_updateToastStatus = new QLabel;
+    m_updateToastStatus->setObjectName("toast-status");
+    m_updateToastStatus->setVisible(false);
+    m_updateToastStatus->setWordWrap(true);
+    lay->addWidget(m_updateToastStatus);
+
+    m_updateToastProgress = new QProgressBar;
+    m_updateToastProgress->setRange(0, 100);
+    m_updateToastProgress->setValue(0);
+    m_updateToastProgress->setVisible(false);
+    lay->addWidget(m_updateToastProgress);
+
+    auto* btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    m_updateToastInstallBtn = new QPushButton(I18n::tr("update.download_install"));
+    m_updateToastInstallBtn->setObjectName("primary");
+    m_updateToastInstallBtn->setCursor(Qt::PointingHandCursor);
+    connect(m_updateToastInstallBtn, &QPushButton::clicked, this, [this]() {
+        if (!m_updateRemoteVer.isEmpty())
+            downloadAndInstall();
+    });
+    btnRow->addWidget(m_updateToastInstallBtn);
+    lay->addLayout(btnRow);
+
+    applyUpdateToastStyle();
+}
+
+void MainWindow::applyUpdateToastStyle()
+{
+    if (!m_updateToast)
+        return;
+    m_updateToast->setStyleSheet(QStringLiteral(
+        "QFrame#updateToast { background-color: %1; border: 1px solid %2; border-radius: 10px; }"
+        "QLabel#toast-title { font-size: 14px; font-weight: 600; color: %3; }"
+        "QLabel#toast-body { font-size: 12px; color: %4; }"
+        "QLabel#toast-status { font-size: 11px; color: %5; }"
+    ).arg(QString::fromLatin1(C::SURFACE()))
+     .arg(QString::fromLatin1(C::BORDER()))
+     .arg(QString::fromLatin1(C::FG()))
+     .arg(QString::fromLatin1(C::TEXT_SEC()))
+     .arg(QString::fromLatin1(C::TEXT_MUTED())));
+}
+
+void MainWindow::showUpdateToast(const QString& remoteVer)
+{
+    if (!m_updateToast)
+        buildUpdateToast();
+    m_updateRemoteVer = remoteVer;
+    m_updateToastBody->setText(I18n::tr("update.toast_body",
+        QMap<QString, QString>{{"version", remoteVer}, {"local", APP_VERSION}}));
+    // Reset interactive state so a previously-dismissed toast can be reused.
+    m_updateToastProgress->setVisible(false);
+    m_updateToastProgress->setValue(0);
+    m_updateToastStatus->setVisible(false);
+    m_updateToastStatus->setText(QString());
+    m_updateToastInstallBtn->setVisible(true);
+    m_updateToastInstallBtn->setEnabled(true);
+    m_updateToastInstallBtn->setText(I18n::tr("update.download_install"));
+    m_updateToast->adjustSize();
+    m_updateToast->show();
+    repositionUpdateToast();
+}
+
+void MainWindow::repositionUpdateToast()
+{
+    if (!m_updateToast || !m_updateToast->isVisible())
+        return;
+    auto* screen = QGuiApplication::primaryScreen();
+    if (!screen)
+        return;
+    const QRect avail = screen->availableGeometry();
+    m_updateToast->adjustSize();
+    const QSize sz = m_updateToast->size();
+    const int x = avail.right() - sz.width() - 16;
+    const int y = avail.bottom() - sz.height() - 8;
+    m_updateToast->move(x, y);
+}
+
+void MainWindow::closeUpdateToast()
+{
+    if (m_updateDownloadReply)
+        m_updateDownloadReply->abort();  // -> finished() cleans up + resets UI
+    if (m_updateToast)
+        m_updateToast->hide();
+}
+
+void MainWindow::retranslateUpdateToast()
+{
+    if (!m_updateToast)
+        return;
+    m_updateToastTitle->setText(QStringLiteral("🔄 ") + I18n::tr("update.new_title"));
+    m_updateToastCloseBtn->setToolTip(I18n::tr("button.close"));
+    m_updateToastInstallBtn->setText(I18n::tr("update.download_install"));
+    if (!m_updateRemoteVer.isEmpty())
+        m_updateToastBody->setText(I18n::tr("update.toast_body",
+            QMap<QString, QString>{{"version", m_updateRemoteVer}, {"local", APP_VERSION}}));
+    repositionUpdateToast();
+}
+
+void MainWindow::downloadAndInstall()
+{
+    if (m_updateDownloadReply)
+        return;  // already downloading
+
+    const QString url = QString(HOMEPAGE) + QStringLiteral("downloads/NcduWin_Setup.exe");
+    const QString path = QDir::tempPath() + QStringLiteral("/NcduWin_Setup.exe");
+    QFile::remove(path);
+
+    m_updateDownloadFile = std::make_unique<QFile>(path);
+    if (!m_updateDownloadFile->open(QIODevice::WriteOnly)) {
+        m_updateToastStatus->setVisible(true);
+        m_updateToastStatus->setText(I18n::tr("update.download_failed",
+            QMap<QString, QString>{{"error", m_updateDownloadFile->errorString()}}));
+        return;
+    }
+
+    QNetworkRequest req((QUrl(url)));
+    req.setTransferTimeout(120000);
+    m_updateDownloadReply = m_nam->get(req);
+    connect(m_updateDownloadReply, &QNetworkReply::readyRead,
+            this, &MainWindow::onUpdateDownloadReady);
+    connect(m_updateDownloadReply, &QNetworkReply::downloadProgress,
+            this, &MainWindow::onUpdateDownloadProgress);
+    connect(m_updateDownloadReply, &QNetworkReply::finished,
+            this, &MainWindow::onUpdateDownloadFinished);
+
+    m_updateToastInstallBtn->setEnabled(false);
+    m_updateToastProgress->setValue(0);
+    m_updateToastProgress->setVisible(true);
+    m_updateToastStatus->setText(I18n::tr("update.downloading",
+        QMap<QString, QString>{{"percent", QStringLiteral("0")}}));
+    m_updateToastStatus->setVisible(true);
+}
+
+void MainWindow::onUpdateDownloadReady()
+{
+    if (m_updateDownloadReply && m_updateDownloadFile)
+        m_updateDownloadFile->write(m_updateDownloadReply->readAll());
+}
+
+void MainWindow::onUpdateDownloadProgress(qint64 received, qint64 total)
+{
+    if (total <= 0)
+        return;
+    const int pct = int(received * 100 / total);
+    m_updateToastProgress->setValue(pct);
+    m_updateToastStatus->setText(I18n::tr("update.downloading",
+        QMap<QString, QString>{{"percent", QString::number(pct)}}));
+}
+
+void MainWindow::onUpdateDownloadFinished()
+{
+    auto* reply = m_updateDownloadReply;
+    m_updateDownloadReply = nullptr;
+    if (!reply)
+        return;
+    reply->deleteLater();
+
+    if (m_updateDownloadFile) {
+        m_updateDownloadFile->close();
+        m_updateDownloadFile.reset();
+    }
+
+    const bool cancelled = (reply->error() == QNetworkReply::OperationCanceledError);
+    if (reply->error() != QNetworkReply::NoError && !cancelled) {
+        m_updateToastProgress->setVisible(false);
+        m_updateToastStatus->setText(I18n::tr("update.download_failed",
+            QMap<QString, QString>{{"error", reply->errorString()}}));
+        m_updateToastInstallBtn->setEnabled(true);
+        return;
+    }
+    if (cancelled) {
+        // Toast was dismissed by the user; reset for a possible retry.
+        m_updateToastProgress->setVisible(false);
+        m_updateToastStatus->setVisible(false);
+        m_updateToastInstallBtn->setEnabled(true);
+        return;
+    }
+
+    // Download complete: launch the installer silently and quit. The app runs
+    // elevated (manifest requireAdministrator), so no UAC prompt appears. The
+    // installer closes the running app (/CLOSEAPPLICATIONS), installs, then
+    // relaunches the new version via installer.iss [Code] -> CurStepChanged.
+    m_updateToastProgress->setVisible(false);
+    m_updateToastStatus->setText(I18n::tr("update.installing"));
+    m_updateToastInstallBtn->setVisible(false);
+
+    const QString path = QDir::tempPath() + QStringLiteral("/NcduWin_Setup.exe");
+    const QString params = QStringLiteral(
+        "/SILENT /NOCANCEL /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /NORESTART");
+
+#ifdef _WIN32
+    const HINSTANCE h = ShellExecuteW(nullptr, L"runas",
+        reinterpret_cast<LPCWSTR>(path.utf16()),
+        reinterpret_cast<LPCWSTR>(params.utf16()),
+        nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(h) <= 32) {
+        m_updateToastStatus->setText(I18n::tr("update.launch_failed"));
+        m_updateToastInstallBtn->setVisible(true);
+        m_updateToastInstallBtn->setEnabled(true);
+        return;
+    }
+#else
+    Q_UNUSED(path) Q_UNUSED(params)
+#endif
+    // Quit so the installer can replace the running executable.
+    QApplication::quit();
 }
 
 // --------------------------------------------------------------------------- //
@@ -2199,10 +2518,18 @@ void MainWindow::startCleanupScan(const QString& scanPath)
         }
         m_cleanupScanner = nullptr;
     }
+    // Cancel any in-flight duplicate scan so its signals don't leak into the
+    // freshly-cleared panel.
+    if (m_dupScanner) {
+        m_dupScanner->cancel();
+        m_dupScanner->wait(100);
+        m_dupScanner = nullptr;
+    }
 
     m_cleanupPanel->startScanProgress();
     m_cleanupTargets.clear();
     m_largeFiles.clear();
+    m_duplicateGroups.clear();
 
     m_cleanupScanner = new CleanupScanner(scanPath, m_root, this);
     // Auto-delete the cleanup scanner once its run() returns (same pattern
@@ -2243,6 +2570,45 @@ void MainWindow::onCleanupScanDone(std::vector<CleanupTarget> targets,
     auto [free, used, total] = WinApi::getDiskFreeSpace(path);
     m_cleanupPanel->loadTargets(m_cleanupTargets, m_largeFiles, free, total);
     m_cleanupPanel->stopScanProgress();
+
+    // Start the duplicate-file scan after the cleanup scan finishes so the
+    // two don't compete for disk I/O. The dup scan reuses the same FileNode
+    // tree (m_root) built by the main scan.
+    if (m_root && !m_lastScanPath.isEmpty()) {
+        m_dupScanner = new DuplicateScanner(m_lastScanPath, m_root, this);
+        connect(m_dupScanner, &QThread::finished,
+                m_dupScanner, &QObject::deleteLater);
+        connect(m_dupScanner, &DuplicateScanner::groupFound,
+                m_cleanupPanel, &CleanupPanel::addDuplicateGroup);
+        connect(m_dupScanner, &DuplicateScanner::progress,
+                this, &MainWindow::onDupScanProgress);
+        connect(m_dupScanner, &DuplicateScanner::finished,
+                this, &MainWindow::onDupScanDone);
+        m_dupScanner->start();
+    }
+}
+
+void MainWindow::onDupScanProgress(int phase, int processed, int total)
+{
+    // Light status update; the progress bar is hidden after stopScanProgress.
+    QString phaseKey;
+    switch (phase) {
+        case 1:  phaseKey = QStringLiteral("cleanup.dup_phase_size"); break;
+        case 2:  phaseKey = QStringLiteral("cleanup.dup_phase_partial"); break;
+        case 3:  phaseKey = QStringLiteral("cleanup.dup_phase_full"); break;
+        default: return;
+    }
+    m_statusLabel->setText(I18n::tr(phaseKey));
+}
+
+void MainWindow::onDupScanDone(std::vector<DuplicateGroup> groups,
+                               qint64 /*totalWasted*/, int /*totalFiles*/)
+{
+    m_dupScanner = nullptr;
+    m_duplicateGroups = std::move(groups);
+    m_cleanupPanel->loadDuplicates(m_duplicateGroups);
+    // Clear the status text set during scanning.
+    m_statusLabel->setText(QString());
 }
 
 void MainWindow::onCleanTargets(
@@ -2261,6 +2627,21 @@ void MainWindow::onCleanTargets(
             fileItems.push_back(path);
     }
 
+    // Look up a file path's size across large files and duplicate groups.
+    auto lookupFileSize = [this](const QString& fp) -> qint64 {
+        for (const auto& lf : m_largeFiles) {
+            if (lf.path == fp)
+                return lf.size;
+        }
+        for (const auto& dg : m_duplicateGroups) {
+            for (const auto& df : dg.files) {
+                if (df.path == fp)
+                    return df.size;
+            }
+        }
+        return 0;
+    };
+
     // Calculate total size.
     qint64 totalSize = 0;
     for (const auto& [key, path] : targetItems) {
@@ -2271,14 +2652,8 @@ void MainWindow::onCleanTargets(
             }
         }
     }
-    for (const auto& fp : fileItems) {
-        for (const auto& lf : m_largeFiles) {
-            if (lf.path == fp) {
-                totalSize += lf.size;
-                break;
-            }
-        }
-    }
+    for (const auto& fp : fileItems)
+        totalSize += lookupFileSize(fp);
 
     // Build confirmation message.
     int count = static_cast<int>(targetItems.size() + fileItems.size());
@@ -2300,13 +2675,7 @@ void MainWindow::onCleanTargets(
         for (int i = 0; i < static_cast<int>(fileItems.size()) && i < fileLimit; ++i) {
             const auto& fp = fileItems[i];
             QString name = QFileInfo(fp).fileName();
-            qint64 sz = 0;
-            for (const auto& lf : m_largeFiles) {
-                if (lf.path == fp) {
-                    sz = lf.size;
-                    break;
-                }
-            }
+            qint64 sz = lookupFileSize(fp);
             namesList << QStringLiteral("\u2022 %1 (%2)").arg(name).arg(humanSize(sz));
         }
     }
@@ -2469,6 +2838,7 @@ void MainWindow::refreshTheme()
     // Panels with baked inline styles need to recompute them.
     m_cleanupPanel->refreshTheme();
     m_legend->refreshTheme();
+    applyUpdateToastStyle();
     // Type icons cache by color, so clear before rebuilding the list.
     clearTypeIconCache();
     // List/treemap items cache colors on the item, so rebuild them.
@@ -2517,6 +2887,9 @@ void MainWindow::retranslateUI()
 
     // Cleanup panel
     m_cleanupPanel->retranslate();
+
+    // Update toast (if built).
+    retranslateUpdateToast();
 
     // Repopulate the list so row tooltips / ".." parent update.
     if (m_current) {
