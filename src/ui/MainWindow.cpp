@@ -2400,7 +2400,13 @@ void MainWindow::downloadAndInstall()
     if (m_updateDownloadReply)
         return;  // already downloading
 
-    const QString url = QString(HOMEPAGE) + QStringLiteral("downloads/NcduWin_Setup.exe");
+    // Build the download URL from the REMOTE version so it matches the
+    // installer artifact produced by `installer.iss`
+    // (OutputBaseFilename=NcduWin_{version}_Setup). Using the remote version
+    // (not APP_VERSION) is required: the remote host serves the newer build,
+    // whose filename embeds the newer version number.
+    const QString url = QString(HOMEPAGE)
+        + QStringLiteral("downloads/NcduWin_%1_Setup.exe").arg(m_updateRemoteVer);
     const QString path = QDir::tempPath() + QStringLiteral("/NcduWin_Setup.exe");
     QFile::remove(path);
 
