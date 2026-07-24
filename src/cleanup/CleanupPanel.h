@@ -65,6 +65,7 @@ private slots:
     void onDupSelectAllToggled(bool checked);
     void onLfTypeFilterChanged(int index);
     void onDupTypeFilterChanged(int index);
+    void onCatItemDoubleClicked(QTreeWidgetItem* item, int column);
 
 private:
     QTreeWidget* m_catTree = nullptr;

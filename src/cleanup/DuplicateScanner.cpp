@@ -1,56 +1,15 @@
 #include "DuplicateScanner.h"
 
-#include "CleanupScanner.h"     // classifyFileDanger (static)
+#include "CleanupScanner.h"     // classifyFileDanger, isExcludedByExtension
 #include "MemoryMonitor.h"
 
 #include <QFile>
 #include <QCryptographicHash>
 #include <QFileInfo>
-#include <QSet>
 
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
-
-// --------------------------------------------------------------------------- //
-// Excluded file extensions
-// --------------------------------------------------------------------------- //
-// These are program/system file types whose deletion can break applications
-// or the OS. Duplicate cleanup should focus on user-managed files
-// (documents, media, archives, downloads). Mainstream tools like Czkawka
-// rely on path exclusion; we additionally exclude by extension so that
-// e.g. a stray .dll copied into a user folder is still skipped.
-namespace {
-const QSet<QString>& excludedExtensions()
-{
-    // Lowercased, with leading dot.
-    static const QSet<QString> s = {
-        // Executables & libraries
-        ".exe", ".dll", ".sys", ".drv",      // Windows program/driver
-        ".ocx", ".ax", ".cpl", ".scr",        // ActiveX / DirectShow / CPL / screensaver
-        ".msi", ".msp", ".mst",               // Windows Installer
-        ".lib", ".a", ".obj",                 // Static lib / object files
-        // System / driver support
-        ".cat", ".inf",                       // Driver catalog / info
-        ".cab",                               // System cabinet (Windows uses for updates)
-        // Font files (system-registered; deleting breaks fonts)
-        ".ttf", ".otf", ".fon", ".fnt",
-        // Junk / no extension (typically system metadata or temp files
-        // like desktop.ini, Thumbs.db are <1MB so already filtered by size,
-        // but extensionless files ≥1MB are usually system page/hibernation
-        // fragments or raw disk images the user should inspect manually)
-    };
-    return s;
-}
-
-bool isExcludedByExtension(const QString& fileName)
-{
-    const int dot = fileName.lastIndexOf('.');
-    if (dot < 0)
-        return true;  // no extension → skip (likely system/raw file)
-    return excludedExtensions().contains(fileName.mid(dot).toLower());
-}
-} // namespace
 
 // --------------------------------------------------------------------------- //
 // Construction / cancellation
@@ -96,10 +55,9 @@ void DuplicateScanner::groupBySize(
 
         if (node->nodeType == NodeType::File && node->size >= MIN_DUP_SIZE) {
             // Skip program/system file extensions (.dll, .exe, .sys, ...).
-            // These are almost never safe to delete even when duplicated —
-            // apps rely on their specific copy. Also skip extensionless files
-            // (usually system page/hibernation fragments or raw disk images).
-            if (isExcludedByExtension(node->name))
+            // Uses the shared exclusion list from CleanupScanner so that
+            // large-file and duplicate scanning always agree on what to skip.
+            if (CleanupScanner::isExcludedByExtension(node->name))
                 continue;
             const DangerLevel dl = CleanupScanner::classifyFileDanger(
                 node->path, node->name);

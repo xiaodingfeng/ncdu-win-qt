@@ -69,4 +69,17 @@ private:
     // Delete large archive files (>100 MB) in a root directory.
     void cleanLargeArchivesInRoot(const QString& root,
                                   int& deleted, int& skipped);
+
+    // Delete individual files inside the Downloads folder (not the folder
+    // itself). Prevents the "entire Downloads deleted" bug.
+    void cleanDownloadsFiles(const QString& root,
+                             int& deleted, int& skipped);
+
+    // Safety gate: returns true if *path* is the running application's own
+    // executable or its install directory. Deleting such paths would break
+    // the application (the "downloaded installer deleted itself" bug).
+    bool isApplicationPath(const QString& path) const;
+
+    // Cached normalized path of the running executable's directory.
+    QString m_appDirNorm;
 };

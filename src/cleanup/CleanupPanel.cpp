@@ -9,8 +9,15 @@
 #include <QColor>
 #include <QMap>
 #include <QVariantList>
+#include <QDialog>
+#include <QDir>
+#include <QFileInfo>
+#include <QPushButton>
+#include <QLabel>
+#include <QTreeWidget>
 
 #include <algorithm>
+#include <stack>
 
 #include "Style.h"
 #include "I18n.h"
@@ -295,6 +302,9 @@ void CleanupPanel::buildUI()
     connect(m_lfTree, &QTreeWidget::itemClicked, this, &CleanupPanel::onLfItemClicked);
     connect(m_dupTree, &QTreeWidget::itemChanged, this, &CleanupPanel::onDupItemChanged);
     connect(m_dupTree, &QTreeWidget::itemClicked, this, &CleanupPanel::onDupItemClicked);
+    // Double-click a category to view its contents (path + file listing).
+    connect(m_catTree, &QTreeWidget::itemDoubleClicked,
+            this, &CleanupPanel::onCatItemDoubleClicked);
 
     lay->addWidget(m_tabs, 1);
 
@@ -419,7 +429,9 @@ void CleanupPanel::addTarget(const CleanupTarget& target)
     // Col 1: Category name
     QString catName = I18n::tr(target.key);
     item->setText(1, catName);
-    item->setToolTip(1, catName);
+    // Tooltip: category name + hint that double-click shows details.
+    item->setToolTip(1, catName + QStringLiteral("\n\n") +
+                     I18n::tr("cleanup.dblclick_hint"));
 
     // Col 2: Size
     QString sizeText = target.size > 0 ? humanSize(target.size) : QStringLiteral("\u2014");
@@ -752,7 +764,8 @@ void CleanupPanel::applyTargetTranslation(QTreeWidgetItem* item,
         s->setSortData(4, remark);
     }
     item->setText(1, catName);
-    item->setToolTip(1, catName);
+    item->setToolTip(1, catName + QStringLiteral("\n\n") +
+                     I18n::tr("cleanup.dblclick_hint"));
     item->setText(4, remark);
     item->setToolTip(4, remark);
 }
@@ -1297,6 +1310,218 @@ void CleanupPanel::onCleanClicked()
 
     if (!items.empty())
         emit cleanRequested(items);
+}
+
+// --------------------------------------------------------------------------- //
+// Double-click a category to view its contents (path + file listing).
+// --------------------------------------------------------------------------- //
+void CleanupPanel::onCatItemDoubleClicked(QTreeWidgetItem* item, int /*column*/)
+{
+    QVariantList data = item->data(0, Qt::UserRole).toList();
+    if (data.size() < 2)
+        return;
+    const QString key = data[0].toString();
+    const QString path = data[1].toString();
+    const QString level = data.size() >= 3 ? data[2].toString() : QString();
+
+    // Find the matching target for size/count info.
+    qint64 totalSize = 0;
+    int fileCount = 0;
+    bool isDir = true;
+    for (const auto& t : m_targets) {
+        if (t.key == key && t.path == path) {
+            totalSize = t.size;
+            fileCount = t.fileCount;
+            isDir = t.isDir;
+            break;
+        }
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(I18n::tr("cleanup.details_title"));
+    dlg.setMinimumSize(560, 420);
+    auto* lay = new QVBoxLayout(&dlg);
+    lay->setContentsMargins(16, 14, 16, 12);
+    lay->setSpacing(8);
+
+    // Title row: category name + level badge.
+    auto* titleRow = new QHBoxLayout;
+    titleRow->setSpacing(8);
+    auto* titleLbl = new QLabel(I18n::tr(key));
+    QFont titleFont = titleLbl->font();
+    titleFont.setBold(true);
+    titleFont.setPointSize(12);
+    titleLbl->setFont(titleFont);
+    titleRow->addWidget(titleLbl);
+    if (!level.isEmpty()) {
+        auto* badge = new QLabel(QStringLiteral(" %1 ").arg(level));
+        QFont bf = badge->font();
+        bf.setBold(true);
+        bf.setPointSize(10);
+        badge->setFont(bf);
+        // Map level letter to color.
+        QString color = QStringLiteral("#6b7280");
+        if (level == QLatin1String("S")) color = QStringLiteral("#22c55e");
+        else if (level == QLatin1String("A")) color = QStringLiteral("#eab308");
+        else if (level == QLatin1String("B")) color = QStringLiteral("#3b82f6");
+        else if (level == QLatin1String("C")) color = QStringLiteral("#ef4444");
+        badge->setStyleSheet(QStringLiteral("color:%1;").arg(color));
+        titleRow->addWidget(badge);
+    }
+    titleRow->addStretch(1);
+    lay->addLayout(titleRow);
+
+    // Path + size + count info.
+    auto addInfoRow = [&](const QString& labelKey, const QString& value) {
+        auto* row = new QHBoxLayout;
+        auto* lab = new QLabel(I18n::tr(labelKey));
+        lab->setStyleSheet(QStringLiteral("color: %1; min-width: 70px;")
+                               .arg(QString::fromLatin1(C::TEXT_MUTED())));
+        auto* val = new QLabel(value);
+        val->setWordWrap(true);
+        val->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        row->addWidget(lab);
+        row->addWidget(val, 1);
+        lay->addLayout(row);
+    };
+    addInfoRow("cleanup.col_path", path);
+    addInfoRow("cleanup.col_size", humanSize(totalSize));
+    if (fileCount > 0)
+        addInfoRow("cleanup.col_items", humanCount(fileCount));
+
+    // File listing (capped to avoid UI freeze on huge dirs).
+    auto* listTitle = new QLabel(I18n::tr("cleanup.details_contents"));
+    listTitle->setStyleSheet(QStringLiteral("color: %1; font-weight: 600;")
+                                 .arg(QString::fromLatin1(C::TEXT_SEC())));
+    lay->addWidget(listTitle);
+
+    auto* fileList = new QTreeWidget;
+    fileList->setObjectName("filelist");
+    fileList->setColumnCount(3);
+    fileList->setHeaderLabels({
+        I18n::tr("column.name"),
+        I18n::tr("column.size"),
+        I18n::tr("column.type"),
+    });
+    fileList->setRootIsDecorated(false);
+    fileList->setUniformRowHeights(true);
+    fileList->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    fileList->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    fileList->header()->setSectionResizeMode(1, QHeaderView::Fixed);
+    fileList->header()->resizeSection(1, 90);
+    fileList->header()->setSectionResizeMode(2, QHeaderView::Fixed);
+    fileList->header()->resizeSection(2, 80);
+
+    // Populate the listing.
+    const QFileInfo pathInfo(path);
+
+    // Recycle bin: QDir cannot enumerate $Recycle.Bin's per-SID subdirs.
+    // Show a message instead of an empty list.
+    if (key == "cleanup.b_recycle") {
+        auto* msg = new QTreeWidgetItem;
+        msg->setText(0, I18n::tr("cleanup.details_recycle_msg"));
+        msg->setForeground(0, QColor(QString::fromLatin1(C::TEXT_MUTED())));
+        QFont itf = msg->font(0);
+        itf.setItalic(true);
+        msg->setFont(0, itf);
+        fileList->addTopLevelItem(msg);
+    }
+    // Downloads (virtual group): list all files recursively so the user can
+    // see exactly what will be deleted before checking the category.
+    else if (key == "cleanup.b_downloads") {
+        // Recursive listing with a cap.
+        const int cap = 500;
+        int shown = 0;
+        int total = 0;
+        std::stack<QString> pending;
+        pending.push(path);
+        while (!pending.empty() && shown < cap) {
+            const QString cur = pending.top();
+            pending.pop();
+            QDir dir(cur);
+            const auto entries = dir.entryInfoList(
+                QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+            for (const auto& e : entries) {
+                if (e.isDir()) {
+                    pending.push(e.absoluteFilePath());
+                } else {
+                    ++total;
+                    if (shown >= cap)
+                        continue;
+                    auto* fi = new QTreeWidgetItem;
+                    // Show relative path for clarity.
+                    QString rel = QDir(path).relativeFilePath(e.absoluteFilePath());
+                    fi->setText(0, rel);
+                    fi->setText(1, humanSize(e.size()));
+                    fi->setTextAlignment(1, Qt::AlignRight);
+                    fi->setText(2, I18n::tr(typeKey(e.fileName()).toLatin1().constData()));
+                    fileList->addTopLevelItem(fi);
+                    ++shown;
+                }
+            }
+        }
+        if (total > cap) {
+            auto* moreItem = new QTreeWidgetItem;
+            moreItem->setText(0, I18n::tr("cleanup.details_more",
+                QMap<QString, QString>{{"n", QString::number(total - cap)}}));
+            moreItem->setForeground(0, QColor(QString::fromLatin1(C::TEXT_MUTED())));
+            QFont itf = moreItem->font(0);
+            itf.setItalic(true);
+            moreItem->setFont(0, itf);
+            fileList->addTopLevelItem(moreItem);
+        }
+    }
+    // Regular directories: list direct children (capped at 500).
+    else if (pathInfo.isDir()) {
+        QDir dir(path);
+        const auto entries = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot,
+                                                QDir::Name);
+        const int cap = 500;
+        int shown = 0;
+        for (const auto& e : entries) {
+            if (shown >= cap)
+                break;
+            auto* fi = new QTreeWidgetItem;
+            fi->setText(0, e.fileName());
+            fi->setText(1, e.isDir() ? QStringLiteral("—") : humanSize(e.size()));
+            fi->setTextAlignment(1, Qt::AlignRight);
+            fi->setText(2, e.isDir() ? I18n::tr("type.folder")
+                                     : I18n::tr(typeKey(e.fileName()).toLatin1().constData()));
+            fileList->addTopLevelItem(fi);
+            ++shown;
+        }
+        if (entries.size() > cap) {
+            auto* moreItem = new QTreeWidgetItem;
+            moreItem->setText(0, I18n::tr("cleanup.details_more",
+                QMap<QString, QString>{{"n", QString::number(entries.size() - cap)}}));
+            moreItem->setForeground(0, QColor(QString::fromLatin1(C::TEXT_MUTED())));
+            QFont itf = moreItem->font(0);
+            itf.setItalic(true);
+            moreItem->setFont(0, itf);
+            fileList->addTopLevelItem(moreItem);
+        }
+    } else if (pathInfo.isFile()) {
+        auto* fi = new QTreeWidgetItem;
+        fi->setText(0, pathInfo.fileName());
+        fi->setText(1, humanSize(pathInfo.size()));
+        fi->setTextAlignment(1, Qt::AlignRight);
+        fi->setText(2, I18n::tr(typeKey(pathInfo.fileName()).toLatin1().constData()));
+        fileList->addTopLevelItem(fi);
+    }
+
+    lay->addWidget(fileList, 1);
+
+    // Close button.
+    auto* btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    auto* closeBtn = new QPushButton(I18n::tr("button.close"));
+    closeBtn->setObjectName("primary");
+    closeBtn->setCursor(Qt::PointingHandCursor);
+    connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    btnRow->addWidget(closeBtn);
+    lay->addLayout(btnRow);
+
+    dlg.exec();
 }
 
 // --------------------------------------------------------------------------- //

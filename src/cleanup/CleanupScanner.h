@@ -28,6 +28,11 @@ public:
     // Used by both CleanupScanner and DuplicateScanner to skip C/D-level files.
     static DangerLevel classifyFileDanger(const QString& path, const QString& name);
 
+    // Returns true if the file should be excluded from large-file and duplicate
+    // scanning (system/program extensions like .exe/.dll/.sys, or no extension).
+    // Shared between CleanupScanner (large files) and DuplicateScanner.
+    static bool isExcludedByExtension(const QString& fileName);
+
 signals:
     void targetScanned(CleanupTarget target);
     void largeFileFound(LargeFile lf);

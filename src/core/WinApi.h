@@ -3,6 +3,7 @@
 #include <QString>
 #include <QStringList>
 #include <tuple>
+#include <utility>
 
 // WinApi - thin C++ wrapper around the Windows-specific operations used by
 // NcduWin (recycle bin, permanent deletion, explorer reveal, default open,
@@ -23,6 +24,12 @@ bool sendToRecycleBin(const QStringList& paths);
 // following their target. Returns true only when every path was deleted.
 bool deletePermanent(const QStringList& paths);
 
+// Clean the CONTENTS of a directory (files and subdirectories) but keep the
+// directory itself. Files that are locked/in-use are skipped silently.
+// Returns (deletedCount, skippedCount). Use this for system directories
+// (Temp, Logs, caches) that must not be removed themselves.
+std::pair<int, int> cleanDirectoryContents(const QString& dirPath);
+
 // Reveal a file or folder in Windows Explorer (explorer /select,"path").
 void revealInExplorer(const QString& path);
 
@@ -37,5 +44,16 @@ bool isAdmin();
 // Query free / used / total bytes for the volume that contains *path* via
 // GetDiskFreeSpaceExW. Returns (free, used, total); all zero on failure.
 std::tuple<qint64, qint64, qint64> getDiskFreeSpace(const QString& path);
+
+// Query the recycle bin on the volume containing *driveRoot* (e.g. "C:/").
+// Returns (totalSize, itemCount); both zero on failure or non-Windows.
+// Uses SHQueryRecycleBinW — the only reliable way to get the real recycle
+// bin size, because $Recycle.Bin's per-SID subdirectories are not enumerable
+// via QDir even with admin rights.
+std::pair<qint64, qint64> queryRecycleBin(const QString& driveRoot);
+
+// Empty the recycle bin on the volume containing *driveRoot*.
+// Uses SHEmptyRecycleBinW. Returns true on success.
+bool emptyRecycleBin(const QString& driveRoot);
 
 } // namespace WinApi

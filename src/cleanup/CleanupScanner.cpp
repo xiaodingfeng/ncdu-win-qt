@@ -1,6 +1,7 @@
 #include "CleanupScanner.h"
 
 #include "MemoryMonitor.h"
+#include "WinApi.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -59,7 +60,34 @@ const QSet<QString>& nodeModulesSkipNames()
     return s;
 }
 
+// Excluded file extensions for large-file and duplicate scanning.
+// These are program/system file types whose deletion can break applications
+// or the OS. Also excludes files with no extension.
+const QSet<QString>& excludedExtensions()
+{
+    static const QSet<QString> s = {
+        ".dll", ".sys", ".drv",
+        ".ocx", ".ax", ".cpl", ".scr",
+        ".msi", ".msp", ".mst",
+        ".lib", ".a", ".obj",
+        ".cat", ".inf", ".cab",
+        ".ttf", ".otf", ".fon", ".fnt",
+    };
+    return s;
+}
+
 } // namespace
+
+// --------------------------------------------------------------------------- //
+// Shared extension exclusion (used by both large-file and duplicate scanning)
+// --------------------------------------------------------------------------- //
+bool CleanupScanner::isExcludedByExtension(const QString& fileName)
+{
+    const int dot = fileName.lastIndexOf('.');
+    if (dot < 0)
+        return true;  // no extension → skip
+    return excludedExtensions().contains(fileName.mid(dot).toLower());
+}
 
 // ---------------------------------------------------------------------------
 // Construction / cancel
@@ -429,12 +457,30 @@ void CleanupScanner::discoverTargets(std::vector<CleanupTarget>& out)
     add("cleanup.b_old_backups",
         QDir(m_scanPath).absoluteFilePath("old"),
         DangerLevel::B, true, false, "cleanup.remark_b_backup");
-    add("cleanup.b_downloads",
-        QDir(m_scanPath).absoluteFilePath("downloads"),
-        DangerLevel::B, true, false, "cleanup.remark_b_downloads");
-    add("cleanup.b_downloads",
-        QDir(m_scanPath).absoluteFilePath("Downloads"),
-        DangerLevel::B, true, false, "cleanup.remark_b_downloads");
+    // ── B-level: Downloads (virtual group — deletes files, NOT the folder) ──
+    // The Downloads folder is user data. We show it as a category so the user
+    // can see what's inside (double-click → detail view), but cleaning only
+    // deletes individual files, never the folder itself. Default unchecked.
+    {
+        const QString dlDir = QDir::cleanPath(userDir + "/Downloads");
+        if (pathExistsAndAccessible(dlDir) && pathUnder(dlDir, rootNorm)) {
+            // Compute size/count for display
+            const qint64 dlSize = computePathSize(dlDir);
+            const int dlCount = countFiles(dlDir);
+            if (dlCount > 0) {
+                // makeTarget(key, path, danger, isDir, checked, enabled, remark)
+                // isDir=false (virtual group), checked=false (default off),
+                // enabled=true (user can clean it).
+                CleanupTarget t = makeTarget(
+                    "cleanup.b_downloads", dlDir,
+                    DangerLevel::B, false, false, true,
+                    "cleanup.remark_b_downloads");
+                t.size = dlSize;
+                t.fileCount = dlCount;
+                out.push_back(t);
+            }
+        }
+    }
 
     // Large archive files in root (virtual group)
     discoverLargeArchives(m_scanPath, out);
@@ -468,10 +514,8 @@ void CleanupScanner::discoverTargets(std::vector<CleanupTarget>& out)
     }
 
     // Recycle Bin (B-level) — always at the drive root, not under scan path.
-    // The previous code joined scanPath + "$Recycle.Bin" (only valid when
-    // scanning a drive root) and required the scan root to be under the user
-    // directory (inverted check). Now we compute the drive root from the scan
-    // path and add the recycle bin directly if it exists.
+    // Use SHQueryRecycleBinW to get the correct size/item count, because
+    // QDir cannot enumerate $Recycle.Bin's per-SID subdirectories reliably.
     {
         QString driveRoot;
         if (m_scanPath.length() >= 2 && m_scanPath[1] == ':')
@@ -481,11 +525,17 @@ void CleanupScanner::discoverTargets(std::vector<CleanupTarget>& out)
         const QString recycleBinPath =
             QDir::cleanPath(driveRoot + QStringLiteral("/$Recycle.Bin"));
         if (pathExistsAndAccessible(recycleBinPath)) {
-            const QFileInfo info(recycleBinPath);
-            out.push_back(makeTarget(
+            // Query the actual recycle bin size via Windows shell API.
+            auto [rbSize, rbCount] = WinApi::queryRecycleBin(driveRoot);
+            // makeTarget(key, path, danger, isDir, checked, enabled, remark)
+            // isDir=true, checked=false (default off), enabled=true.
+            CleanupTarget t = makeTarget(
                 "cleanup.b_recycle", recycleBinPath,
-                DangerLevel::B, info.isDir(), false,
-                "cleanup.remark_b_recycle"));
+                DangerLevel::B, true, false, true,
+                "cleanup.remark_b_recycle");
+            t.size = rbSize;
+            t.fileCount = rbCount;
+            out.push_back(t);
         }
     }
 }
@@ -673,8 +723,11 @@ DangerLevel CleanupScanner::classifyFileDanger(const QString& path, const QStrin
             : QStringLiteral("C:/Windows"));
 
     // D-level: user personal folders (hidden from large-file cleanup list)
+    // Downloads is included — it is user data, not junk. Deleting the entire
+    // folder would destroy user files and any app installers stored there.
     static const QStringList personalSegments = {
-        "documents", "desktop", "pictures", "videos", "music", "onedrive"
+        "documents", "desktop", "pictures", "videos", "music", "onedrive",
+        "downloads"
     };
     for (const auto& seg : personalSegments) {
         if (pn.contains('/' + seg + '/'))
@@ -792,6 +845,10 @@ void CleanupScanner::scanLargeFiles(std::vector<LargeFile>& out)
         auto node = stack.back();
         stack.pop_back();
         if (node->nodeType == NodeType::File && node->size >= MIN_LARGE_FILE_SIZE) {
+            // Skip program/system file extensions (.exe/.dll/.sys/...) —
+            // same exclusion list as duplicate file scanning.
+            if (isExcludedByExtension(node->name))
+                continue;
             LargeFile lf;
             lf.path = node->path;
             lf.name = node->name;

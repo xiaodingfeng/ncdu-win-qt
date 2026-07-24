@@ -3,6 +3,8 @@
 #include <QDir>
 #include <QFileInfo>
 
+#include "Logger.h"
+
 #ifdef _WIN32
 // NOMINMAX must precede <windows.h> to prevent min/max macro pollution.
 #  ifndef NOMINMAX
@@ -103,10 +105,14 @@ QString joinChild(const QString& parent, const QString& name)
     return p;
 }
 
-// Recursively delete a directory's contents then the directory itself.
+// Recursively delete a directory's contents.
+// If removeSelf is true, also removes the directory itself at the end.
+// If removeSelf is false, keeps the directory (for system dirs like Temp/Logs
+// that must not be deleted themselves). Returns true if all operations
+// succeeded (locked/in-use files return false but don't abort the loop).
 // Reparse points (junctions / directory symlinks) are unlinked rather than
 // followed, matching DiskScanner's behavior of not recursing through them.
-bool removeDirectoryRecursive(const QString& path)
+bool removeDirectoryRecursive(const QString& path, bool removeSelf = true)
 {
     const QString pattern = makeSearchPattern(path);
 
@@ -127,25 +133,40 @@ bool removeDirectoryRecursive(const QString& path)
             if (isReparsePoint(fd.dwFileAttributes)) {
                 // Junction / directory symlink: remove the link only.
                 clearReadOnly(child);
-                if (!RemoveDirectoryW(lpcwstr(child)))
+                if (!RemoveDirectoryW(lpcwstr(child))) {
+                    Logger::warn(QStringLiteral("[removeDir] RemoveDirectory(reparse) failed: %1 err=%2")
+                                     .arg(child).arg(GetLastError()));
                     ok = false;
-            } else if (!removeDirectoryRecursive(child)) {
+                }
+            } else if (!removeDirectoryRecursive(child, true)) {
                 ok = false;
             }
         } else {
             // Regular file or file symlink.
             clearReadOnly(child);
-            if (!DeleteFileW(lpcwstr(child)))
+            if (!DeleteFileW(lpcwstr(child))) {
+                const DWORD err = GetLastError();
+                // Error 5 (ACCESS_DENIED) and 32 (SHARING_VIOLATION) are
+                // expected for locked/in-use files — log at debug level,
+                // not warn, to avoid log spam on Temp directories.
+                Logger::warn(QStringLiteral("[removeDir] DeleteFile failed: %1 err=%2")
+                                .arg(child).arg(err));
                 ok = false;
+            }
         }
     } while (FindNextFileW(hFind, &fd));
 
     FindClose(hFind);
 
-    // Directory should now be empty; drop the read-only bit and remove it.
-    clearReadOnly(path);
-    if (!RemoveDirectoryW(lpcwstr(path)))
-        ok = false;
+    if (removeSelf) {
+        clearReadOnly(path);
+        if (!RemoveDirectoryW(lpcwstr(path))) {
+            const DWORD err = GetLastError();
+            Logger::warn(QStringLiteral("[removeDir] RemoveDirectory failed: %1 err=%2")
+                             .arg(path).arg(err));
+            ok = false;
+        }
+    }
 
     return ok;
 }
@@ -167,6 +188,9 @@ bool deletePermanent(const QStringList& paths)
         const QString native = QDir::toNativeSeparators(p);
         const DWORD attrs = GetFileAttributesW(lpcwstr(native));
         if (attrs == INVALID_FILE_ATTRIBUTES) {
+            const DWORD err = GetLastError();
+            Logger::warn(QStringLiteral("[deletePermanent] GetFileAttributes failed: %1 err=%2 (0x%3)")
+                             .arg(native).arg(err).arg(err, 0, 16));
             ok = false;
             continue;
         }
@@ -175,22 +199,93 @@ bool deletePermanent(const QStringList& paths)
             if (isReparsePoint(attrs)) {
                 // Directory reparse point: unlink without following.
                 clearReadOnly(native);
-                if (!RemoveDirectoryW(lpcwstr(native)))
+                if (!RemoveDirectoryW(lpcwstr(native))) {
+                    const DWORD err = GetLastError();
+                    Logger::warn(QStringLiteral("[deletePermanent] RemoveDirectory(reparse) failed: %1 err=%2 (0x%3)")
+                                     .arg(native).arg(err).arg(err, 0, 16));
                     ok = false;
+                }
             } else if (!removeDirectoryRecursive(native)) {
+                Logger::warn(QStringLiteral("[deletePermanent] removeDirectoryRecursive failed: %1")
+                                 .arg(native));
                 ok = false;
             }
         } else {
             // Regular file or file symlink.
             clearReadOnly(native);
-            if (!DeleteFileW(lpcwstr(native)))
+            if (!DeleteFileW(lpcwstr(native))) {
+                const DWORD err = GetLastError();
+                Logger::warn(QStringLiteral("[deletePermanent] DeleteFile failed: %1 attrs=0x%2 err=%3 (0x%4)")
+                                 .arg(native).arg(attrs, 0, 16).arg(err).arg(err, 0, 16));
                 ok = false;
+            }
         }
     }
     return ok;
 }
 #else
 bool deletePermanent(const QStringList&) { return false; }
+#endif
+
+// ---------------------------------------------------------------------------
+// cleanDirectoryContents — delete contents, keep the directory itself
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+std::pair<int, int> cleanDirectoryContents(const QString& dirPath)
+{
+    const QString native = QDir::toNativeSeparators(dirPath);
+    const QString pattern = makeSearchPattern(native);
+
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(lpcwstr(pattern), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        Logger::warn(QStringLiteral("[cleanDir] FindFirstFile failed: %1 err=%2")
+                         .arg(native).arg(GetLastError()));
+        return {0, 0};
+    }
+
+    int deleted = 0;
+    int skipped = 0;
+    do {
+        const QString name = QString::fromWCharArray(fd.cFileName);
+        if (name == QLatin1String(".") || name == QLatin1String(".."))
+            continue;
+
+        const QString child = joinChild(native, name);
+        bool childOk = true;
+
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            if (isReparsePoint(fd.dwFileAttributes)) {
+                clearReadOnly(child);
+                if (!RemoveDirectoryW(lpcwstr(child)))
+                    childOk = false;
+            } else {
+                // Recurse into subdirectory: delete its contents AND the
+                // subdirectory itself (subdirectories are safe to remove,
+                // unlike the top-level system directory we're cleaning).
+                childOk = removeDirectoryRecursive(child, true);
+            }
+        } else {
+            clearReadOnly(child);
+            if (!DeleteFileW(lpcwstr(child))) {
+                const DWORD err = GetLastError();
+                Logger::warn(QStringLiteral("[cleanDir] DeleteFile failed: %1 err=%2")
+                                .arg(child).arg(err));
+                childOk = false;
+            }
+        }
+
+        if (childOk)
+            ++deleted;
+        else
+            ++skipped;
+    } while (FindNextFileW(hFind, &fd));
+
+    FindClose(hFind);
+    return {deleted, skipped};
+}
+#else
+std::pair<int, int> cleanDirectoryContents(const QString&) { return {0, 0}; }
 #endif
 
 // ---------------------------------------------------------------------------
@@ -260,6 +355,52 @@ std::tuple<qint64, qint64, qint64> getDiskFreeSpace(const QString&)
 {
     return std::make_tuple(qint64(0), qint64(0), qint64(0));
 }
+#endif
+
+// ---------------------------------------------------------------------------
+// queryRecycleBin — SHQueryRecycleBinW
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+std::pair<qint64, qint64> queryRecycleBin(const QString& driveRoot)
+{
+    // SHQueryRecycleBinW expects a path or drive root (e.g. "C:\" or "C:/").
+    // Use the drive root as the pszRootPath.
+    QString root = QDir::toNativeSeparators(driveRoot);
+    if (!root.endsWith(QLatin1Char('\\')))
+        root += QLatin1Char('\\');
+
+    SHQUERYRBINFO qbInfo;
+    ZeroMemory(&qbInfo, sizeof(qbInfo));
+    qbInfo.cbSize = sizeof(qbInfo);
+
+    if (FAILED(SHQueryRecycleBinW(lpcwstr(root), &qbInfo)))
+        return {0, 0};
+
+    return {static_cast<qint64>(qbInfo.i64Size),
+            static_cast<qint64>(qbInfo.i64NumItems)};
+}
+#else
+std::pair<qint64, qint64> queryRecycleBin(const QString&) { return {0, 0}; }
+#endif
+
+// ---------------------------------------------------------------------------
+// emptyRecycleBin — SHEmptyRecycleBinW
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+bool emptyRecycleBin(const QString& driveRoot)
+{
+    QString root = QDir::toNativeSeparators(driveRoot);
+    if (!root.endsWith(QLatin1Char('\\')))
+        root += QLatin1Char('\\');
+
+    // SHERB_NOCONFIRMATION — don't ask "are you sure?"
+    // SHERB_NOPROGRESSUI   — no progress bar
+    // SHERB_NOSOUND        — no sound on completion
+    const DWORD flags = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND;
+    return SUCCEEDED(SHEmptyRecycleBinW(nullptr, lpcwstr(root), flags));
+}
+#else
+bool emptyRecycleBin(const QString&) { return false; }
 #endif
 
 } // namespace WinApi
