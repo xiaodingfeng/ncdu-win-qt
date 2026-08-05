@@ -218,13 +218,8 @@ MainWindow::MainWindow(QWidget* parent)
                 }
             });
 
-    // Auto-scan home dir on first show for instant value.
-    QTimer::singleShot(120, this, [this]() {
-        QString path = m_pathCombo->currentText().trimmed();
-        if (path.isEmpty())
-            path = getHomeDir();
-        startScan(path);
-    });
+    // No auto-scan on startup: the user picks a path and clicks Scan. The
+    // status bar shows "Ready" until then (set in retranslateUI).
 
     // Check for updates shortly after launch. Runs silently: only surfaces a
     // result when a newer version is available (bottom-right toast). Uses the
@@ -563,6 +558,11 @@ void MainWindow::buildMenu()
     m_actions["help.check_update"] = helpMenu->addAction(I18n::tr("menu.help.check_update"));
     connect(m_actions["help.check_update"], &QAction::triggered, this, &MainWindow::checkForUpdate);
 
+    m_actions["help.publish_log"] = helpMenu->addAction(I18n::tr("menu.help.publish_log"));
+    connect(m_actions["help.publish_log"], &QAction::triggered, this, [this]() {
+        QDesktopServices::openUrl(QUrl(QString(HOMEPAGE) + QStringLiteral("#publishlog")));
+    });
+
     m_nam = new QNetworkAccessManager(this);
 }
 
@@ -640,10 +640,16 @@ void MainWindow::wireSignals()
 void MainWindow::populatePathCombo()
 {
     m_pathCombo->clear();
+    // Keep the user home directory as a selectable dropdown option, but default
+    // to the system drive (C:\) so a fresh launch targets the whole C: volume.
     m_pathCombo->addItem(getHomeDir());
-    for (const auto& d : listDrives())
+    const QStringList drives = listDrives();
+    for (const auto& d : drives)
         m_pathCombo->addItem(d);
-    m_pathCombo->setEditText(getHomeDir());
+    const QString cDrive = QStringLiteral("C:\\");
+    const QString def = drives.contains(cDrive) ? cDrive
+                        : (!drives.isEmpty() ? drives.first() : getHomeDir());
+    m_pathCombo->setEditText(def);
 }
 
 // --------------------------------------------------------------------------- //
@@ -677,6 +683,36 @@ void MainWindow::onBrowse()
         m_pathCombo->setEditText(path);
         startScan(path);
     }
+}
+
+// Decide whether to use the volume-wide MFT scanner for `path`. MFT reads the
+// entire $MFT in one sequential pass, which beats per-directory DiskScanner
+// walking ONLY for very large targets: drive roots and a few well-known huge
+// system directories. Smaller subdirectories use DiskScanner so they finish
+// quickly instead of always paying the full-volume MFT cost.
+// LARGE_MFT_FOLDER_NAMES lists direct children of a drive root (any drive
+// letter) that are big enough to warrant MFT. Add names here as needed —
+// matched case-insensitively against the path's final segment.
+namespace {
+const QStringList LARGE_MFT_FOLDER_NAMES = {
+    "users",                   // C:\Users — all user profiles
+    "windows",                 // C:\Windows — system files (~100k+)
+    "program files",           // C:\Program Files
+    "program files (x86)",     // C:\Program Files (x86)
+    "programdata",             // C:\ProgramData
+};
+}
+
+bool shouldUseMftScanner(const QString& path)
+{
+    const QFileInfo info(path);
+    if (info.isRoot())
+        return true;
+    // Only direct children of a drive root qualify (e.g. C:\Users, not
+    // C:\Users\john) — deeper paths are scoped enough for DiskScanner.
+    if (!QFileInfo(info.absolutePath()).isRoot())
+        return false;
+    return LARGE_MFT_FOLDER_NAMES.contains(info.fileName().toLower());
 }
 
 void MainWindow::startScan(const QString& path)
@@ -718,8 +754,13 @@ void MainWindow::startScan(const QString& path)
     m_root.reset();
     m_current.reset();
     m_breadcrumb->setNode(nullptr);
+    m_scanLowMemory = false;
 
-    if (MftScanner::isSupported(path)) {
+    // Use the fast MFT scanner for drive roots and well-known huge system
+    // directories; for smaller subdirectories a recursive DiskScanner is faster
+    // (scoped to the chosen folder) instead of always paying the full-volume
+    // MFT cost. See shouldUseMftScanner() / LARGE_MFT_FOLDER_NAMES.
+    if (shouldUseMftScanner(path) && MftScanner::isSupported(path)) {
         auto* scanner = new MftScanner(path, this);
         scanner->setSkipHeavyDirs(m_skipHeavyDirs);
         // Auto-delete the scanner once its run() returns. This is the Qt-
@@ -756,6 +797,12 @@ void MainWindow::onScanProgress(const QString& key, const QMap<QString, QString>
                || key == QLatin1String("mft.progress.building_tree")) {
         // Generic in-progress message; the i18n value itself is a verb phrase.
         m_statusLabel->setText(I18n::tr(key, args));
+    } else if (key == QLatin1String("scanner.warn.low_memory")) {
+        // Scanner hit the low-memory threshold and will finish with what it has.
+        // Remember it so onScanDone can surface a clear notice (the status-bar
+        // text alone is transient and easy to miss).
+        m_scanLowMemory = true;
+        m_statusLabel->setText(I18n::tr("status.low_memory"));
     } else {
         // Records-scanned / mft-parse milestones: translate verbatim.
         m_statusLabel->setText(I18n::tr(key, args));
@@ -772,13 +819,15 @@ void MainWindow::onScanDone(std::shared_ptr<FileNode> root)
     m_lastScanPath = root->path;
     navigateTo(root);
 
-    m_statusLabel->setText(I18n::tr("status.scanned", QMap<QString, QString>{
-        {"path", root->path},
-        {"size", humanSize(root->size)},
-        {"files", humanCount(root->fileCount)},
-        {"folders", humanCount(root->dirCount)},
-    }));
+    updateScannedStatus();
     updateDiskFreeLabel(root->path);
+
+    // If the scanner ran out of memory, tell the user clearly instead of
+    // leaving them staring at an empty/incomplete tree with no explanation.
+    if (m_scanLowMemory) {
+        QMessageBox::warning(this, APP_NAME, I18n::tr("msg.low_memory"));
+        m_scanLowMemory = false;
+    }
 
     // Auto-start cleanup scan on the scanned path.
     startCleanupScan(root->path);
@@ -1036,6 +1085,21 @@ void MainWindow::updateDiskFreeLabel(const QString& path)
         {"pct", QString::number(100 - pctUsed, 'f', 0)},
     });
     m_hoverLabel->setText(m_diskFreeText);
+}
+
+void MainWindow::updateScannedStatus()
+{
+    // Re-assert the "scan complete" summary in the status bar. Used after the
+    // cleanup/duplicate scan finishes, since those phases temporarily overwrite
+    // the status bar with their own progress text.
+    if (!m_root)
+        return;
+    m_statusLabel->setText(I18n::tr("status.scanned", QMap<QString, QString>{
+        {"path", m_root->path},
+        {"size", humanSize(m_root->size)},
+        {"files", humanCount(m_root->fileCount)},
+        {"folders", humanCount(m_root->dirCount)},
+    }));
 }
 
 void MainWindow::onTreemapHover(std::shared_ptr<FileNode> node)
@@ -2590,13 +2654,18 @@ void MainWindow::onCleanupScanDone(std::vector<CleanupTarget> targets,
                 this, &MainWindow::onDupScanProgress);
         connect(m_dupScanner, &DuplicateScanner::finished,
                 this, &MainWindow::onDupScanDone);
+        m_cleanupPanel->setDupScanStarted();
         m_dupScanner->start();
     }
 }
 
 void MainWindow::onDupScanProgress(int phase, int processed, int total)
 {
-    // Light status update; the progress bar is hidden after stopScanProgress.
+    // Forward to the Duplicates tab's status + progress bar.
+    m_cleanupPanel->setDupScanProgress(phase, processed, total);
+
+    // Also reflect progress in the main status bar so it's visible even when
+    // the user is on another tab.
     QString phaseKey;
     switch (phase) {
         case 1:  phaseKey = QStringLiteral("cleanup.dup_phase_size"); break;
@@ -2604,7 +2673,10 @@ void MainWindow::onDupScanProgress(int phase, int processed, int total)
         case 3:  phaseKey = QStringLiteral("cleanup.dup_phase_full"); break;
         default: return;
     }
-    m_statusLabel->setText(I18n::tr(phaseKey));
+    QString text = I18n::tr(phaseKey);
+    if (total > 0)
+        text = QStringLiteral("%1 %2/%3").arg(text).arg(processed).arg(total);
+    m_statusLabel->setText(text);
 }
 
 void MainWindow::onDupScanDone(std::vector<DuplicateGroup> groups,
@@ -2613,8 +2685,8 @@ void MainWindow::onDupScanDone(std::vector<DuplicateGroup> groups,
     m_dupScanner = nullptr;
     m_duplicateGroups = std::move(groups);
     m_cleanupPanel->loadDuplicates(m_duplicateGroups);
-    // Clear the status text set during scanning.
-    m_statusLabel->setText(QString());
+    // Restore the main scan summary that the dup-scan progress text overwrote.
+    updateScannedStatus();
 }
 
 void MainWindow::onCleanTargets(

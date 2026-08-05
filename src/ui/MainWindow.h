@@ -124,6 +124,7 @@ private:
     Qt::SortOrder m_sortOrder = Qt::DescendingOrder;
     QString m_diskFreeText;
     QString m_lastScanPath;
+    bool m_scanLowMemory = false;   // set when a scanner emits a low-memory warning
     std::vector<CleanupTarget> m_cleanupTargets;
     std::vector<LargeFile> m_largeFiles;
     std::vector<DuplicateGroup> m_duplicateGroups;
@@ -184,6 +185,7 @@ private:
     QString buildRowTooltip(const std::shared_ptr<FileNode>& node) const;
     void updateStatusForCurrent();
     void updateDiskFreeLabel(const QString& path);
+    void updateScannedStatus();
     void reflectSortIndicator();
     void retranslateUI();
     void switchLanguage(const QString& code);

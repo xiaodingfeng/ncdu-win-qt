@@ -74,6 +74,63 @@ QString dangerColor(DangerLevel lvl)
     return QStringLiteral("#6b7280");
 }
 
+// Smart "keep priority" for duplicate files. Higher score = more likely to be
+// the copy we KEEP (leave unchecked); all other copies in the group are checked
+// for deletion. The dominant signal is the file's danger level (already
+// classified by CleanupScanner::classifyFileDanger): personal folders (D) win,
+// cache/system-temp (S/A) lose. Path-segment and path-length adjustments act as
+// tiebreakers among files of the same danger level.
+int dupKeepPriority(const DuplicateFile& df)
+{
+    int score = 0;
+    switch (df.danger) {
+        case DangerLevel::D: score += 1000; break;  // user personal data — keep
+        case DangerLevel::C: score += 500;  break;  // system (rare here) — keep
+        case DangerLevel::B: score += 100;  break;  // neutral
+        case DangerLevel::A: score += 10;   break;  // cache extension — prefer deleting
+        case DangerLevel::S: score += 0;    break;  // system temp — prefer deleting
+    }
+
+    // Disposable directory segments (matched on /seg/ boundaries so "temp"
+    // does not match "template"). Each hit lowers the keep score slightly.
+    static const QStringList disposable = {
+        "temp", "tmp", ".cache", "cache", "__pycache__", "node_modules",
+        "build", "dist", "target", "obj", "bin",
+        "backup", "backups", ".gradle", ".idea", "vendor",
+        ".next", ".nuxt", ".turbo", ".parcel-cache", "debug", "release"
+    };
+    const QString p = df.path.toLower().replace('\\', '/');
+    for (const auto& seg : disposable) {
+        if (p.contains('/' + seg + '/') || p.endsWith('/' + seg))
+            score -= 5;
+    }
+
+    // Shorter paths tend to be the canonical/original location.
+    score -= static_cast<int>(df.path.length()) / 50;
+    return score;
+}
+
+// Pick the index of the copy to KEEP (highest dupKeepPriority). On ties the
+// first wins — DuplicateScanner pre-sorts each group by shortest path, so the
+// first entry is the likely original. Returns -1 for an empty list.
+// Shared by the initial auto-selection (addDuplicateGroup) and the on-demand
+// "Smart Select" button (onDupSmartSelectClicked) so both use identical rules.
+int dupKeepIndex(const std::vector<DuplicateFile>& files)
+{
+    if (files.empty())
+        return -1;
+    int keepIdx = 0;
+    int best = dupKeepPriority(files.front());
+    for (int i = 1; i < static_cast<int>(files.size()); ++i) {
+        const int s = dupKeepPriority(files[i]);
+        if (s > best) {
+            best = s;
+            keepIdx = i;
+        }
+    }
+    return keepIdx;
+}
+
 // QTreeWidgetItem subclass that uses stored sort data for comparison, so
 // numeric columns (size, count) and the level badge sort correctly instead of
 // falling back to lexicographic text comparison.
@@ -117,6 +174,16 @@ public:
 private:
     QMap<int, QVariant> m_sortData;
 };
+
+// Recover a child item's DangerLevel from the sort data stored on col 0
+// (dangerLevelOrder is a 1:1 mapping: S=0, A=1, B=2, C=3, D=4). Used by the
+// on-demand smart selection to recompute keep priority from the tree alone.
+DangerLevel dangerFromItem(QTreeWidgetItem* item)
+{
+    auto* sw = dynamic_cast<SortableTreeWidgetItem*>(item);
+    const int ord = sw ? sw->sortData(0).toInt() : 2;
+    return (ord >= 0 && ord <= 4) ? static_cast<DangerLevel>(ord) : DangerLevel::B;
+}
 
 } // namespace
 
@@ -252,6 +319,16 @@ void CleanupPanel::buildUI()
         connect(m_dupSelBtn, &QPushButton::clicked,
                 this, &CleanupPanel::onDupSelectAllToggled);
 
+        // Re-apply the smart default selection (keep one copy per group based on
+        // folder importance). Useful after Select All / manual toggling.
+        m_dupSmartBtn = new QPushButton(I18n::tr("cleanup.smart_select"));
+        m_dupSmartBtn->setObjectName("ghost");
+        m_dupSmartBtn->setCursor(Qt::PointingHandCursor);
+        m_dupSmartBtn->setFixedHeight(24);
+        m_dupSmartBtn->setToolTip(I18n::tr("cleanup.dup_smart_hint"));
+        connect(m_dupSmartBtn, &QPushButton::clicked,
+                this, &CleanupPanel::onDupSmartSelectClicked);
+
         m_dupTree = makeTree({
             I18n::tr("cleanup.col_level"),
             I18n::tr("cleanup.col_dup_group"),
@@ -288,8 +365,32 @@ void CleanupPanel::buildUI()
         dupHdr->addWidget(m_dupTypeLabel);
         dupHdr->addWidget(m_dupTypeFilter);
         dupHdr->addWidget(m_dupSelBtn);
+        dupHdr->addWidget(m_dupSmartBtn);
         dupLay->addWidget(dupBar);
         dupLay->addSpacing(4);
+
+        // Status + progress row: shows the smart-selection hint when idle, the
+        // scan phase/progress while the duplicate scanner runs, and a summary
+        // when the scan completes.
+        m_dupStatus = new QLabel(I18n::tr("cleanup.dup_smart_hint"));
+        m_dupStatus->setStyleSheet(
+            QStringLiteral("color: %1; font-size: 12px;")
+                .arg(QString::fromLatin1(C::TEXT_MUTED())));
+        m_dupStatus->setToolTip(I18n::tr("cleanup.dup_smart_hint"));
+        m_dupProgress = new QProgressBar;
+        m_dupProgress->setFixedHeight(14);
+        m_dupProgress->setFixedWidth(220);
+        m_dupProgress->setTextVisible(false);
+        m_dupProgress->setRange(0, 0);  // busy by default
+        m_dupProgress->setVisible(false);
+        auto* dupStatusRow = new QHBoxLayout;
+        dupStatusRow->setContentsMargins(0, 0, 0, 0);
+        dupStatusRow->setSpacing(8);
+        dupStatusRow->addWidget(m_dupStatus, 1);
+        dupStatusRow->addWidget(m_dupProgress, 0, Qt::AlignVCenter);
+        dupLay->addLayout(dupStatusRow);
+        dupLay->addSpacing(4);
+
         dupLay->addWidget(m_dupTree, 1);
 
         m_tabs->addTab(dupTab, I18n::tr("cleanup.tab_duplicates"));
@@ -392,6 +493,14 @@ void CleanupPanel::startScanProgress()
     m_largeFiles.clear();
     m_duplicateGroups.clear();
     m_cleanBtn->setEnabled(false);
+    // Reset duplicate-scan state so a rescan doesn't show a stale summary.
+    m_dupScanning = false;
+    m_dupScanCompleted = false;
+    m_dupResultGroups = 0;
+    m_dupResultFiles = 0;
+    if (m_dupProgress)
+        m_dupProgress->setVisible(false);
+    retranslateDupStatus();
 }
 
 void CleanupPanel::stopScanProgress()
@@ -401,6 +510,93 @@ void CleanupPanel::stopScanProgress()
     m_lfTree->setSortingEnabled(true);
     updateSelectedLabel();
     m_cleanBtn->setEnabled(true);
+}
+
+// Duplicate-scan progress is shown inside the Duplicates tab (a status label +
+// determinate progress bar) so the user can see which phase is running and how
+// far along it is, instead of an indeterminate wait.
+void CleanupPanel::setDupScanStarted()
+{
+    m_dupScanning = true;
+    if (m_dupStatus) {
+        m_dupStatus->setText(I18n::tr("cleanup.dup_scanning"));
+        m_dupStatus->setToolTip(I18n::tr("cleanup.dup_smart_hint"));
+    }
+    if (m_dupProgress) {
+        m_dupProgress->setRange(0, 0);  // busy indicator
+        m_dupProgress->setValue(0);
+        m_dupProgress->setVisible(true);
+    }
+}
+
+void CleanupPanel::setDupScanProgress(int phase, int processed, int total)
+{
+    if (!m_dupStatus || !m_dupProgress)
+        return;
+    m_dupScanning = true;
+
+    QString phaseKey;
+    switch (phase) {
+        case 1:  phaseKey = QStringLiteral("cleanup.dup_phase_size"); break;
+        case 2:  phaseKey = QStringLiteral("cleanup.dup_phase_partial"); break;
+        case 3:  phaseKey = QStringLiteral("cleanup.dup_phase_full"); break;
+        default: return;
+    }
+    const QString phaseText = I18n::tr(phaseKey);
+
+    if (total > 0) {
+        const int pct = qBound(0, int(qint64(processed) * 100 / qMax(1, total)), 100);
+        m_dupStatus->setText(I18n::tr("cleanup.dup_progress",
+            QMap<QString, QString>{
+                {"phase", phaseText},
+                {"processed", QString::number(processed)},
+                {"total", QString::number(total)},
+                {"pct", QString::number(pct)},
+            }));
+        m_dupProgress->setRange(0, total);
+        m_dupProgress->setValue(qBound(0, processed, total));
+    } else {
+        // Phase 1 (size grouping) has no up-front total — show the phase text
+        // alone with a busy bar.
+        m_dupStatus->setText(phaseText);
+        m_dupProgress->setRange(0, 0);
+        m_dupProgress->setValue(0);
+    }
+    m_dupProgress->setVisible(true);
+}
+
+void CleanupPanel::setDupScanDone(int groups, int files)
+{
+    m_dupScanning = false;
+    m_dupScanCompleted = true;
+    m_dupResultGroups = groups;
+    m_dupResultFiles = files;
+    retranslateDupStatus();
+}
+
+void CleanupPanel::retranslateDupStatus()
+{
+    if (!m_dupStatus)
+        return;
+    // Tooltip always carries the smart-selection explanation.
+    m_dupStatus->setToolTip(I18n::tr("cleanup.dup_smart_hint"));
+    if (m_dupProgress)
+        m_dupProgress->setVisible(m_dupScanning);
+    if (m_dupScanning) {
+        m_dupStatus->setText(I18n::tr("cleanup.dup_scanning"));
+    } else if (m_dupScanCompleted && m_dupResultGroups > 0) {
+        m_dupStatus->setText(I18n::tr("cleanup.dup_scan_done",
+            QMap<QString, QString>{
+                {"groups", QString::number(m_dupResultGroups)},
+                {"files", QString::number(m_dupResultFiles)},
+            }));
+    } else if (m_dupScanCompleted) {
+        // Scan ran but found nothing.
+        m_dupStatus->setText(I18n::tr("cleanup.dup_scan_empty"));
+    } else {
+        // No scan has run yet — show the smart-selection hint.
+        m_dupStatus->setText(I18n::tr("cleanup.dup_smart_hint"));
+    }
 }
 
 void CleanupPanel::addTarget(const CleanupTarget& target)
@@ -594,8 +790,19 @@ void CleanupPanel::addDuplicateGroup(const DuplicateGroup& group)
     m_dupTree->addTopLevelItem(topItem);
 
     // Child rows = individual files in the group.
-    // Every file is checkable; none is checked by default. The user picks
-    // which copies to delete (may be any subset, including all of them).
+    // Smart default: keep ONE copy (highest dupKeepPriority) and check every
+    // other copy for deletion. The file's danger level is the dominant signal
+    // — copies in personal folders (D) are kept, cache/system-temp copies
+    // (S/A) are deleted first. On ties the first file wins; DuplicateScanner
+    // pre-sorts by shortest path so that is the likely original.
+    const int keepIdx = dupKeepIndex(group.files);
+
+    // Block tree signals while setting the initial check states: setting a
+    // child to Checked changes its state (default Unchecked) and would fire
+    // itemChanged N times, each running updateSelectedLabel over all items.
+    // One onDupItemChanged() after the loop syncs both the label and the
+    // select-all button.
+    const QSignalBlocker blocker(m_dupTree);
     for (int i = 0; i < static_cast<int>(group.files.size()); ++i) {
         const auto& df = group.files[i];
         auto* child = new SortableTreeWidgetItem(topItem);
@@ -630,13 +837,15 @@ void CleanupPanel::addDuplicateGroup(const DuplicateGroup& group)
         child->setForeground(5, QColor(typeColor(df.name)));
         child->setSortData(5, tKey);
 
-        // All files are checkable and unchecked by default.
+        // All files are checkable. The kept copy is left unchecked; every
+        // other copy is checked for deletion by default.
         // IMPORTANT: set ItemIsUserCheckable flag BEFORE setCheckState,
         // otherwise the checkbox is not rendered on child items.
         child->setFlags(child->flags() | Qt::ItemIsUserCheckable);
-        child->setCheckState(0, Qt::Unchecked);
+        child->setCheckState(0, (i == keepIdx) ? Qt::Unchecked : Qt::Checked);
     }
     topItem->setExpanded(true);
+    onDupItemChanged();
 }
 
 void CleanupPanel::loadDuplicates(const std::vector<DuplicateGroup>& groups)
@@ -649,6 +858,12 @@ void CleanupPanel::loadDuplicates(const std::vector<DuplicateGroup>& groups)
     repopulateTypeFilters();
     m_dupTree->setSortingEnabled(true);
     updateSelectedLabel();
+
+    // Switch the status row to the "done" summary (or empty-state message).
+    int fileCount = 0;
+    for (const auto& g : groups)
+        fileCount += static_cast<int>(g.files.size());
+    setDupScanDone(static_cast<int>(groups.size()), fileCount);
 }
 
 void CleanupPanel::loadTargets(const std::vector<CleanupTarget>& targets,
@@ -736,6 +951,19 @@ void CleanupPanel::removeCleanedItems(const std::vector<CleanupWorker::ItemRef>&
         }
     }
     updateSelectedLabel();
+
+    // If a dup scan had completed, refresh its summary so the shown group/file
+    // counts match the post-cleanup tree (guarded so we don't falsely claim
+    // "no duplicates" when no dup scan ever ran).
+    if (m_dupScanCompleted) {
+        int grpCount = m_dupTree->topLevelItemCount();
+        int fileCount = 0;
+        for (int gi = 0; gi < grpCount; ++gi)
+            fileCount += m_dupTree->topLevelItem(gi)->childCount();
+        m_dupResultGroups = grpCount;
+        m_dupResultFiles = fileCount;
+        retranslateDupStatus();
+    }
 }
 
 void CleanupPanel::setCleaning(bool cleaning)
@@ -1269,6 +1497,50 @@ void CleanupPanel::onDupSelectAllToggled(bool checked)
     updateSelectedLabel();
 }
 
+void CleanupPanel::onDupSmartSelectClicked()
+{
+    // Re-apply the smart default: per visible group, keep ONE copy (highest
+    // dupKeepPriority) and check every other visible checkable copy for
+    // deletion. Uses the same dupKeepIndex() as the initial auto-selection in
+    // addDuplicateGroup, so the rules are identical. Respects the active type
+    // filter (hidden children are left untouched), mirroring onDupSelectAllToggled.
+    m_dupTree->blockSignals(true);
+    for (int gi = 0; gi < m_dupTree->topLevelItemCount(); ++gi) {
+        auto* groupItem = m_dupTree->topLevelItem(gi);
+        if (groupItem->isHidden())
+            continue;
+
+        // Collect visible checkable children; dupKeepIndex picks the keep copy.
+        std::vector<DuplicateFile> visFiles;
+        QVector<int> visIdx;  // visFiles index -> actual child index
+        for (int ci = 0; ci < groupItem->childCount(); ++ci) {
+            auto* child = groupItem->child(ci);
+            if (child->isHidden() || !(child->flags() & Qt::ItemIsUserCheckable))
+                continue;
+            DuplicateFile df;
+            df.path = child->data(0, Qt::UserRole).toString();
+            df.danger = dangerFromItem(child);
+            visFiles.push_back(df);
+            visIdx.push_back(ci);
+        }
+        const int keepVis = dupKeepIndex(visFiles);
+        if (keepVis < 0)
+            continue;
+        const int keepIdx = visIdx[keepVis];
+
+        // Keep keepIdx unchecked; check the rest (visible checkable only).
+        for (int ci = 0; ci < groupItem->childCount(); ++ci) {
+            auto* child = groupItem->child(ci);
+            if (child->isHidden() || !(child->flags() & Qt::ItemIsUserCheckable))
+                continue;
+            child->setCheckState(0, (ci == keepIdx) ? Qt::Unchecked : Qt::Checked);
+        }
+    }
+    m_dupTree->blockSignals(false);
+    // Sync the selected-size label and the select-all button state.
+    onDupItemChanged();
+}
+
 void CleanupPanel::onCleanClicked()
 {
     // Recalculate the selected label before emitting.
@@ -1538,6 +1810,10 @@ void CleanupPanel::refreshTheme()
     m_totalLabel->setStyleSheet(
         QStringLiteral("color: %1; font-size: 12px;")
             .arg(QString::fromLatin1(C::TEXT_MUTED())));
+    if (m_dupStatus)
+        m_dupStatus->setStyleSheet(
+            QStringLiteral("color: %1; font-size: 12px;")
+                .arg(QString::fromLatin1(C::TEXT_MUTED())));
 }
 
 void CleanupPanel::retranslate()
@@ -1583,6 +1859,10 @@ void CleanupPanel::retranslate()
     m_dupSelBtn->setText(m_dupSelBtn->isChecked()
                              ? I18n::tr("cleanup.deselect_all")
                              : I18n::tr("cleanup.select_all"));
+    if (m_dupSmartBtn) {
+        m_dupSmartBtn->setText(I18n::tr("cleanup.smart_select"));
+        m_dupSmartBtn->setToolTip(I18n::tr("cleanup.dup_smart_hint"));
+    }
     // Re-translate type-filter labels.
     m_lfTypeLabel->setText(I18n::tr("cleanup.filter_type"));
     m_dupTypeLabel->setText(I18n::tr("cleanup.filter_type"));
@@ -1645,4 +1925,5 @@ void CleanupPanel::retranslate()
 
     updateSummary(m_freeBytes, m_totalBytes);
     updateSelectedLabel();
+    retranslateDupStatus();
 }

@@ -38,6 +38,12 @@ public:
     void addTarget(const CleanupTarget& target);
     void addLargeFile(const LargeFile& lf);
     void addDuplicateGroup(const DuplicateGroup& group);
+
+    // Duplicate-scan progress UI (status label + determinate progress bar in
+    // the Duplicates tab). Driven by DuplicateScanner::progress signals.
+    void setDupScanStarted();
+    void setDupScanProgress(int phase, int processed, int total);
+    void setDupScanDone(int groups, int files);
     void loadTargets(const std::vector<CleanupTarget>& targets,
                      const std::vector<LargeFile>& largeFiles,
                      qint64 freeBytes, qint64 totalBytes);
@@ -63,6 +69,7 @@ private slots:
     void onDupItemChanged();
     void onDupItemClicked(QTreeWidgetItem* item, int column);
     void onDupSelectAllToggled(bool checked);
+    void onDupSmartSelectClicked();
     void onLfTypeFilterChanged(int index);
     void onDupTypeFilterChanged(int index);
     void onCatItemDoubleClicked(QTreeWidgetItem* item, int column);
@@ -77,6 +84,7 @@ private:
     QPushButton* m_catSelBtn = nullptr;
     QPushButton* m_lfSelBtn = nullptr;
     QPushButton* m_dupSelBtn = nullptr;
+    QPushButton* m_dupSmartBtn = nullptr;
     QComboBox* m_lfTypeFilter = nullptr;
     QComboBox* m_dupTypeFilter = nullptr;
     QLabel* m_lfTypeLabel = nullptr;
@@ -84,12 +92,18 @@ private:
     QProgressBar* m_scanProgress = nullptr;
     QLabel* m_selectedLabel = nullptr;
     QLabel* m_totalLabel = nullptr;
+    QLabel* m_dupStatus = nullptr;        // dup-scan phase/progress/summary text
+    QProgressBar* m_dupProgress = nullptr; // determinate bar for dup scan phases 2/3
     bool m_cleaning = false;
     std::vector<CleanupTarget> m_targets;
     std::vector<LargeFile> m_largeFiles;
     std::vector<DuplicateGroup> m_duplicateGroups;
     qint64 m_freeBytes = 0;
     qint64 m_totalBytes = 0;
+    int m_dupResultGroups = 0;  // last dup-scan group count (for retranslate)
+    int m_dupResultFiles = 0;   // last dup-scan file count (for retranslate)
+    bool m_dupScanning = false; // true while a dup scan is running
+    bool m_dupScanCompleted = false; // true once a dup scan has finished
 
     void buildUI();
     QTreeWidget* makeTree(const QStringList& headers, bool col3Fixed = false);
@@ -101,6 +115,7 @@ private:
     void applyLfTypeFilter();
     void applyDupTypeFilter();
     void repopulateTypeFilters();
+    void retranslateDupStatus();
     std::vector<std::tuple<QString, QString, QString>> getCheckedTargets() const;
     std::vector<std::tuple<QString, QString, QString>> getCheckedLargeFiles() const;
     std::vector<std::tuple<QString, QString, QString>> getCheckedDuplicates() const;
