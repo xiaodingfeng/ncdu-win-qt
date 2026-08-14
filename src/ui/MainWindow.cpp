@@ -89,6 +89,9 @@
 #include "CleanupPanel.h"
 #include "MftScanner.h"
 #include "version.h"
+#include "AiService.h"
+#include "AiSettingsDialog.h"
+#include "AiAnalysisDialog.h"
 
 Q_DECLARE_METATYPE(std::shared_ptr<FileNode>)
 Q_DECLARE_METATYPE(CleanupTarget)
@@ -204,8 +207,13 @@ MainWindow::MainWindow(QWidget* parent)
     buildUI();
     buildMenu();
     wireSignals();
+    m_ai = new AiService(this);
     populatePathCombo();
     reflectSortIndicator();
+
+    // Silently fetch-and-save the default AI Base URL / API Key when none has
+    // been configured yet. Runs in the background; never shows UI or blocks.
+    m_ai->ensureConfigured();
 
     // Follow the OS color scheme at runtime when the user picked "system".
     // Switching the Windows light/dark setting then re-applies the palette
@@ -545,6 +553,16 @@ void MainWindow::buildMenu()
     m_actions["theme.customize"] = themeMenu->addAction(I18n::tr("menu.theme.customize"));
     connect(m_actions["theme.customize"], &QAction::triggered, this, &MainWindow::showThemeCustomize);
 
+    // --- AI ---
+    auto* aiMenu = mb->addMenu(I18n::tr("menu.ai"));
+    m_actions["ai.settings"] = aiMenu->addAction(I18n::tr("menu.ai.settings"));
+    connect(m_actions["ai.settings"], &QAction::triggered, this, &MainWindow::onAiSettings);
+
+    m_actions["ai.analyze_current"] = aiMenu->addAction(I18n::tr("menu.ai.analyze_current"));
+    m_actions["ai.analyze_current"]->setEnabled(m_current != nullptr);
+    connect(m_actions["ai.analyze_current"], &QAction::triggered,
+            this, &MainWindow::onAiAnalyzeCurrent);
+
     // --- Help ---
     auto* helpMenu = mb->addMenu(I18n::tr("menu.help"));
     m_actions["help.about"] = helpMenu->addAction(I18n::tr("menu.help.about"));
@@ -616,6 +634,8 @@ void MainWindow::wireSignals()
     connect(m_cleanupPanel, &CleanupPanel::pathRevealRequested, this, [this](const QString& path) {
         revealInExplorer(path);
     });
+    connect(m_cleanupPanel, &CleanupPanel::aiAnalyzeRequested,
+            this, &MainWindow::runAiAnalysis);
 
     // Keyboard shortcuts
     auto* esc = new QShortcut(QKeySequence("Escape"), this);
@@ -1480,6 +1500,8 @@ void MainWindow::updateStatusForCurrent()
         {"files", humanCount(n->fileCount)},
         {"folders", humanCount(n->dirCount)},
     }));
+    if (m_actions.contains("ai.analyze_current"))
+        m_actions["ai.analyze_current"]->setEnabled(true);
 }
 
 // --------------------------------------------------------------------------- //
@@ -1582,6 +1604,12 @@ void MainWindow::onContextMenu(const QPoint& pos)
 
     QAction* actProp = menu->addAction(I18n::tr("ctx.properties"));
     connect(actProp, &QAction::triggered, this, [this, node]() { showProperties(node); });
+
+    menu->addSeparator();
+
+    QAction* actAi = menu->addAction(I18n::tr("ctx.ai_analyze"));
+    connect(actAi, &QAction::triggered, this,
+            [this, node]() { runAiAnalysis(node->name, buildDirPrompt(node)); });
 
     menu->exec(QCursor::pos());
     delete menu;
@@ -2762,37 +2790,28 @@ void MainWindow::onCleanTargets(
                        ? I18n::tr("dialog.recycle.more", QMap<QString, QString>{{"n", QString::number(count - 8)}})
                        : QString();
 
-    // Check for S-level items (auto-clean, no confirmation needed).
-    bool hasSOnly = false;
-    if (!targetItems.empty() && fileItems.empty()) {
-        hasSOnly = true;
-        for (const auto& [key, path] : targetItems) {
-            bool isS = false;
-            for (const auto& t : m_cleanupTargets) {
-                if (t.danger == DangerLevel::S && t.key == key && t.path == path) {
-                    isS = true;
-                    break;
-                }
-            }
-            if (!isS) {
-                hasSOnly = false;
-                break;
-            }
-        }
-    }
-
-    if (!hasSOnly) {
-        auto reply = QMessageBox::question(
-            this, I18n::tr("cleanup.clean_title"),
-            I18n::tr("cleanup.clean_body", QMap<QString, QString>{
-                {"size", humanSize(totalSize)},
-                {"names", names},
-                {"more", more},
-            }),
-            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-        if (reply != QMessageBox::Yes)
-            return;
-    }
+    // Ask the user how to clean: move to the Recycle Bin, delete permanently,
+    // or cancel. This is shown for every selection (including S-level items).
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(I18n::tr("cleanup.clean_title"));
+    box.setText(I18n::tr("cleanup.clean_body",
+        QMap<QString, QString>{{"size", humanSize(totalSize)},
+                               {"names", names},
+                               {"more", more}}));
+    auto* recycleBtn = box.addButton(I18n::tr("cleanup.clean_recycle"),
+                                     QMessageBox::AcceptRole);
+    auto* permBtn = box.addButton(I18n::tr("cleanup.clean_permanent"),
+                                  QMessageBox::DestructiveRole);
+    auto* cancelBtn = box.addButton(I18n::tr("button.cancel"),
+                                    QMessageBox::RejectRole);
+    box.exec();
+    if (box.clickedButton() == cancelBtn || box.clickedButton() == nullptr)
+        return;
+    const CleanupWorker::DeleteMode mode =
+        (box.clickedButton() == recycleBtn)
+            ? CleanupWorker::DeleteMode::RecycleBin
+            : CleanupWorker::DeleteMode::Permanent;
 
     // Cancel any existing cleanup worker.
     if (m_cleanupWorker) {
@@ -2811,7 +2830,7 @@ void MainWindow::onCleanTargets(
     for (const auto& [type, key, path] : items)
         refs.push_back({type, key, path});
 
-    m_cleanupWorker = new CleanupWorker(refs, m_cleanupTargets, m_largeFiles, this);
+    m_cleanupWorker = new CleanupWorker(refs, m_cleanupTargets, m_largeFiles, mode, this);
     connect(m_cleanupWorker, &QThread::finished,
             m_cleanupWorker, &QObject::deleteLater);
     connect(m_cleanupWorker, &CleanupWorker::progress, this, &MainWindow::onCleanupProgress);
@@ -2977,5 +2996,137 @@ void MainWindow::retranslateUI()
         m_breadcrumb->setNode(m_current);
     } else if (!m_lastScanPath.isEmpty()) {
         updateDiskFreeLabel(m_lastScanPath);
+    }
+}
+
+// --------------------------------------------------------------------------- //
+// AI analysis (optional feature)
+// --------------------------------------------------------------------------- //
+void MainWindow::onAiSettings()
+{
+    AiSettingsDialog dlg(m_ai, this);
+    dlg.exec();
+}
+
+void MainWindow::onAiAnalyzeCurrent()
+{
+    if (!m_current)
+        return;
+    runAiAnalysis(m_current->name, buildDirPrompt(m_current));
+}
+
+QString MainWindow::buildDirPrompt(const std::shared_ptr<FileNode>& node) const
+{
+    if (!node)
+        return QString();
+    const QString intro = I18n::tr("ai.prompt.intro",
+        QMap<QString, QString>{{"lang", I18n::currentLanguage()}});
+    const QString kind = node->isDir()
+        ? I18n::tr("ai.prompt.kind_dir")
+        : I18n::tr("ai.prompt.kind_file");
+
+    QStringList children;
+    const int limit = 20;
+    for (int i = 0; i < static_cast<int>(node->children.size()) && i < limit; ++i) {
+        const auto& c = node->children[i];
+        children << I18n::tr("ai.prompt.children_line",
+            QMap<QString, QString>{{"name", c->name}, {"size", humanSize(c->size)}});
+    }
+
+    return I18n::tr("ai.prompt.dir", QMap<QString, QString>{
+        {"intro", intro},
+        {"path", node->path},
+        {"kind", kind},
+        {"size", humanSize(node->size)},
+        {"files", QString::number(node->fileCount)},
+        {"folders", QString::number(node->dirCount)},
+        {"limit", QString::number(limit)},
+        {"children", children.join("\n")},
+    });
+}
+
+void MainWindow::runAiAnalysis(const QString& subject, const QString& prompt)
+{
+    if (!m_ai)
+        return;
+
+    const AiConfig cfg = m_ai->load();
+    if (!m_ai->isConfigured(cfg)) {
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Warning);
+        box.setWindowTitle(I18n::tr("ai.analysis.title"));
+        box.setText(I18n::tr("ai.analysis.not_configured"));
+        auto* cfgBtn = box.addButton(I18n::tr("ai.analysis.configure"), QMessageBox::AcceptRole);
+        box.addButton(I18n::tr("button.cancel"), QMessageBox::RejectRole);
+        box.exec();
+        if (box.clickedButton() == cfgBtn)
+            onAiSettings();
+        return;
+    }
+
+    // Show (or reuse) the read-only result dialog in loading state.
+    if (!m_aiDialog) {
+        m_aiDialog = new AiAnalysisDialog(this);
+        m_aiDialog->setAttribute(Qt::WA_DeleteOnClose);
+    }
+    m_aiDialog->setSubject(subject);
+    m_aiDialog->setLoading();
+    m_aiDialog->show();
+    m_aiDialog->raise();
+
+    // One-shot handlers for the streamed chat-completion result.
+    auto onAnalysisChunk = [this](const QString& delta) {
+        if (m_aiDialog)
+            m_aiDialog->appendChunk(delta);
+    };
+    auto onAnalysisFailed = [this](const QString& error) {
+        if (m_aiDialog)
+            m_aiDialog->setError(error);
+    };
+    auto performAnalysis = [this, prompt, onAnalysisChunk, onAnalysisFailed](const QString& model) {
+        const QMetaObject::Connection c1 =
+            connect(m_ai, &AiService::analysisChunk, this, onAnalysisChunk);
+        const QMetaObject::Connection c2 =
+            connect(m_ai, &AiService::analysisFailed, this, onAnalysisFailed);
+        const QMetaObject::Connection c3 =
+            connect(m_ai, &AiService::analysisStreamEnded, this, [this]() {
+                if (m_aiDialog)
+                    m_aiDialog->finalize();
+            });
+        auto detach = [c1, c2, c3]() {
+            disconnect(c1);
+            disconnect(c2);
+            disconnect(c3);
+        };
+        connect(m_ai, &AiService::analysisStreamEnded, this, detach);
+        connect(m_ai, &AiService::analysisFailed, this, detach);
+        m_ai->analyze(prompt, model);
+    };
+
+    if (cfg.model.trimmed() == QLatin1String("auto")) {
+        // Resolve "auto" to the first model reported by the endpoint.
+        const QMetaObject::Connection cM =
+            connect(m_ai, &AiService::modelsFetched, this,
+                    [this, performAnalysis](const QStringList& ids) {
+                        if (ids.isEmpty()) {
+                            if (m_aiDialog)
+                                m_aiDialog->setError(I18n::tr("ai.analysis.model_fetch_failed",
+                                    QMap<QString, QString>{
+                                        {"error", I18n::tr("ai.settings.no_models")}}));
+                            return;
+                        }
+                        performAnalysis(ids.first());
+                    });
+        const QMetaObject::Connection cF =
+            connect(m_ai, &AiService::modelsFailed, this, [this](const QString& error) {
+                if (m_aiDialog)
+                    m_aiDialog->setError(I18n::tr("ai.analysis.model_fetch_failed",
+                        QMap<QString, QString>{{"error", error}}));
+            });
+        connect(m_ai, &AiService::modelsFetched, this, [cM, cF]() { disconnect(cM); disconnect(cF); });
+        connect(m_ai, &AiService::modelsFailed, this, [cM, cF]() { disconnect(cM); disconnect(cF); });
+        m_ai->fetchModels();
+    } else {
+        performAnalysis(cfg.model.trimmed());
     }
 }

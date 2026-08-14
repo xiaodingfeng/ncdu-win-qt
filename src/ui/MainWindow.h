@@ -18,6 +18,7 @@
 #include <QTimer>
 #include <QFutureWatcher>
 #include <QNetworkAccessManager>
+#include <QPointer>
 #include <memory>
 #include <vector>
 #include <tuple>
@@ -39,6 +40,8 @@ class SizeBarDelegate;
 class QFrame;
 class QFile;
 class QNetworkReply;
+class AiService;
+class AiAnalysisDialog;
 
 // MainWindow - the application's primary window.
 //
@@ -103,6 +106,11 @@ private slots:
                            std::vector<CleanupWorker::ItemRef> successItems,
                            std::vector<CleanupWorker::ItemRef> failedItems);
 
+    // AI analysis
+    void onAiSettings();
+    void onAiAnalyzeCurrent();
+    void runAiAnalysis(const QString& subject, const QString& prompt);
+
 private:
     // ---- State ----
     std::shared_ptr<FileNode> m_root;
@@ -165,6 +173,10 @@ private:
     QMap<QString, QAction*> m_actions;
 
     QNetworkAccessManager* m_nam = nullptr;
+
+    // AI service (optional analysis feature).
+    AiService* m_ai = nullptr;
+    QPointer<AiAnalysisDialog> m_aiDialog;
 
     // ---- Helpers ----
     void buildUI();
@@ -232,4 +244,7 @@ private:
 
     // Cleanup
     void startCleanupScan(const QString& scanPath);
+
+    // AI helpers
+    QString buildDirPrompt(const std::shared_ptr<FileNode>& node) const;
 };

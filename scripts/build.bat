@@ -139,7 +139,7 @@ echo.
 echo ========================================
 echo   Build Successful!
 echo   Output: dist\NcduWin.exe
-echo   Installer: dist\NcduWin_1.0.5_Setup.exe
+echo   Installer: dist\NcduWin_1.0.6_Setup.exe
 echo ========================================
 echo.
 echo To run: double-click dist\NcduWin.exe

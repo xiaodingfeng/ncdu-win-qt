@@ -289,6 +289,31 @@ std::pair<int, int> cleanDirectoryContents(const QString&) { return {0, 0}; }
 #endif
 
 // ---------------------------------------------------------------------------
+// cleanDirectoryContentsToRecycleBin — move contents to Recycle Bin, keep dir
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+std::pair<int, int> cleanDirectoryContentsToRecycleBin(const QString& dirPath)
+{
+    QStringList children;
+    QDir dir(dirPath);
+    const auto entries = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const auto& e : entries)
+        children << e.absoluteFilePath();
+    if (children.isEmpty())
+        return {0, 0};
+    // sendToRecycleBin uses SHFileOperationW(FO_DELETE|FOF_ALLOWUNDO), which
+    // recursively moves directories into the Recycle Bin. The directory itself
+    // is kept because we only pass its top-level children.
+    const bool ok = sendToRecycleBin(children);
+    const int n = static_cast<int>(children.size());
+    return ok ? std::make_pair(n, 0)
+              : std::make_pair(0, n);
+}
+#else
+std::pair<int, int> cleanDirectoryContentsToRecycleBin(const QString&) { return {0, 0}; }
+#endif
+
+// ---------------------------------------------------------------------------
 // revealInExplorer
 // ---------------------------------------------------------------------------
 #ifdef _WIN32

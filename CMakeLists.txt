@@ -1,13 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(NcduWin VERSION 1.0.5 LANGUAGES CXX)
+project(NcduWin VERSION 1.0.6 LANGUAGES CXX)
 
 # Set NcduWin as the default startup target in Visual Studio
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT NcduWin)
 
 # ---- Single source of truth for app metadata ----
 set(APP_NAME        "NcduWin")
-set(APP_VERSION     "1.0.5")
+set(APP_VERSION     "1.0.6")
 set(APP_HOMEPAGE    "https://ncduwin.fengzhengx.cn/")
 set(APP_SOURCE_URL  "https://github.com/xiaodingfeng/ncdu-win-qt")
 
@@ -73,6 +73,9 @@ set(SOURCES
     src/cleanup/CleanupWorker.cpp
     src/cleanup/CleanupPanel.cpp
     src/cleanup/DuplicateScanner.cpp
+    src/ai/AiService.cpp
+    src/ai/AiSettingsDialog.cpp
+    src/ai/AiAnalysisDialog.cpp
 )
 
 file(COPY locales DESTINATION ${CMAKE_BINARY_DIR})
@@ -95,6 +98,7 @@ target_include_directories(NcduWin PRIVATE
     src/core
     src/ui
     src/cleanup
+    src/ai
 )
 
 target_link_libraries(NcduWin PRIVATE Qt6::Widgets Qt6::Concurrent Qt6::Network)

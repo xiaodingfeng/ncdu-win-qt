@@ -58,6 +58,7 @@ signals:
     void cleanRequested(const std::vector<std::tuple<QString, QString, QString>>& items);
     void rescanRequested();
     void pathRevealRequested(const QString& path);
+    void aiAnalyzeRequested(const QString& subject, const QString& prompt);
 
 private slots:
     void onCatItemChanged();
@@ -73,6 +74,8 @@ private slots:
     void onLfTypeFilterChanged(int index);
     void onDupTypeFilterChanged(int index);
     void onCatItemDoubleClicked(QTreeWidgetItem* item, int column);
+    void onAiContextMenu(QTreeWidget* tree, const QPoint& pos);
+    void onAiAnalyzeSelected();
 
 private:
     QTreeWidget* m_catTree = nullptr;
@@ -81,6 +84,7 @@ private:
     QTabWidget* m_tabs = nullptr;
     QPushButton* m_cleanBtn = nullptr;
     QPushButton* m_rescanBtn = nullptr;
+    QPushButton* m_aiBtn = nullptr;
     QPushButton* m_catSelBtn = nullptr;
     QPushButton* m_lfSelBtn = nullptr;
     QPushButton* m_dupSelBtn = nullptr;
@@ -121,4 +125,8 @@ private:
     std::vector<std::tuple<QString, QString, QString>> getCheckedDuplicates() const;
     qint64 getCheckedTotalSize() const;
     QString largeFileWarning(const QString& level) const;
+    QString buildCleanupItemPrompt(const QString& category, const QString& path,
+                                   qint64 size, int items, const QString& level,
+                                   const QString& remark) const;
+    QString buildCleanupBatchPrompt() const;
 };

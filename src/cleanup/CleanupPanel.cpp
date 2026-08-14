@@ -15,6 +15,8 @@
 #include <QPushButton>
 #include <QLabel>
 #include <QTreeWidget>
+#include <QMenu>
+#include <QPoint>
 
 #include <algorithm>
 #include <stack>
@@ -407,6 +409,13 @@ void CleanupPanel::buildUI()
     connect(m_catTree, &QTreeWidget::itemDoubleClicked,
             this, &CleanupPanel::onCatItemDoubleClicked);
 
+    // AI analysis via right-click on any cleanup row.
+    for (auto* tree : {m_catTree, m_lfTree, m_dupTree}) {
+        tree->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(tree, &QWidget::customContextMenuRequested, this,
+                [this, tree](const QPoint& pos) { onAiContextMenu(tree, pos); });
+    }
+
     lay->addWidget(m_tabs, 1);
 
     // ── Bottom: total label + selected label + rescan + clean ────
@@ -426,6 +435,11 @@ void CleanupPanel::buildUI()
             .arg(QString::fromLatin1(C::TEXT_SEC())));
     blay->addWidget(m_selectedLabel);
     blay->addStretch(1);
+    m_aiBtn = new QPushButton(I18n::tr("cleanup.ai_analyze_selected"));
+    m_aiBtn->setObjectName("ghost");
+    m_aiBtn->setCursor(Qt::PointingHandCursor);
+    connect(m_aiBtn, &QPushButton::clicked, this, &CleanupPanel::onAiAnalyzeSelected);
+    blay->addWidget(m_aiBtn);
     m_rescanBtn = new QPushButton(I18n::tr("cleanup.rescan"));
     m_rescanBtn->setObjectName("ghost");
     m_rescanBtn->setCursor(Qt::PointingHandCursor);
@@ -1585,6 +1599,192 @@ void CleanupPanel::onCleanClicked()
 }
 
 // --------------------------------------------------------------------------- //
+// AI analysis entries (optional feature)
+// --------------------------------------------------------------------------- //
+void CleanupPanel::onAiAnalyzeSelected()
+{
+    const QString prompt = buildCleanupBatchPrompt();
+    if (prompt.isEmpty())
+        return;
+    int count = static_cast<int>(getCheckedTargets().size()) +
+                static_cast<int>(getCheckedLargeFiles().size()) +
+                static_cast<int>(getCheckedDuplicates().size());
+    emit aiAnalyzeRequested(I18n::tr("ai.analysis.subject_batch",
+                                     QMap<QString, QString>{{"count", QString::number(count)}}),
+                            prompt);
+}
+
+void CleanupPanel::onAiContextMenu(QTreeWidget* tree, const QPoint& pos)
+{
+    auto* item = tree->itemAt(pos);
+    if (!item)
+        return;
+
+    // Resolve the row into (category, path, size, items, level, remark).
+    QString category, path, level, remark;
+    qint64 size = 0;
+    int items = 0;
+
+    if (tree == m_catTree) {
+        QVariantList data = item->data(0, Qt::UserRole).toList();
+        if (data.size() < 2)
+            return;
+        const QString key = data[0].toString();
+        path = data[1].toString();
+        level = data.size() >= 3 ? data[2].toString() : QString();
+        category = I18n::tr(key);
+        for (const auto& t : m_targets) {
+            if (t.key == key && t.path == path) {
+                size = t.size;
+                items = t.fileCount;
+                remark = t.remark.isEmpty() ? QString() : I18n::tr(t.remark);
+                break;
+            }
+        }
+    } else if (tree == m_lfTree) {
+        path = item->data(0, Qt::UserRole).toString();
+        if (path.isEmpty())
+            return;
+        for (const auto& lf : m_largeFiles) {
+            if (lf.path == path) {
+                category = lf.name;
+                size = lf.size;
+                level = dangerLevelToString(lf.danger);
+                remark = lf.remark;
+                break;
+            }
+        }
+    } else if (tree == m_dupTree) {
+        // Only child rows (individual duplicate files) are analyzed.
+        if (!item->parent())
+            return;
+        path = item->data(0, Qt::UserRole).toString();
+        if (path.isEmpty())
+            return;
+        category = QFileInfo(path).fileName();
+        for (const auto& dg : m_duplicateGroups) {
+            for (const auto& df : dg.files) {
+                if (df.path == path) {
+                    size = df.size;
+                    level = dangerLevelToString(df.danger);
+                    break;
+                }
+            }
+        }
+    } else {
+        return;
+    }
+
+    if (path.isEmpty())
+        return;
+
+    auto* menu = new QMenu(this);
+    QAction* act = menu->addAction(I18n::tr("ctx.ai_analyze"));
+    connect(act, &QAction::triggered, this,
+            [this, category, path, size, items, level, remark]() {
+                emit aiAnalyzeRequested(
+                    category,
+                    buildCleanupItemPrompt(category, path, size, items, level, remark));
+            });
+    menu->exec(tree->viewport()->mapToGlobal(pos));
+    delete menu;
+}
+
+// --------------------------------------------------------------------------- //
+// Prompt builders
+// --------------------------------------------------------------------------- //
+QString CleanupPanel::buildCleanupItemPrompt(const QString& category, const QString& path,
+                                             qint64 size, int items, const QString& level,
+                                             const QString& remark) const
+{
+    const QString intro = I18n::tr("ai.prompt.intro",
+        QMap<QString, QString>{{"lang", I18n::currentLanguage()}});
+    return I18n::tr("ai.prompt.cleanup_item", QMap<QString, QString>{
+        {"intro", intro},
+        {"category", category},
+        {"path", path},
+        {"size", humanSize(size)},
+        {"items", QString::number(items)},
+        {"level", level},
+        {"remark", remark},
+    });
+}
+
+QString CleanupPanel::buildCleanupBatchPrompt() const
+{
+    QStringList lines;
+    auto addLine = [&lines](const QString& label, qint64 sz) {
+        lines << QStringLiteral("- %1 (%2)").arg(label).arg(humanSize(sz));
+    };
+
+    for (int i = 0; i < m_catTree->topLevelItemCount(); ++i) {
+        auto* item = m_catTree->topLevelItem(i);
+        if (item->checkState(0) != Qt::Checked)
+            continue;
+        QVariantList data = item->data(0, Qt::UserRole).toList();
+        if (data.size() < 2)
+            continue;
+        const QString key = data[0].toString();
+        const QString path = data[1].toString();
+        qint64 sz = 0;
+        for (const auto& t : m_targets) {
+            if (t.key == key && t.path == path) {
+                sz = t.size;
+                break;
+            }
+        }
+        addLine(I18n::tr(key), sz);
+    }
+    for (int i = 0; i < m_lfTree->topLevelItemCount(); ++i) {
+        auto* item = m_lfTree->topLevelItem(i);
+        if (item->checkState(0) != Qt::Checked)
+            continue;
+        const QString path = item->data(0, Qt::UserRole).toString();
+        if (path.isEmpty())
+            continue;
+        qint64 sz = 0;
+        for (const auto& lf : m_largeFiles) {
+            if (lf.path == path) {
+                sz = lf.size;
+                break;
+            }
+        }
+        addLine(QFileInfo(path).fileName(), sz);
+    }
+    for (int gi = 0; gi < m_dupTree->topLevelItemCount(); ++gi) {
+        auto* groupItem = m_dupTree->topLevelItem(gi);
+        for (int ci = 0; ci < groupItem->childCount(); ++ci) {
+            auto* child = groupItem->child(ci);
+            if (child->checkState(0) != Qt::Checked)
+                continue;
+            const QString path = child->data(0, Qt::UserRole).toString();
+            if (path.isEmpty())
+                continue;
+            qint64 sz = 0;
+            for (const auto& dg : m_duplicateGroups) {
+                for (const auto& df : dg.files) {
+                    if (df.path == path) {
+                        sz = df.size;
+                        break;
+                    }
+                }
+            }
+            addLine(QFileInfo(path).fileName(), sz);
+        }
+    }
+
+    if (lines.isEmpty())
+        return QString();
+    const QString intro = I18n::tr("ai.prompt.intro",
+        QMap<QString, QString>{{"lang", I18n::currentLanguage()}});
+    return I18n::tr("ai.prompt.cleanup_batch", QMap<QString, QString>{
+        {"intro", intro},
+        {"count", QString::number(lines.size())},
+        {"list", lines.join("\n")},
+    });
+}
+
+// --------------------------------------------------------------------------- //
 // Double-click a category to view its contents (path + file listing).
 // --------------------------------------------------------------------------- //
 void CleanupPanel::onCatItemDoubleClicked(QTreeWidgetItem* item, int /*column*/)
@@ -1848,6 +2048,7 @@ void CleanupPanel::retranslate()
 
     m_cleanBtn->setText(I18n::tr("cleanup.clean_selected"));
     m_rescanBtn->setText(I18n::tr("cleanup.rescan"));
+    m_aiBtn->setText(I18n::tr("cleanup.ai_analyze_selected"));
 
     // Re-translate select-all buttons (preserve checked state).
     m_catSelBtn->setText(m_catSelBtn->isChecked()

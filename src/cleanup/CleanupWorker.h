@@ -20,6 +20,11 @@
 class CleanupWorker : public QThread {
     Q_OBJECT
 public:
+    // How cleaned items are removed: permanently, or moved to the Recycle Bin.
+    // (The Recycle-Bin "empty recycle bin" target is inherently permanent and
+    // is unaffected by this mode.)
+    enum class DeleteMode { Permanent, RecycleBin };
+
     // A single item reference for processing. type is "target" or "file".
     struct ItemRef {
         QString type;  // "target" or "file"
@@ -30,6 +35,7 @@ public:
     CleanupWorker(const std::vector<ItemRef>& items,
                   const std::vector<CleanupTarget>& allTargets,
                   const std::vector<LargeFile>& allLargeFiles,
+                  DeleteMode mode,
                   QObject* parent = nullptr);
     void cancel();
 
@@ -45,41 +51,20 @@ protected:
     void run() override;
 
 private:
+    // Delete a single path according to m_mode (Recycle Bin or permanent).
+    bool removePath(const QString& path) const;
+    void cleanTmpFilesInRoot(const QString& root, int& deleted, int& skipped);
+    void cleanPycFilesInRoot(const QString& root, int& deleted, int& skipped);
+    void cleanLargeArchivesInRoot(const QString& root, int& deleted, int& skipped);
+    void cleanDownloadsFiles(const QString& root, int& deleted, int& skipped);
+    void cleanTarget(const CleanupTarget& target, int& deleted, int& skipped, qint64& freed);
+    void cleanLargeFile(const LargeFile& lf, int& deleted, int& skipped, qint64& freed);
+    bool isApplicationPath(const QString& path) const;
+
     std::vector<ItemRef> m_items;
     std::vector<CleanupTarget> m_allTargets;
     std::vector<LargeFile> m_allLargeFiles;
-    std::atomic<bool> m_cancel{false};
-
-    // Clean a single CleanupTarget. Returns (deleted, skipped, freed).
-    void cleanTarget(const CleanupTarget& target,
-                     int& deleted, int& skipped, qint64& freed);
-
-    // Clean a single LargeFile. Returns (deleted, skipped, freed).
-    void cleanLargeFile(const LargeFile& lf,
-                        int& deleted, int& skipped, qint64& freed);
-
-    // Delete .tmp/.log/.bak/.old/.cache files in a root directory.
-    void cleanTmpFilesInRoot(const QString& root,
-                             int& deleted, int& skipped);
-
-    // Delete .pyc/.pyo files in a root directory.
-    void cleanPycFilesInRoot(const QString& root,
-                             int& deleted, int& skipped);
-
-    // Delete large archive files (>100 MB) in a root directory.
-    void cleanLargeArchivesInRoot(const QString& root,
-                                  int& deleted, int& skipped);
-
-    // Delete individual files inside the Downloads folder (not the folder
-    // itself). Prevents the "entire Downloads deleted" bug.
-    void cleanDownloadsFiles(const QString& root,
-                             int& deleted, int& skipped);
-
-    // Safety gate: returns true if *path* is the running application's own
-    // executable or its install directory. Deleting such paths would break
-    // the application (the "downloaded installer deleted itself" bug).
-    bool isApplicationPath(const QString& path) const;
-
-    // Cached normalized path of the running executable's directory.
+    DeleteMode m_mode = DeleteMode::Permanent;
     QString m_appDirNorm;
+    std::atomic<bool> m_cancel{false};
 };

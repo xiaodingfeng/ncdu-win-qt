@@ -30,6 +30,11 @@ bool deletePermanent(const QStringList& paths);
 // (Temp, Logs, caches) that must not be removed themselves.
 std::pair<int, int> cleanDirectoryContents(const QString& dirPath);
 
+// Same as cleanDirectoryContents but moves the top-level children to the
+// Recycle Bin instead of permanently deleting them (the directory itself is
+// kept). Returns (movedCount, skippedCount). On non-Windows returns {0,0}.
+std::pair<int, int> cleanDirectoryContentsToRecycleBin(const QString& dirPath);
+
 // Reveal a file or folder in Windows Explorer (explorer /select,"path").
 void revealInExplorer(const QString& path);
 

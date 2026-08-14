@@ -36,10 +36,11 @@ const QStringList& archiveSuffixes()
     return s;
 }
 
-// All cleanup deletions use permanent delete (direct delete, bypassing the
-// recycle bin) for speed and reliability. SHFileOperationW has high per-call
-// shell overhead and can stall the worker on locked files. deletePermanent
-// continues on per-file errors so one failure does not stop the rest.
+// All cleanup deletions honor the selected DeleteMode: Permanent (direct
+// delete, bypassing the recycle bin) or RecycleBin (moved to the recycle bin
+// via SHFileOperationW). The Recycle-Bin "empty recycle bin" target is
+// inherently permanent regardless of the mode. deletePermanent continues on
+// per-file errors so one failure does not stop the rest.
 // C/D-level: never reached (caller filters them out).
 
 // Compute directory size before deletion (for freed-byte accounting).
@@ -66,11 +67,13 @@ qint64 dirSize(const QString& path)
 CleanupWorker::CleanupWorker(const std::vector<ItemRef>& items,
                              const std::vector<CleanupTarget>& allTargets,
                              const std::vector<LargeFile>& allLargeFiles,
+                             DeleteMode mode,
                              QObject* parent)
     : QThread(parent)
     , m_items(items)
     , m_allTargets(allTargets)
     , m_allLargeFiles(allLargeFiles)
+    , m_mode(mode)
 {
     // Cache the normalized directory of the running executable so we can
     // refuse to delete it (prevents the "app deleted itself" bug).
@@ -88,6 +91,14 @@ CleanupWorker::CleanupWorker(const std::vector<ItemRef>& items,
 void CleanupWorker::cancel()
 {
     m_cancel = true;
+}
+
+bool CleanupWorker::removePath(const QString& path) const
+{
+    const QStringList paths{path};
+    return (m_mode == DeleteMode::RecycleBin)
+        ? WinApi::sendToRecycleBin(paths)
+        : WinApi::deletePermanent(paths);
 }
 
 bool CleanupWorker::isApplicationPath(const QString& path) const
@@ -149,8 +160,7 @@ void CleanupWorker::cleanDownloadsFiles(const QString& root,
             ++skipped;
             continue;
         }
-        const QStringList paths{fp};
-        if (WinApi::deletePermanent(paths)) {
+        if (removePath(fp)) {
             ++deleted;
         } else {
             Logger::warn(QStringLiteral("[cleanDownloads] DELETE FAILED: %1").arg(fp));
@@ -195,9 +205,8 @@ void CleanupWorker::cleanTmpFilesInRoot(const QString& root,
             continue;
 
         const QString path = entry.absoluteFilePath();
-        const QStringList paths{path};
-        // tmp/log/bak files are S-level — permanent delete.
-        bool ok = WinApi::deletePermanent(paths);
+        // tmp/log/bak files are S-level.
+        bool ok = removePath(path);
         if (ok)
             ++deleted;
         else
@@ -227,9 +236,8 @@ void CleanupWorker::cleanPycFilesInRoot(const QString& root,
             continue;
 
         const QString path = entry.absoluteFilePath();
-        const QStringList paths{path};
-        // .pyc/.pyo are A-level cache files — permanent delete.
-        bool ok = WinApi::deletePermanent(paths);
+        // .pyc/.pyo are A-level cache files.
+        bool ok = removePath(path);
         if (ok)
             ++deleted;
         else
@@ -266,9 +274,8 @@ void CleanupWorker::cleanLargeArchivesInRoot(const QString& root,
             continue;
 
         const QString path = entry.absoluteFilePath();
-        const QStringList paths{path};
-        // Large archives are B-level — permanent delete.
-        bool ok = WinApi::deletePermanent(paths);
+        // Large archives are B-level.
+        bool ok = removePath(path);
         if (ok)
             ++deleted;
         else
@@ -357,15 +364,18 @@ void CleanupWorker::cleanTarget(const CleanupTarget& target,
         // contents but KEEP the directory itself. System directories like
         // C:\Windows\Temp and AppData\Local\Temp must not be removed —
         // doing so causes system/app malfunctions. Locked files are skipped.
-        auto [d, s] = WinApi::cleanDirectoryContents(target.path);
-        deleted = d;
-        skipped = s;
+        // In RecycleBin mode the contents are moved to the Recycle Bin.
+        std::pair<int, int> res =
+            (m_mode == DeleteMode::RecycleBin)
+                ? WinApi::cleanDirectoryContentsToRecycleBin(target.path)
+                : WinApi::cleanDirectoryContents(target.path);
+        deleted = res.first;
+        skipped = res.second;
         freed = (deleted > 0) ? target.size : 0;
     } else {
-        // Single file target — permanent delete.
+        // Single file target — delete/move per mode.
         freed = target.size;
-        const QStringList paths{target.path};
-        bool ok = WinApi::deletePermanent(paths);
+        bool ok = removePath(target.path);
         if (ok && !QFileInfo::exists(target.path)) {
             deleted = 1;
         } else {
@@ -398,16 +408,14 @@ void CleanupWorker::cleanLargeFile(const LargeFile& lf,
         return;
     }
 
-    const QStringList paths{lf.path};
     bool ok = false;
 
     if (info.isFile()) {
         freed = info.size();
-        // Large files — permanent delete (direct, bypass recycle bin).
-        ok = WinApi::deletePermanent(paths);
+        ok = removePath(lf.path);
     } else if (info.isDir()) {
         freed = dirSize(lf.path);
-        ok = WinApi::deletePermanent(paths);
+        ok = removePath(lf.path);
     }
 
     if (ok && !QFileInfo::exists(lf.path)) {
@@ -495,7 +503,7 @@ void CleanupWorker::run()
                 cleanLargeFile(*matched, d, s, f);
             } else {
                 // No matching LargeFile — clean directly using B-level
-                // defaults (permanent delete).
+                // defaults (honoring the selected DeleteMode).
                 LargeFile lf;
                 lf.path = item.path;
                 lf.name = info.fileName();
