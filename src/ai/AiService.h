@@ -6,6 +6,7 @@
 #include <QByteArray>
 
 class QNetworkAccessManager;
+class QJsonArray;
 
 // AI service configuration: Base URL / API Key / Model.
 struct AiConfig {
@@ -47,6 +48,9 @@ public:
     void fetchDefaults();         // GET both default Base URL and API Key
     void fetchModels();           // GET {baseUrl}/models
     void analyze(const QString& prompt, const QString& overrideModel = {});  // POST {baseUrl}/chat/completions (streamed)
+    // Send a full message history (role/content pairs, e.g. for follow-up Q&A
+    // with conversation context) to {baseUrl}/chat/completions (streamed).
+    void analyzeMessages(const QJsonArray& messages, const QString& overrideModel = {});
 
     // Silently fetch-and-save the default Base URL / API Key when the saved
     // config is empty. Runs in the background; never shows UI or blocks.
@@ -65,6 +69,7 @@ signals:
 
 private:
     void processSse(QByteArray& buffer);
+    void sendCompletion(const QJsonArray& messages, const QString& overrideModel);
 
     QNetworkAccessManager* m_nam = nullptr;
     QByteArray m_sseBuffer;

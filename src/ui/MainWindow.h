@@ -109,7 +109,9 @@ private slots:
     // AI analysis
     void onAiSettings();
     void onAiAnalyzeCurrent();
+    void onAiQa();
     void runAiAnalysis(const QString& subject, const QString& prompt);
+    void runAiFollowUp(const QJsonArray& messages);
 
 private:
     // ---- State ----
@@ -177,6 +179,7 @@ private:
     // AI service (optional analysis feature).
     AiService* m_ai = nullptr;
     QPointer<AiAnalysisDialog> m_aiDialog;
+    QString m_aiModel;   // last model used for analysis (reused for follow-ups)
 
     // ---- Helpers ----
     void buildUI();
@@ -247,4 +250,5 @@ private:
 
     // AI helpers
     QString buildDirPrompt(const std::shared_ptr<FileNode>& node) const;
+    QString buildQaSystemPrompt() const;
 };

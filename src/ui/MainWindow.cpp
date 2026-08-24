@@ -563,6 +563,9 @@ void MainWindow::buildMenu()
     connect(m_actions["ai.analyze_current"], &QAction::triggered,
             this, &MainWindow::onAiAnalyzeCurrent);
 
+    m_actions["ai.qa"] = aiMenu->addAction(I18n::tr("menu.ai.qa"));
+    connect(m_actions["ai.qa"], &QAction::triggered, this, &MainWindow::onAiQa);
+
     // --- Help ---
     auto* helpMenu = mb->addMenu(I18n::tr("menu.help"));
     m_actions["help.about"] = helpMenu->addAction(I18n::tr("menu.help.about"));
@@ -3064,13 +3067,15 @@ void MainWindow::runAiAnalysis(const QString& subject, const QString& prompt)
         return;
     }
 
-    // Show (or reuse) the read-only result dialog in loading state.
+    // Show (or reuse) the conversational Q&A dialog in loading state.
     if (!m_aiDialog) {
         m_aiDialog = new AiAnalysisDialog(this);
         m_aiDialog->setAttribute(Qt::WA_DeleteOnClose);
+        connect(m_aiDialog, &AiAnalysisDialog::questionSubmitted,
+                this, &MainWindow::runAiFollowUp);
     }
     m_aiDialog->setSubject(subject);
-    m_aiDialog->setLoading();
+    m_aiDialog->beginAnalysis(prompt);
     m_aiDialog->show();
     m_aiDialog->raise();
 
@@ -3084,6 +3089,7 @@ void MainWindow::runAiAnalysis(const QString& subject, const QString& prompt)
             m_aiDialog->setError(error);
     };
     auto performAnalysis = [this, prompt, onAnalysisChunk, onAnalysisFailed](const QString& model) {
+        m_aiModel = model;
         const QMetaObject::Connection c1 =
             connect(m_ai, &AiService::analysisChunk, this, onAnalysisChunk);
         const QMetaObject::Connection c2 =
@@ -3091,7 +3097,7 @@ void MainWindow::runAiAnalysis(const QString& subject, const QString& prompt)
         const QMetaObject::Connection c3 =
             connect(m_ai, &AiService::analysisStreamEnded, this, [this]() {
                 if (m_aiDialog)
-                    m_aiDialog->finalize();
+                    m_aiDialog->finalizeAnswer();
             });
         auto detach = [c1, c2, c3]() {
             disconnect(c1);
@@ -3129,4 +3135,114 @@ void MainWindow::runAiAnalysis(const QString& subject, const QString& prompt)
     } else {
         performAnalysis(cfg.model.trimmed());
     }
+}
+
+void MainWindow::onAiQa()
+{
+    if (!m_ai)
+        return;
+
+    const AiConfig cfg = m_ai->load();
+    if (!m_ai->isConfigured(cfg)) {
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Warning);
+        box.setWindowTitle(I18n::tr("ai.analysis.title"));
+        box.setText(I18n::tr("ai.analysis.not_configured"));
+        auto* cfgBtn = box.addButton(I18n::tr("ai.analysis.configure"), QMessageBox::AcceptRole);
+        box.addButton(I18n::tr("button.cancel"), QMessageBox::RejectRole);
+        box.exec();
+        if (box.clickedButton() == cfgBtn)
+            onAiSettings();
+        return;
+    }
+
+    if (!m_aiDialog) {
+        m_aiDialog = new AiAnalysisDialog(this);
+        m_aiDialog->setAttribute(Qt::WA_DeleteOnClose);
+        connect(m_aiDialog, &AiAnalysisDialog::questionSubmitted,
+                this, &MainWindow::runAiFollowUp);
+    }
+    m_aiDialog->setSubject(QString());
+    m_aiDialog->setSystemPrompt(buildQaSystemPrompt());
+    m_aiDialog->beginConversation();
+    m_aiDialog->show();
+    m_aiDialog->raise();
+}
+
+QString MainWindow::buildQaSystemPrompt() const
+{
+    return I18n::tr("ai.qa.system");
+}
+
+void MainWindow::runAiFollowUp(const QJsonArray& messages)
+{
+    if (!m_ai || !m_aiDialog)
+        return;
+
+    // Run a streamed request against the given message history, wiring one-shot
+    // handlers so each follow-up gets a clean, detachable connection.
+    auto perform = [this, messages](const QString& model) {
+        auto onAnalysisChunk = [this](const QString& delta) {
+            if (m_aiDialog)
+                m_aiDialog->appendChunk(delta);
+        };
+        auto onAnalysisFailed = [this](const QString& error) {
+            if (m_aiDialog)
+                m_aiDialog->setError(error);
+        };
+        const QMetaObject::Connection c1 =
+            connect(m_ai, &AiService::analysisChunk, this, onAnalysisChunk);
+        const QMetaObject::Connection c2 =
+            connect(m_ai, &AiService::analysisFailed, this, onAnalysisFailed);
+        const QMetaObject::Connection c3 =
+            connect(m_ai, &AiService::analysisStreamEnded, this, [this]() {
+                if (m_aiDialog)
+                    m_aiDialog->finalizeAnswer();
+            });
+        auto detach = [c1, c2, c3]() {
+            disconnect(c1);
+            disconnect(c2);
+            disconnect(c3);
+        };
+        connect(m_ai, &AiService::analysisStreamEnded, this, detach);
+        connect(m_ai, &AiService::analysisFailed, this, detach);
+        m_aiModel = model;
+        m_ai->analyzeMessages(messages, model);
+    };
+
+    // Reuse the model from the initial analysis; otherwise (open-ended Q&A or
+    // a fresh dialog) resolve it now — including the "auto" case.
+    if (!m_aiModel.isEmpty()) {
+        perform(m_aiModel);
+        return;
+    }
+    const AiConfig cfg = m_ai->load();
+    if (cfg.model.trimmed() != QLatin1String("auto")) {
+        perform(cfg.model.trimmed());
+        return;
+    }
+    const QMetaObject::Connection cM =
+        connect(m_ai, &AiService::modelsFetched, this, [this, perform](const QStringList& ids) {
+            if (ids.isEmpty()) {
+                if (m_aiDialog)
+                    m_aiDialog->setError(I18n::tr("ai.analysis.model_fetch_failed",
+                        QMap<QString, QString>{
+                            {"error", I18n::tr("ai.settings.no_models")}}));
+                return;
+            }
+            perform(ids.first());
+        });
+    const QMetaObject::Connection cF =
+        connect(m_ai, &AiService::modelsFailed, this, [this](const QString& error) {
+            if (m_aiDialog)
+                m_aiDialog->setError(I18n::tr("ai.analysis.model_fetch_failed",
+                    QMap<QString, QString>{{"error", error}}));
+        });
+    auto detachModels = [cM, cF]() {
+        disconnect(cM);
+        disconnect(cF);
+    };
+    connect(m_ai, &AiService::modelsFetched, this, detachModels);
+    connect(m_ai, &AiService::modelsFailed, this, detachModels);
+    m_ai->fetchModels();
 }

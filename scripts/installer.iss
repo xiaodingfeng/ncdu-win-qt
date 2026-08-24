@@ -31,10 +31,10 @@ PrivilegesRequiredOverridesAllowed=dialog
 DisableProgramGroupPage=no
 
 [Languages]
-Name: "en"; MessagesFile: "compiler:Default.isl"
+Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: checkedonce
+Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescription: "附加快捷方式:"; Flags: checkedonce
 
 [Files]
 Source: "..\dist\NcduWin.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -55,7 +55,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 
 [Run]
 ; Non-silent: postinstall checkbox lets the user opt-in to launching the app.
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: postinstall nowait skipifsilent unchecked
+Filename: "{app}\{#MyAppExeName}"; Description: "运行 {#MyAppName}"; Flags: postinstall nowait skipifsilent unchecked
 ; Silent: auto-launch the new version after the auto-update install, since
 ; there is no UI for the postinstall checkbox. Using [Run] (instead of a
 ; [Code] ShellExec) lets Inno Setup handle the requireAdministrator manifest

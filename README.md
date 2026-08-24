@@ -4,7 +4,7 @@
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![Qt6](https://img.shields.io/badge/GUI-Qt6-green.svg)](https://www.qt.io)
 [![Platform: Windows](https://img.shields.io/badge/platform-windows-lightgrey.svg)](#supported-platforms)
-[![Version](https://img.shields.io/badge/version-1.0.6-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-1.0.7-blue.svg)](#)
 
 **[English](README.md)** | **[中文](README_ZH.md)**
 
@@ -92,7 +92,7 @@ cd ncdu-win-qt
 scripts\build.bat
 ```
 
-The script produces `dist\NcduWin_1.0.6_Setup.exe` — an installer with
+The script produces `dist\NcduWin_1.0.7_Setup.exe` — an installer with
 all Qt dependencies bundled.
 
 ### Option C — Open in Visual Studio

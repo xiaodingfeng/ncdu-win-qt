@@ -192,6 +192,21 @@ void AiService::fetchModels()
 // Send a streamed chat completion request for the given prompt.
 void AiService::analyze(const QString& prompt, const QString& overrideModel)
 {
+    QJsonObject msg;
+    msg.insert(QLatin1String("role"), QLatin1String("user"));
+    msg.insert(QLatin1String("content"), prompt);
+    sendCompletion(QJsonArray{msg}, overrideModel);
+}
+
+// Send a streamed chat completion request over the given full message history so
+// follow-up questions can reference the previous analysis (Q&A context).
+void AiService::analyzeMessages(const QJsonArray& messages, const QString& overrideModel)
+{
+    sendCompletion(messages, overrideModel);
+}
+
+void AiService::sendCompletion(const QJsonArray& messages, const QString& overrideModel)
+{
     const AiConfig cfg = load();
     const QString base = cfg.baseUrl.trimmed();
     if (base.isEmpty()) {
@@ -212,12 +227,9 @@ void AiService::analyze(const QString& prompt, const QString& overrideModel)
     if (model.isEmpty())
         model = QLatin1String(DEFAULT_MODEL);
 
-    QJsonObject msg;
-    msg.insert(QLatin1String("role"), QLatin1String("user"));
-    msg.insert(QLatin1String("content"), prompt);
     QJsonObject body;
     body.insert(QLatin1String("model"), model);
-    body.insert(QLatin1String("messages"), QJsonArray{msg});
+    body.insert(QLatin1String("messages"), messages);
     body.insert(QLatin1String("stream"), true);
 
     m_sseBuffer.clear();
