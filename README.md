@@ -27,6 +27,10 @@ dependencies bundled, and supports English / 简体中文 out of the box.
   first-4KB hash → full hash) identifies duplicate files with minimal
   I/O and memory. Safely skips system binaries and user data; the first
   file in each group is kept by default.
+- **AI analysis** — hand a file, folder or pending cleanup item to the AI to
+  explain what it is, whether it is safe to remove and what the risk is, then
+  keep asking follow-up questions. Works with any OpenAI-style endpoint; the
+  Base URL, API key and model are configurable under **AI → AI settings**.
 - **Theme switching** — switch between light and dark themes, or define
   your own custom accent colors for a personalized look.
 - **Skip heavy directories** — optionally skip deep scanning of large
@@ -51,6 +55,27 @@ dependencies bundled, and supports English / 简体中文 out of the box.
 - **Safety-first deletion** — five-level safety system (S/A/B/C/D) ensures
   you won't accidentally delete important files. System state and user
   data are never auto-selected.
+- **System optimization** — a dedicated System Optimization tab that fixes
+  common system and network problems in one place:
+  - Windows Update guard: toggle automatic updates off so nothing downloads
+    or installs on its own, and turn them back on whenever you want
+  - Network emergency repair: resets IP / DNS / IPv6 / Winsock / firewall
+    and renews DHCP, with live progress for every step
+  - Flush the DNS cache and reset the Microsoft Store cache
+- **Relocate save locations** — move C-drive-hungry folders to another disk
+  while a directory junction stays behind, so software keeps working with
+  no reconfiguration:
+  - System folders: Downloads / Documents / Desktop / Pictures / Videos /
+    Music / 3D Objects / Contacts / Favorites / Links / Saved Games /
+    Searches — all 12 Windows library folders
+  - App data folders: scans AppData / LocalAppData / LocalLow and Documents
+    for user data, with checkbox batch selection
+- **Move safety net** — a stepwise copy → verify → create junction →
+  remove source flow, with one-click restore if any step fails; the target
+  folder gets a "do not delete, move or rename" marker so it is never
+  removed by mistake and taken out of sync.
+- **Scan timing** — the status bar shows how long each scan actually took,
+  formatted as ms / s / min-s / h-min.
 - **Auto-scan on startup** — instantly shows your home directory usage
   on first launch.
 - **English and Chinese** — built-in localization with persistent language
@@ -67,6 +92,14 @@ dependencies bundled, and supports English / 简体中文 out of the box.
 | File list + treemap | Cleanup panel |
 |---|---|
 | ![File list + treemap](docs/screenshots/treeMap.png) | ![Cleanup panel](docs/screenshots/cleanup.png) |
+
+| AI analysis | System optimization |
+|---|---|
+| ![AI analysis](docs/screenshots/ai.png) | ![System optimization](docs/screenshots/system.png) |
+
+| System folder relocation | User data folder relocation |
+|---|---|
+| ![System folder relocation](docs/screenshots/systemMenu.png) | ![User data folder relocation](docs/screenshots/userMenu.png) |
 
 ---
 
@@ -121,17 +154,32 @@ ncdu-win-qt/
 │   │   ├── FormatHelpers.h/cpp
 │   │   ├── I18n.h/cpp
 │   │   ├── Identify.h/cpp
+│   │   ├── KnownFolderPath.h   # Known-folder resolution (incl. OneDrive redirects)
+│   │   ├── KnownFolderTable.h  # Single source of truth for the 12 known folders
 │   │   ├── Logger.h/cpp
 │   │   ├── MemoryMonitor.h
 │   │   ├── MftScanner.h/cpp    # NTFS MFT direct reader (fast path)
+│   │   ├── MoveDstResolver.h   # Target path resolution for batch moves
+│   │   ├── SafeMoveWorker.h/cpp  # Cancellable, verified move worker
+│   │   ├── ScanRoots.h         # User-data scan roots
 │   │   └── WinApi.h/cpp
 │   ├── ui/                 # UI components
+│   │   ├── AppDataMovePanel.h/cpp   # Application data relocation panel
+│   │   ├── AppPathSyncDialog.h/cpp  # Known-folder relocation dialog
 │   │   ├── BreadcrumbBar.h/cpp
+│   │   ├── DialogI18n.h        # Shared confirm / info dialogs
+│   │   ├── InstalledApps.h     # Installed-application discovery
 │   │   ├── LegendBar.h/cpp
 │   │   ├── MainWindow.h/cpp
 │   │   ├── SizeBarDelegate.h/cpp
 │   │   ├── Style.h
+│   │   ├── SystemOptPanel.h/cpp    # System optimization panel
+│   │   ├── ToggleSwitch.h/cpp
 │   │   └── TreemapWidget.h/cpp
+│   ├── ai/                 # AI analysis
+│   │   ├── AiAnalysisDialog.h/cpp  # Analysis result window
+│   │   ├── AiService.h/cpp         # Requests & streaming responses
+│   │   └── AiSettingsDialog.h/cpp  # Model & API key settings
 │   └── cleanup/            # Cleanup feature
 │       ├── CleanupPanel.h/cpp
 │       ├── CleanupScanner.h/cpp
@@ -139,19 +187,30 @@ ncdu-win-qt/
 │       ├── CleanupWorker.h/cpp
 │       └── DuplicateScanner.h/cpp  # Duplicate file detection
 ├── locales/                # i18n JSON files
-│       ├── en.json
-│       └── zh.json
+│   ├── en.json
+│   └── zh.json
 ├── scripts/
 │   ├── build.bat           # Build script (CMake + MSVC + windeployqt + ISCC)
+│   ├── check_i18n.py       # Translation audit (symmetry / coverage / dead keys)
 │   ├── installer.iss       # Inno Setup installer script
 │   └── version.iss.in      # Version template for installer
 ├── tests/
 │   ├── test_scanner.cpp    # C++ unit tests (Qt Test)
 │   └── compare_scanners.cpp  # Scanner comparison benchmarks
-├── docs/
+├── probe_lab/              # Regression harness (7 probes / 118 assertions)
+│   ├── CMakeLists.txt
+│   └── run1/ … run7/       # Move safety / marker names / known folders / language refresh
+├── resources/              # Resources embedded into the binary
+│   └── dont_delete_folder.ico  # "Do not delete" marker for move targets
+├── docs/                   # Website & screenshots
+│   ├── index.html
 │   └── screenshots/
 │       ├── treeMap.png
-│       └── cleanup.png
+│       ├── cleanup.png
+│       ├── ai.png
+│       ├── system.png
+│       ├── systemMenu.png
+│       └── userMenu.png
 ├── app.ico
 ├── app.manifest
 ├── CMakeLists.txt

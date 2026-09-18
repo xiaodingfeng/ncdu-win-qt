@@ -18,6 +18,7 @@ NcduWin 是一个原生桌面应用，它扫描您的磁盘并使用 ncdu 风格
 
 - **极速扫描** — 直接读取 NTFS 磁盘索引表（MFT）枚举文件，扫描速度比传统目录遍历方式快数倍；多线程处理让大容量硬盘依然保持流畅响应。
 - **重复文件查找** — 采用三级漏斗算法（大小分组 → 前 4KB 哈希 → 全文件哈希），以极低的 I/O 与内存开销精准识别重复文件。自动跳过系统二进制文件与用户数据，每组默认保留首个文件。
+- **AI 智能分析** — 选中文件、目录或待清理项，交给 AI 说明它的用途、是否可以安全清理以及清理风险，并可连续追问；兼容 OpenAI 风格接口，接口地址、API Key 与模型均可在「AI → AI 设置」中配置。
 - **主题切换** — 支持深色 / 浅色主题切换，并可自定义主题色，打造个性化视觉体验。
 - **跳过重型目录** — 可选择性跳过 `node_modules`、`.git` 等大型文件夹的深度扫描，同时仍显示其大小。
 - **完整系统访问** — 自动请求管理员权限，支持扫描 `C:\Windows` 和其他用户目录等受保护的系统文件夹。
@@ -32,6 +33,15 @@ NcduWin 是一个原生桌面应用，它扫描您的磁盘并使用 ncdu 风格
   - 大文件（>50MB），带安全等级分类
   - 重复文件，支持分组选择清理
 - **安全优先删除** — 五级安全系统（S/A/B/C/D）确保不会误删重要文件，系统状态与用户数据永不自动选中。
+- **系统配置优化** — 独立的「系统优化」标签页，一站式修复常见系统与网络问题：
+  - Windows 更新守护：一键开关自动更新，关闭后不再自动下载安装，需要时随时恢复
+  - 网络急救修复：重置 IP / DNS / IPv6 / Winsock / 防火墙并续约 DHCP，全程显示进度
+  - 刷新 DNS 缓存、重置应用商店缓存
+- **保存位置迁移** — 把占用 C 盘的目录整体搬到其他磁盘，原位置保留目录联接（junction），软件无需重新配置即可照常使用：
+  - 系统文件夹：下载 / 文档 / 桌面 / 图片 / 视频 / 音乐 / 3D 对象 / 联系人 / 收藏夹 / 链接 / 保存的游戏 / 搜索，共 12 个 Windows 库文件夹
+  - 软件数据目录：自动扫描 AppData / LocalAppData / LocalLow 及文档下的用户数据，支持勾选批量迁移
+- **迁移安全机制** — 复制 → 校验 → 建立目录联接 → 删除旧目录的分步流程，任一步失败可一键还原；目标目录会写入"请勿删除、移动或重命名"提示标记，避免误删导致数据不同步。
+- **扫描耗时统计** — 状态栏显示每次扫描的实际耗时，格式化显示为毫秒 / 秒 / 分秒 / 时分。
 - **启动自动扫描** — 首次启动立即显示用户主目录的空间使用情况。
 - **中英双语** — 内置本地化支持，语言选择自动保存。
 - **清新现代界面** — 柔和配色、圆角设计、清晰的视觉层次。
@@ -44,6 +54,14 @@ NcduWin 是一个原生桌面应用，它扫描您的磁盘并使用 ncdu 风格
 | 文件列表 + 树图 | 清理面板 |
 |---|---|
 | ![File list + treemap](docs/screenshots/treeMap.png) | ![Cleanup panel](docs/screenshots/cleanup.png) |
+
+| AI 分析 | 系统优化 |
+|---|---|
+| ![AI analysis](docs/screenshots/ai.png) | ![System optimization](docs/screenshots/system.png) |
+
+| 系统文件夹位置迁移 | 用户数据目录位置迁移 |
+|---|---|
+| ![System folder relocation](docs/screenshots/systemMenu.png) | ![User data folder relocation](docs/screenshots/userMenu.png) |
 
 ---
 
@@ -97,17 +115,32 @@ ncdu-win-qt/
 │   │   ├── FormatHelpers.h/cpp
 │   │   ├── I18n.h/cpp
 │   │   ├── Identify.h/cpp
+│   │   ├── KnownFolderPath.h   # 系统文件夹路径解析（含 OneDrive 重定向）
+│   │   ├── KnownFolderTable.h  # 12 个系统文件夹唯一定义表
 │   │   ├── Logger.h/cpp
 │   │   ├── MemoryMonitor.h
 │   │   ├── MftScanner.h/cpp    # NTFS MFT 直读（快速通道）
+│   │   ├── MoveDstResolver.h   # 批量迁移的目标路径推导
+│   │   ├── SafeMoveWorker.h/cpp  # 可取消、带校验的安全搬移线程
+│   │   ├── ScanRoots.h         # 用户数据扫描根目录
 │   │   └── WinApi.h/cpp
 │   ├── ui/                 # UI 组件
+│   │   ├── AppDataMovePanel.h/cpp   # 软件数据目录迁移面板
+│   │   ├── AppPathSyncDialog.h/cpp  # 系统文件夹位置迁移对话框
 │   │   ├── BreadcrumbBar.h/cpp
+│   │   ├── DialogI18n.h        # 统一确认 / 提示弹框
+│   │   ├── InstalledApps.h     # 已安装程序发现
 │   │   ├── LegendBar.h/cpp
 │   │   ├── MainWindow.h/cpp
 │   │   ├── SizeBarDelegate.h/cpp
 │   │   ├── Style.h
+│   │   ├── SystemOptPanel.h/cpp    # 系统配置优化面板
+│   │   ├── ToggleSwitch.h/cpp
 │   │   └── TreemapWidget.h/cpp
+│   ├── ai/                 # AI 分析
+│   │   ├── AiAnalysisDialog.h/cpp  # 分析结果窗口
+│   │   ├── AiService.h/cpp         # 请求与流式响应
+│   │   └── AiSettingsDialog.h/cpp  # 模型与密钥设置
 │   └── cleanup/            # 清理功能
 │       ├── CleanupPanel.h/cpp
 │       ├── CleanupScanner.h/cpp
@@ -115,19 +148,30 @@ ncdu-win-qt/
 │       ├── CleanupWorker.h/cpp
 │       └── DuplicateScanner.h/cpp  # 重复文件检测
 ├── locales/                # i18n JSON 文件
-│       ├── en.json
-│       └── zh.json
+│   ├── en.json
+│   └── zh.json
 ├── scripts/
 │   ├── build.bat           # 构建脚本 (CMake + MSVC + windeployqt + ISCC)
+│   ├── check_i18n.py       # 语言包审计（对称性 / 覆盖率 / 死键）
 │   ├── installer.iss       # Inno Setup 安装包脚本
 │   └── version.iss.in      # 安装包版本模板
 ├── tests/
 │   ├── test_scanner.cpp    # C++ 单元测试 (Qt Test)
 │   └── compare_scanners.cpp  # 扫描器对比基准测试
-├── docs/
+├── probe_lab/              # 回归靶场（7 个探针 / 118 项断言）
+│   ├── CMakeLists.txt
+│   └── run1/ … run7/       # 搬移安全 / 标记文件名 / 系统文件夹 / 语言刷新
+├── resources/              # 随程序嵌入的资源
+│   └── dont_delete_folder.ico  # 迁移目标"请勿删除"标记图标
+├── docs/                   # 官网与截图
+│   ├── index.html
 │   └── screenshots/
 │       ├── treeMap.png
-│       └── cleanup.png
+│       ├── cleanup.png
+│       ├── ai.png
+│       ├── system.png
+│       ├── systemMenu.png
+│       └── userMenu.png
 ├── app.ico
 ├── app.manifest
 ├── CMakeLists.txt
