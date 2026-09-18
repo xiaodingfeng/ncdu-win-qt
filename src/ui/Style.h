@@ -18,6 +18,11 @@
 #include <QSettings>
 #include <QGuiApplication>
 #include <QStyleHints>
+#include <QDir>
+#include <QPainter>
+#include <QPixmap>
+#include <QIcon>
+#include <QPolygonF>
 
 #include "I18n.h"
 
@@ -412,6 +417,41 @@ inline QList<QPair<QString, QString>> legendItems() {
 // QSS stylesheet
 // --------------------------------------------------------------------------- //
 
+inline QString getComboArrowIconPath(bool hover = false) {
+    QString path = QDir::tempPath() + (hover ? QStringLiteral("/ncdu_combo_arrow_hover.png") : QStringLiteral("/ncdu_combo_arrow.png"));
+    QPixmap pm(32, 32);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    QPen pen(QColor(hover ? C::PRIMARY() : C::TEXT_SEC()), 2.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    p.setPen(pen);
+    QPolygonF poly;
+    poly << QPointF(9, 13) << QPointF(16, 20) << QPointF(23, 13);
+    p.drawPolyline(poly);
+    p.end();
+    pm.save(path);
+    return path.replace('\\', '/');
+}
+
+// Vector "info" glyph used by the icon-only "view details" buttons. Drawn at
+// 4x for crispness on HiDPI displays.
+inline QIcon getDetailIcon() {
+    QPixmap pm(64, 64);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    const QColor fg(C::PRIMARY());
+    p.setPen(QPen(fg, 4.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(Qt::NoBrush);
+    p.drawEllipse(QPointF(32, 32), 21, 21);
+    p.drawLine(QPointF(32, 30), QPointF(32, 44));
+    p.setPen(Qt::NoPen);
+    p.setBrush(fg);
+    p.drawEllipse(QPointF(32, 21), 3.2, 3.2);
+    p.end();
+    return QIcon(pm);
+}
+
 // The full application stylesheet. Color values are injected from the active
 // palette via @TOKEN placeholders so a theme switch (qApp->setStyleSheet(
 // loadQSS())) re-reads the current theme. A few non-palette literals are left
@@ -563,7 +603,7 @@ QComboBox {
     background-color: @SURFACE;
     border: 1px solid @BORDER;
     border-radius: 8px;
-    padding: 6px 12px;
+    padding: 6px 30px 6px 12px;
     min-height: 20px;
     color: @TEXT;
 }
@@ -572,19 +612,19 @@ QComboBox:hover {
 }
 QComboBox::drop-down {
     border: none;
-    width: 28px;
-    background: @SURFACE_ALT;
-    border-left: 1px solid @BORDER;
-    border-radius: 0px 8px 8px 0px;
+    width: 26px;
+    background: transparent;
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    margin-right: 4px;
 }
 QComboBox::down-arrow {
-    image: none;
-    width: 0;
-    height: 0;
-    border-left: 6px solid transparent;
-    border-right: 6px solid transparent;
-    border-top: 7px solid @TEXT;
-    margin-right: 8px;
+    image: url("@COMBO_ARROW");
+    width: 13px;
+    height: 13px;
+}
+QComboBox::down-arrow:hover {
+    image: url("@COMBO_ARROW_HOVER");
 }
 QComboBox QAbstractItemView {
     background-color: @SURFACE;
@@ -601,8 +641,16 @@ QComboBox QAbstractItemView {
    look as if it is overlapped by the table header below. Use a tighter
    padding/min-height so the combo renders fully inside 22px. */
 QComboBox#typeFilter {
-    padding: 1px 8px;
+    padding: 1px 22px 1px 8px;
     min-height: 14px;
+}
+QComboBox#typeFilter::drop-down {
+    width: 20px;
+    margin-right: 2px;
+}
+QComboBox#typeFilter::down-arrow {
+    width: 10px;
+    height: 10px;
 }
 
 /* ---- line edit / search ---- */
@@ -621,6 +669,13 @@ QLineEdit:focus {
 }
 QLineEdit::placeholder {
     color: @TEXT_MUTED;
+}
+/* The 34px left padding above reserves room for a leading icon that only the
+   toolbar search box was meant to have — and none is drawn today, so the
+   placeholder text floats far from the box edge. Give the search box a normal
+   inset; other line edits keep the roomy padding. */
+QLineEdit#searchBox {
+    padding-left: 12px;
 }
 
 /* ---- breadcrumb ---- */
@@ -842,6 +897,8 @@ QLabel#about-title {
     s.replace(QStringLiteral("@TEXT_SEC"),              QString::fromLatin1(C::TEXT_SEC()));
     s.replace(QStringLiteral("@TEXT_MUTED"),            QString::fromLatin1(C::TEXT_MUTED()));
     s.replace(QStringLiteral("@TEXT"),                  QString::fromLatin1(C::FG()));
+    s.replace(QStringLiteral("@COMBO_ARROW_HOVER"),      getComboArrowIconPath(true));
+    s.replace(QStringLiteral("@COMBO_ARROW"),            getComboArrowIconPath(false));
     s.replace(QStringLiteral("@PRIMARY_HOVER"),         QString::fromLatin1(C::PRIMARY_HOVER()));
     s.replace(QStringLiteral("@PRIMARY_SOFT"),          QString::fromLatin1(C::PRIMARY_SOFT()));
     s.replace(QStringLiteral("@PRIMARY"),               QString::fromLatin1(C::PRIMARY()));

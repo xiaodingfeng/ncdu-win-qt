@@ -7,10 +7,10 @@
 #include <QComboBox>
 #include <QPushButton>
 #include <QLabel>
-#include <QMessageBox>
 
 #include "AiService.h"
 #include "I18n.h"
+#include "DialogI18n.h"
 #include "Style.h"
 #include "Logger.h"
 
@@ -47,8 +47,8 @@ AiSettingsDialog::AiSettingsDialog(AiService* service, QWidget* parent)
                 });
         connect(m_service, &AiService::apiKeyFetchFinished, this, [this]() {
             if (m_apiKeyEdit->text().trimmed().isEmpty()) {
-                QMessageBox::warning(this, I18n::tr("ai.settings.title"),
-                                     I18n::tr("ai.settings.key_fetch_failed"));
+                Dialogs::warn(this, I18n::tr("ai.settings.title"),
+                                   I18n::tr("ai.settings.key_fetch_failed"));
             }
         });
         m_service->fetchDefaults();
@@ -185,10 +185,10 @@ void AiSettingsDialog::onFetchModels()
     const QString base = m_baseUrlEdit->text().trimmed();
     const QString key = m_apiKeyEdit->text().trimmed();
     if (base.isEmpty() || key.isEmpty()) {
-        QMessageBox::warning(this, I18n::tr("ai.settings.title"),
-                             I18n::tr("ai.settings.fetch_models_failed",
-                                       QMap<QString, QString>{
-                                           {"error", I18n::tr("ai.settings.fill_url_key")}}));
+        Dialogs::warn(this, I18n::tr("ai.settings.title"),
+                           I18n::tr("ai.settings.fetch_models_failed",
+                                     QMap<QString, QString>{
+                                         {"error", I18n::tr("ai.settings.fill_url_key")}}));
         return;
     }
     // Persist the current edits so AiService::fetchModels() reads them.
@@ -219,9 +219,9 @@ void AiSettingsDialog::onFetchModels()
             [this](const QString& error) {
                 m_fetchBtn->setEnabled(true);
                 m_fetchBtn->setText(I18n::tr("ai.settings.fetch_models"));
-                QMessageBox::warning(this, I18n::tr("ai.settings.title"),
-                                     I18n::tr("ai.settings.fetch_models_failed",
-                                               QMap<QString, QString>{{"error", error}}));
+                Dialogs::warn(this, I18n::tr("ai.settings.title"),
+                                   I18n::tr("ai.settings.fetch_models_failed",
+                                             QMap<QString, QString>{{"error", error}}));
             });
     m_service->fetchModels();
 }

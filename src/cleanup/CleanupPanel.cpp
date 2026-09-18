@@ -214,6 +214,17 @@ void CleanupPanel::buildUI()
     m_scanProgress->setVisible(false);
     lay->addWidget(m_scanProgress);
 
+    // Same slot, one row below: while the cleaner works the bar is determinate
+    // (one step per checked item), which is what keeps a long cleanup from
+    // reading as a hang.
+    m_cleanProgress = new QProgressBar;
+    m_cleanProgress->setRange(0, 1);
+    m_cleanProgress->setValue(0);
+    m_cleanProgress->setTextVisible(false);
+    m_cleanProgress->setFixedHeight(4);
+    m_cleanProgress->setVisible(false);
+    lay->addWidget(m_cleanProgress);
+
     // ── Tab widget: Categories + Large Files ─────────────────────
     m_tabs = new QTabWidget;
     m_tabs->setObjectName("cleanup_tabs");
@@ -239,7 +250,13 @@ void CleanupPanel::buildUI()
             I18n::tr("cleanup.col_size"),
             I18n::tr("cleanup.col_items"),
             I18n::tr("cleanup.col_remark"),
+            I18n::tr("cleanup.col_action"),
         }, true);
+        m_catTree->header()->setSectionResizeMode(5, QHeaderView::Fixed);
+        m_catTree->header()->resizeSection(5, 56);
+        // The action column must keep its width instead of absorbing the
+        // leftover space (makeTree enables stretchLastSection).
+        m_catTree->header()->setStretchLastSection(false);
 
         auto* catBar = new QFrame;
         catBar->setFixedHeight(28);
@@ -517,6 +534,30 @@ void CleanupPanel::startScanProgress()
     retranslateDupStatus();
 }
 
+void CleanupPanel::beginCleanProgress(int totalItems)
+{
+    if (!m_cleanProgress)
+        return;
+    m_cleanProgress->setRange(0, qMax(1, totalItems));
+    m_cleanProgress->setValue(0);
+    m_cleanProgress->setVisible(true);
+}
+
+void CleanupPanel::setCleanProgress(int done, int total)
+{
+    if (!m_cleanProgress)
+        return;
+    m_cleanProgress->setRange(0, qMax(1, total));
+    m_cleanProgress->setValue(qBound(0, done, qMax(1, total)));
+    m_cleanProgress->setVisible(true);
+}
+
+void CleanupPanel::endCleanProgress()
+{
+    if (m_cleanProgress)
+        m_cleanProgress->setVisible(false);
+}
+
 void CleanupPanel::stopScanProgress()
 {
     m_scanProgress->setVisible(false);
@@ -678,6 +719,19 @@ void CleanupPanel::addTarget(const CleanupTarget& target)
         item->setForeground(1, QColor(QString::fromLatin1(C::TEXT_MUTED())));
 
     m_catTree->addTopLevelItem(item);
+
+    auto* detailBtn = new QPushButton;
+    detailBtn->setObjectName("ghost");
+    detailBtn->setCursor(Qt::PointingHandCursor);
+    detailBtn->setToolTip(I18n::tr("cleanup.view_details"));
+    detailBtn->setIcon(getDetailIcon());
+    detailBtn->setIconSize(QSize(14, 14));
+    detailBtn->setFixedHeight(22);
+    detailBtn->setStyleSheet(QStringLiteral("padding: 0; border: none; background: transparent;"));
+    connect(detailBtn, &QPushButton::clicked, this, [this, item]() {
+        onCatItemDoubleClicked(item, 0);
+    });
+    m_catTree->setItemWidget(item, 5, detailBtn);
 }
 
 void CleanupPanel::addLargeFile(const LargeFile& lf)
@@ -721,7 +775,7 @@ void CleanupPanel::addLargeFile(const LargeFile& lf)
     // Col 3: Path (clickable, reveals in Explorer)
     item->setText(3, lf.path);
     item->setForeground(3, QColor(QString::fromLatin1(C::PRIMARY())));
-    item->setToolTip(3, lf.path);
+    item->setToolTip(3, QStringLiteral("%1\n\n%2").arg(lf.path, I18n::tr("cleanup.click_to_reveal")));
 
     // Col 4: Warning text + color by level
     if (lvl == QLatin1String("C") || lvl == QLatin1String("D")) {
@@ -804,12 +858,9 @@ void CleanupPanel::addDuplicateGroup(const DuplicateGroup& group)
     m_dupTree->addTopLevelItem(topItem);
 
     // Child rows = individual files in the group.
-    // Smart default: keep ONE copy (highest dupKeepPriority) and check every
-    // other copy for deletion. The file's danger level is the dominant signal
-    // — copies in personal folders (D) are kept, cache/system-temp copies
-    // (S/A) are deleted first. On ties the first file wins; DuplicateScanner
-    // pre-sorts by shortest path so that is the likely original.
-    const int keepIdx = dupKeepIndex(group.files);
+    // Default selection is empty: nothing is checked until the user picks the
+    // copies to remove (or presses "Smart Select"). Deleting duplicates must
+    // never be a one-click default — it is always an explicit user choice.
 
     // Block tree signals while setting the initial check states: setting a
     // child to Checked changes its state (default Unchecked) and would fire
@@ -841,7 +892,7 @@ void CleanupPanel::addDuplicateGroup(const DuplicateGroup& group)
         child->setText(3, QString());  // wasted only shown on group row
         child->setText(4, df.path);
         child->setForeground(4, QColor(QString::fromLatin1(C::PRIMARY())));
-        child->setToolTip(4, df.path);
+        child->setToolTip(4, QStringLiteral("%1\n\n%2").arg(df.path, I18n::tr("cleanup.click_to_reveal")));
 
         // Col 5: File type label with type color. Store the language-
         // independent type key for filter/sort; text is refreshed in
@@ -851,12 +902,12 @@ void CleanupPanel::addDuplicateGroup(const DuplicateGroup& group)
         child->setForeground(5, QColor(typeColor(df.name)));
         child->setSortData(5, tKey);
 
-        // All files are checkable. The kept copy is left unchecked; every
-        // other copy is checked for deletion by default.
+        // All files are checkable. Nothing is checked by default — the user
+        // chooses what to remove, optionally via "Smart Select".
         // IMPORTANT: set ItemIsUserCheckable flag BEFORE setCheckState,
         // otherwise the checkbox is not rendered on child items.
         child->setFlags(child->flags() | Qt::ItemIsUserCheckable);
-        child->setCheckState(0, (i == keepIdx) ? Qt::Unchecked : Qt::Checked);
+        child->setCheckState(0, Qt::Unchecked);
     }
     topItem->setExpanded(true);
     onDupItemChanged();
@@ -1293,58 +1344,6 @@ std::vector<std::tuple<QString, QString, QString>> CleanupPanel::getCheckedDupli
     return result;
 }
 
-qint64 CleanupPanel::getCheckedTotalSize() const
-{
-    qint64 total = 0;
-    for (int i = 0; i < m_catTree->topLevelItemCount(); ++i) {
-        auto* item = m_catTree->topLevelItem(i);
-        if (item->checkState(0) != Qt::Checked)
-            continue;
-        QVariantList data = item->data(0, Qt::UserRole).toList();
-        if (data.size() < 2)
-            continue;
-        QString key = data[0].toString();
-        QString path = data[1].toString();
-        for (const auto& t : m_targets) {
-            if (t.key == key && t.path == path) {
-                total += t.size;
-                break;
-            }
-        }
-    }
-    for (int i = 0; i < m_lfTree->topLevelItemCount(); ++i) {
-        auto* item = m_lfTree->topLevelItem(i);
-        if (item->checkState(0) != Qt::Checked)
-            continue;
-        QString path = item->data(0, Qt::UserRole).toString();
-        for (const auto& lf : m_largeFiles) {
-            if (lf.path == path) {
-                total += lf.size;
-                break;
-            }
-        }
-    }
-    // Duplicate files.
-    for (int gi = 0; gi < m_dupTree->topLevelItemCount(); ++gi) {
-        auto* groupItem = m_dupTree->topLevelItem(gi);
-        for (int ci = 0; ci < groupItem->childCount(); ++ci) {
-            auto* child = groupItem->child(ci);
-            if (child->checkState(0) != Qt::Checked)
-                continue;
-            QString path = child->data(0, Qt::UserRole).toString();
-            for (const auto& dg : m_duplicateGroups) {
-                for (const auto& df : dg.files) {
-                    if (df.path == path) {
-                        total += df.size;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    return total;
-}
-
 // --------------------------------------------------------------------------- //
 // Private slots
 // --------------------------------------------------------------------------- //
@@ -1406,6 +1405,74 @@ void CleanupPanel::onLfItemClicked(QTreeWidgetItem* item, int column)
     QString path = item->data(0, Qt::UserRole).toString();
     if (!path.isEmpty())
         emit pathRevealRequested(path);
+}
+
+void CleanupPanel::onLfDetailClicked(QTreeWidgetItem* item)
+{
+    showLargeFileDetails(item);
+}
+
+// "查看详情" for a single large file: show everything the row knows about the
+// file (path, exact size, danger level, warning, type, modified time) plus a
+// shortcut to reveal it in Explorer.
+void CleanupPanel::showLargeFileDetails(QTreeWidgetItem* item)
+{
+    if (!item)
+        return;
+    const QString path = item->data(0, Qt::UserRole).toString();
+    if (path.isEmpty())
+        return;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(I18n::tr("cleanup.file_details_title"));
+    dlg.setMinimumWidth(520);
+    auto* lay = new QVBoxLayout(&dlg);
+    lay->setContentsMargins(16, 14, 16, 12);
+    lay->setSpacing(8);
+
+    auto addInfoRow = [&](const QString& labelKey, const QString& value) {
+        if (value.isEmpty())
+            return;
+        auto* row = new QHBoxLayout;
+        auto* lab = new QLabel(I18n::tr(labelKey));
+        lab->setStyleSheet(QStringLiteral("color: %1; min-width: 70px;")
+                               .arg(QString::fromLatin1(C::TEXT_MUTED())));
+        auto* val = new QLabel(value);
+        val->setWordWrap(true);
+        val->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        row->addWidget(lab);
+        row->addWidget(val, 1);
+        lay->addLayout(row);
+    };
+
+    addInfoRow("cleanup.col_name", item->text(1));
+    addInfoRow("cleanup.col_path", path);
+    addInfoRow("cleanup.col_size", item->text(2));
+    addInfoRow("cleanup.col_level", item->text(0).trimmed());
+    addInfoRow("cleanup.col_warning", item->text(4));
+    addInfoRow("cleanup.col_type", item->text(5));
+
+    const QFileInfo fi(path);
+    if (fi.exists())
+        addInfoRow("properties.modified", fi.lastModified().toString(QStringLiteral("yyyy-MM-dd hh:mm:ss")));
+
+    lay->addStretch(1);
+    auto* btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    auto* revealBtn = new QPushButton(I18n::tr("ctx.reveal"));
+    revealBtn->setCursor(Qt::PointingHandCursor);
+    connect(revealBtn, &QPushButton::clicked, &dlg, [this, &dlg, path]() {
+        emit pathRevealRequested(path);
+        dlg.accept();
+    });
+    auto* closeBtn = new QPushButton(I18n::tr("button.close"));
+    closeBtn->setCursor(Qt::PointingHandCursor);
+    connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    btnRow->addWidget(revealBtn);
+    btnRow->addWidget(closeBtn);
+    lay->addLayout(btnRow);
+
+    dlg.exec();
 }
 
 void CleanupPanel::onCatSelectAllToggled(bool checked)
@@ -1513,11 +1580,11 @@ void CleanupPanel::onDupSelectAllToggled(bool checked)
 
 void CleanupPanel::onDupSmartSelectClicked()
 {
-    // Re-apply the smart default: per visible group, keep ONE copy (highest
+    // Smart-select (on demand): per visible group, keep ONE copy (highest
     // dupKeepPriority) and check every other visible checkable copy for
-    // deletion. Uses the same dupKeepIndex() as the initial auto-selection in
-    // addDuplicateGroup, so the rules are identical. Respects the active type
-    // filter (hidden children are left untouched), mirroring onDupSelectAllToggled.
+    // deletion. This is the only place the smart rule is applied — nothing is
+    // pre-checked when a scan finishes. Respects the active type filter
+    // (hidden children are left untouched), mirroring onDupSelectAllToggled.
     m_dupTree->blockSignals(true);
     for (int gi = 0; gi < m_dupTree->topLevelItemCount(); ++gi) {
         auto* groupItem = m_dupTree->topLevelItem(gi);
@@ -1679,6 +1746,25 @@ void CleanupPanel::onAiContextMenu(QTreeWidget* tree, const QPoint& pos)
         return;
 
     auto* menu = new QMenu(this);
+    if (!path.isEmpty()) {
+        QAction* actReveal = menu->addAction(I18n::tr("ctx.reveal"));
+        connect(actReveal, &QAction::triggered, this, [this, path]() {
+            emit pathRevealRequested(path);
+        });
+    }
+    if (tree == m_catTree) {
+        QAction* actDetails = menu->addAction(I18n::tr("cleanup.view_details"));
+        connect(actDetails, &QAction::triggered, this, [this, item]() {
+            onCatItemDoubleClicked(item, 0);
+        });
+    } else if (tree == m_lfTree) {
+        QAction* actDetails = menu->addAction(I18n::tr("cleanup.view_details"));
+        connect(actDetails, &QAction::triggered, this, [this, item]() {
+            onLfDetailClicked(item);
+        });
+    }
+    menu->addSeparator();
+
     QAction* act = menu->addAction(I18n::tr("ctx.ai_analyze"));
     connect(act, &QAction::triggered, this,
             [this, category, path, size, items, level, remark]() {
@@ -2024,6 +2110,7 @@ void CleanupPanel::retranslate()
         I18n::tr("cleanup.col_size"),
         I18n::tr("cleanup.col_items"),
         I18n::tr("cleanup.col_remark"),
+        I18n::tr("cleanup.col_action"),
     });
     m_lfTree->setHeaderLabels({
         I18n::tr("cleanup.col_level"),
@@ -2082,6 +2169,8 @@ void CleanupPanel::retranslate()
                 break;
             }
         }
+        if (auto* btn = qobject_cast<QPushButton*>(m_catTree->itemWidget(item, 5)))
+            btn->setToolTip(I18n::tr("cleanup.view_details"));
     }
     // Re-translate each large-file item's warning + type label.
     for (int i = 0; i < m_lfTree->topLevelItemCount(); ++i) {

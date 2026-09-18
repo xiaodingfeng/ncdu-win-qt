@@ -16,6 +16,7 @@
 #include <QAction>
 #include <QString>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QFutureWatcher>
 #include <QNetworkAccessManager>
 #include <QPointer>
@@ -36,7 +37,10 @@ class TreemapWidget;
 class BreadcrumbBar;
 class LegendBar;
 class CleanupPanel;
+class SystemOptPanel;
 class SizeBarDelegate;
+class AppDataMovePanel;
+class AppPathSyncDialog;
 class QFrame;
 class QFile;
 class QNetworkReply;
@@ -80,8 +84,6 @@ private slots:
     // Search
     void onSearchChanged(const QString& text);
     void onSearchDebounceTimeout();
-    void collectSearchResults(const std::shared_ptr<FileNode>& node, const QString& query,
-                              std::vector<std::shared_ptr<FileNode>>& results, int& limit) const;
     void populateSearchList();
 
     // Treemap
@@ -135,6 +137,11 @@ private:
     QString m_diskFreeText;
     QString m_lastScanPath;
     bool m_scanLowMemory = false;   // set when a scanner emits a low-memory warning
+    // Wall-clock time the last scan actually took, measured from the moment the
+    // scanner thread was started to the moment its tree arrived. Shown next to
+    // the scan summary in the status bar; -1 while no scan has completed.
+    QElapsedTimer m_scanClock;
+    qint64 m_lastScanMs = -1;
     std::vector<CleanupTarget> m_cleanupTargets;
     std::vector<LargeFile> m_largeFiles;
     std::vector<DuplicateGroup> m_duplicateGroups;
@@ -153,6 +160,7 @@ private:
     TreemapWidget* m_treemap = nullptr;
     LegendBar* m_legend = nullptr;
     CleanupPanel* m_cleanupPanel = nullptr;
+    SystemOptPanel* m_systemOptPanel = nullptr;
     QTabWidget* m_rightTabs = nullptr;
     QLabel* m_statusLabel = nullptr;
     QLabel* m_hoverLabel = nullptr;
@@ -170,6 +178,20 @@ private:
     QNetworkReply* m_updateDownloadReply = nullptr;
     std::unique_ptr<QFile> m_updateDownloadFile;
     QString m_updateRemoteVer;
+
+    // Destination of the last successful "move to another drive" operation,
+    // reused as the suggested folder when syncing app save paths afterwards.
+    QString m_lastMoveTarget;
+
+    // The "move an application's data folder" tab, created on first use and owned
+    // by this window rather than by the dialog that shows it: a copy can take
+    // longer than the dialog stays open, and closing the dialog must not kill it.
+    AppDataMovePanel* m_movePanel = nullptr;
+
+    // The save-location dialog is shown non-modally, so at most one may exist at
+    // a time; this is the one currently up (null once it is closed). QPointer
+    // because the dialog deletes itself when it is closed.
+    QPointer<AppPathSyncDialog> m_syncDialog;
 
     // Menu actions (kept for retranslation).
     QMap<QString, QAction*> m_actions;
@@ -193,7 +215,6 @@ private:
     void tryEvictSubtree(std::shared_ptr<FileNode>& node);
     void goUp();
     void refresh();
-    void toggleShowFiles();
     void populateList(std::shared_ptr<FileNode> node);
     std::vector<std::shared_ptr<FileNode>> sortChildren(
         const std::vector<std::shared_ptr<FileNode>>& children) const;
@@ -211,6 +232,8 @@ private:
     void openPath(const QString& path);
     void revealInExplorer(const QString& path);
     void copyPath(const QString& path);
+    void moveToOtherDrive(const std::shared_ptr<FileNode>& node);
+    void showAppPathSync();
     void showProperties(const std::shared_ptr<FileNode>& node);
     void showAbout();
     void showThemeCustomize();

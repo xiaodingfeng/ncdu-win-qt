@@ -8,6 +8,7 @@
 class QTextEdit;
 class QPushButton;
 class QLineEdit;
+class QLabel;
 class QTimer;
 
 // AiAnalysisDialog - conversational dialog for AI disk-object analysis.
@@ -26,6 +27,10 @@ public:
     explicit AiAnalysisDialog(QWidget* parent = nullptr);
 
     void setSubject(const QString& subject);
+    // Re-label the window after a language change. This dialog is modeless and
+    // reused across questions, so it can well be open when the user switches
+    // language; without this it would stay in the old one until reopened.
+    void retranslate();
     // Optional system prompt prepended to every request (e.g. product knowledge
     // for products-wise Q&A). Cleared automatically by beginAnalysis().
     void setSystemPrompt(const QString& text);
@@ -58,7 +63,13 @@ private:
     QLineEdit* m_input = nullptr;
     QPushButton* m_sendBtn = nullptr;
     QPushButton* m_copyBtn = nullptr;
+    QPushButton* m_closeBtn = nullptr;
+    QLabel* m_title = nullptr;
     QTimer* m_renderTimer = nullptr;
+
+    // Subject the transcript is about, kept so the title can be rebuilt after a
+    // language change.
+    QString m_subject;
 
     // Committed conversation turns as (role, content) pairs.
     QVector<QPair<QString, QString>> m_history;

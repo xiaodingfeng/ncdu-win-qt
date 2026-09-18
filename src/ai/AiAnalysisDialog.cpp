@@ -39,12 +39,12 @@ void AiAnalysisDialog::buildUI()
     lay->setContentsMargins(16, 14, 16, 12);
     lay->setSpacing(10);
 
-    auto* title = new QLabel(I18n::tr("ai.analysis.title"));
-    QFont tf = title->font();
+    m_title = new QLabel(I18n::tr("ai.analysis.title"));
+    QFont tf = m_title->font();
     tf.setBold(true);
     tf.setPointSize(12);
-    title->setFont(tf);
-    lay->addWidget(title);
+    m_title->setFont(tf);
+    lay->addWidget(m_title);
 
     m_view = new QTextEdit;
     m_view->setReadOnly(true);
@@ -91,11 +91,11 @@ void AiAnalysisDialog::buildUI()
     });
     btnRow->addWidget(m_copyBtn);
 
-    auto* closeBtn = new QPushButton(I18n::tr("button.close"));
-    closeBtn->setObjectName("primary");
-    closeBtn->setCursor(Qt::PointingHandCursor);
-    connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
-    btnRow->addWidget(closeBtn);
+    m_closeBtn = new QPushButton(I18n::tr("button.close"));
+    m_closeBtn->setObjectName("primary");
+    m_closeBtn->setCursor(Qt::PointingHandCursor);
+    connect(m_closeBtn, &QPushButton::clicked, this, &QDialog::accept);
+    btnRow->addWidget(m_closeBtn);
     lay->addLayout(btnRow);
 
     setStyleSheet(QStringLiteral("QDialog { background: %1; color: %2; }"
@@ -121,11 +121,26 @@ void AiAnalysisDialog::buildUI()
 // --------------------------------------------------------------------------- //
 void AiAnalysisDialog::setSubject(const QString& subject)
 {
+    m_subject = subject;
     if (subject.isEmpty()) {
         setWindowTitle(I18n::tr("ai.analysis.title"));
         return;
     }
     setWindowTitle(I18n::tr("ai.analysis.title") + QStringLiteral(" — ") + subject);
+}
+
+void AiAnalysisDialog::retranslate()
+{
+    setSubject(m_subject);   // rebuilds the window title with the subject
+    m_title->setText(I18n::tr("ai.analysis.title"));
+    m_input->setPlaceholderText(I18n::tr("ai.analysis.input_placeholder"));
+    m_sendBtn->setText(I18n::tr("ai.analysis.send"));
+    m_copyBtn->setText(I18n::tr("ai.analysis.copy"));
+    m_closeBtn->setText(I18n::tr("button.close"));
+    // The transcript carries translated role labels and the "analyzing…" line,
+    // so it is re-rendered from the turns still held in memory. Message bodies
+    // themselves are what the user or the model wrote and stay untouched.
+    renderNow();
 }
 
 void AiAnalysisDialog::setSystemPrompt(const QString& text)

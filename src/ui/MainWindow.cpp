@@ -8,6 +8,7 @@
 #include <QColorDialog>
 #include <QCursor>
 #include <QDialog>
+#include <QDateTime>
 #include <QButtonGroup>
 #include <QRadioButton>
 #include <QFileDialog>
@@ -71,6 +72,8 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
+#include <memory>
 #include <stack>
 #include <unordered_set>
 #include <set>
@@ -78,6 +81,7 @@
 
 #include "Style.h"
 #include "I18n.h"
+#include "DialogI18n.h"
 #include "Identify.h"
 #include "WinApi.h"
 #include "Logger.h"
@@ -87,6 +91,10 @@
 #include "BreadcrumbBar.h"
 #include "LegendBar.h"
 #include "CleanupPanel.h"
+#include "SystemOptPanel.h"
+#include "SafeMoveWorker.h"
+#include "AppPathSyncDialog.h"
+#include "AppDataMovePanel.h"
 #include "MftScanner.h"
 #include "version.h"
 #include "AiService.h"
@@ -237,11 +245,31 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow()
 {
+    // The save-location dialog borrows the move tab and hands it back in its own
+    // destructor. Take it down first, while this window is still whole, so that
+    // hand-back happens before the widget tree comes apart. closeEvent normally
+    // keeps this state from being reached; a forced shutdown does not.
+    delete m_syncDialog;
     // Threads are cancelled and waited in closeEvent; nothing extra here.
 }
 
 void MainWindow::closeEvent(QCloseEvent* e)
 {
+    // The save-location dialog no longer holds this window back, which means it
+    // can still be open — and it can be in the middle of a copy. Its window is
+    // the one that owns that job, so closing this one while it is up would pull
+    // the ground out from under the user. Ask them to close it first.
+    if (m_syncDialog) {
+        e->ignore();
+        if (m_syncDialog->isMinimized())
+            m_syncDialog->setWindowState(m_syncDialog->windowState() & ~Qt::WindowMinimized);
+        m_syncDialog->show();
+        m_syncDialog->raise();
+        m_syncDialog->activateWindow();
+        Dialogs::info(this, I18n::tr("app_sync.title"), I18n::tr("app_sync.close_first"));
+        return;
+    }
+
     if (m_scanner) {
         if (auto* ds = dynamic_cast<DiskScanner*>(m_scanner))
             ds->cancel();
@@ -340,13 +368,13 @@ void MainWindow::buildUI()
         bar->setObjectName("breadcrumb");
         bar->setFixedHeight(44);
         auto* lay = new QHBoxLayout(bar);
-        lay->setContentsMargins(18, 4, 18, 4);
+        // No leading margin: the search box lines up with the file tree's left
+        // edge below it, which starts at 0 as well.
+        lay->setContentsMargins(0, 4, 18, 4);
         lay->setSpacing(12);
 
-        m_breadcrumb = new BreadcrumbBar;
-        lay->addWidget(m_breadcrumb, 1);
-
         m_searchBox = new QLineEdit;
+        m_searchBox->setObjectName(QStringLiteral("searchBox"));
         m_searchBox->setPlaceholderText(I18n::tr("search.placeholder"));
         m_searchBox->setMinimumWidth(280);
         m_searchBox->setMaximumWidth(380);
@@ -364,6 +392,9 @@ void MainWindow::buildUI()
         m_refreshBtn->setToolTip(I18n::tr("menu.view.refresh"));
         m_refreshBtn->setFixedWidth(36);
         lay->addWidget(m_refreshBtn);
+
+        m_breadcrumb = new BreadcrumbBar;
+        lay->addWidget(m_breadcrumb, 1);
 
         root->addWidget(bar);
     }
@@ -433,6 +464,12 @@ void MainWindow::buildUI()
         m_cleanupPanel = new CleanupPanel;
         m_rightTabs->addTab(m_cleanupPanel, I18n::tr("tab.cleanup"));
 
+        // Tab 3: System optimization
+        m_systemOptPanel = new SystemOptPanel;
+        m_rightTabs->addTab(m_systemOptPanel, I18n::tr("tab.sysopt"));
+        connect(m_systemOptPanel, &SystemOptPanel::requestAppPathSync,
+                this, &MainWindow::showAppPathSync);
+
         splitter->addWidget(m_rightTabs);
         splitter->setStretchFactor(0, 3);
         splitter->setStretchFactor(1, 2);
@@ -501,6 +538,9 @@ void MainWindow::buildMenu()
     m_actions["file.rescan"] = fileMenu->addAction(I18n::tr("menu.file.rescan"));
     m_actions["file.rescan"]->setShortcut(QKeySequence("F5"));
     connect(m_actions["file.rescan"], &QAction::triggered, this, QOverload<>::of(&MainWindow::refresh));
+
+    m_actions["file.app_sync"] = fileMenu->addAction(I18n::tr("app_sync.menu"));
+    connect(m_actions["file.app_sync"], &QAction::triggered, this, &MainWindow::showAppPathSync);
 
     fileMenu->addSeparator();
 
@@ -689,7 +729,7 @@ void MainWindow::onScanClicked()
     if (path.isEmpty())
         path = getHomeDir();
     if (!QFileInfo::exists(path)) {
-        QMessageBox::warning(this, APP_NAME,
+        Dialogs::warn(this, APP_NAME,
             I18n::tr("msg.path_missing", QMap<QString, QString>{{"path", path}}));
         return;
     }
@@ -779,6 +819,11 @@ void MainWindow::startScan(const QString& path)
     m_breadcrumb->setNode(nullptr);
     m_scanLowMemory = false;
 
+    // Started here, not when the tree arrives: the number the status bar shows
+    // is how long the user waited for this scan, whichever scanner runs it.
+    m_lastScanMs = -1;
+    m_scanClock.start();
+
     // Use the fast MFT scanner for drive roots and well-known huge system
     // directories; for smaller subdirectories a recursive DiskScanner is faster
     // (scoped to the chosen folder) instead of always paying the full-volume
@@ -840,6 +885,10 @@ void MainWindow::onScanDone(std::shared_ptr<FileNode> root)
     m_progress->setVisible(false);
     m_root = root;
     m_lastScanPath = root->path;
+    // Frozen here rather than read on demand: the status bar is re-asserted
+    // after later phases (cleanup, duplicate scan) and must keep reporting this
+    // scan's duration, not however long the app has been open since.
+    m_lastScanMs = m_scanClock.isValid() ? m_scanClock.elapsed() : -1;
     navigateTo(root);
 
     updateScannedStatus();
@@ -848,7 +897,7 @@ void MainWindow::onScanDone(std::shared_ptr<FileNode> root)
     // If the scanner ran out of memory, tell the user clearly instead of
     // leaving them staring at an empty/incomplete tree with no explanation.
     if (m_scanLowMemory) {
-        QMessageBox::warning(this, APP_NAME, I18n::tr("msg.low_memory"));
+        Dialogs::warn(this, APP_NAME, I18n::tr("msg.low_memory"));
         m_scanLowMemory = false;
     }
 
@@ -870,7 +919,7 @@ void MainWindow::onScanError(const QString& key, const QMap<QString, QString>& a
         // Translate the scanner error key into a user-facing message.
         QString msg = I18n::tr(key, args);
         m_statusLabel->setText(I18n::tr("status.scan_failed", QMap<QString, QString>{{"msg", msg}}));
-        QMessageBox::warning(this, APP_NAME,
+        Dialogs::warn(this, APP_NAME,
             I18n::tr("msg.scan_failed", QMap<QString, QString>{{"msg", msg}}));
     }
 }
@@ -1031,13 +1080,6 @@ void MainWindow::tryEvictSubtree(std::shared_ptr<FileNode>& node)
     }
 }
 
-void MainWindow::toggleShowFiles()
-{
-    QAction* act = m_actions.value("view.show_files");
-    if (act)
-        onShowFilesToggled(act->isChecked());
-}
-
 void MainWindow::onShowFilesToggled(bool checked)
 {
     m_showFiles = checked;
@@ -1094,7 +1136,7 @@ void MainWindow::onItemDoubleClicked(QTreeWidgetItem* item, int /*col*/)
 
 void MainWindow::showSkippedMsg()
 {
-    QMessageBox::information(this, APP_NAME, I18n::tr("msg.skipped_contents"));
+    Dialogs::info(this, APP_NAME, I18n::tr("msg.skipped_contents"));
 }
 
 void MainWindow::updateDiskFreeLabel(const QString& path)
@@ -1117,12 +1159,20 @@ void MainWindow::updateScannedStatus()
     // the status bar with their own progress text.
     if (!m_root)
         return;
-    m_statusLabel->setText(I18n::tr("status.scanned", QMap<QString, QString>{
+    QMap<QString, QString> args{
         {"path", m_root->path},
         {"size", humanSize(m_root->size)},
         {"files", humanCount(m_root->fileCount)},
         {"folders", humanCount(m_root->dirCount)},
-    }));
+    };
+    // The duration is part of the summary, so an entry that has no measured time
+    // (a tree restored from cache, say) simply leaves the token out rather than
+    // printing a placeholder.
+    const QString key = m_lastScanMs >= 0 ? QStringLiteral("status.scanned")
+                                          : QStringLiteral("status.scanned_notime");
+    if (m_lastScanMs >= 0)
+        args.insert(QStringLiteral("time"), humanDuration(m_lastScanMs));
+    m_statusLabel->setText(I18n::tr(key, args));
 }
 
 void MainWindow::onTreemapHover(std::shared_ptr<FileNode> node)
@@ -1353,49 +1403,6 @@ void MainWindow::onSearchDebounceTimeout()
     m_searchWatcher->setFuture(future);
 }
 
-void MainWindow::collectSearchResults(const std::shared_ptr<FileNode>& node,
-                                       const QString& query,
-                                       std::vector<std::shared_ptr<FileNode>>& results,
-                                       int& limit) const
-{
-    if (!node || limit <= 0)
-        return;
-
-    // If query contains '*', use wildcard matching (e.g. "*.txt", "*test*")
-    // Otherwise, use case-insensitive substring match.
-    bool hasWildcard = query.contains(QLatin1Char('*'));
-    QRegularExpression re;
-    if (hasWildcard) {
-        re.setPattern(QRegularExpression::wildcardToRegularExpression(query));
-        re.setPatternOptions(QRegularExpression::CaseInsensitiveOption);
-    }
-    const QString lowerQuery = hasWildcard ? QString() : query.toLower();
-
-    // Iterative DFS (explicit node stack) — avoids C++ stack overflow on
-    // deeply nested directory trees.
-    std::stack<std::shared_ptr<FileNode>> pending;
-    pending.push(node);
-    while (!pending.empty() && limit > 0) {
-        auto n = pending.top();
-        pending.pop();
-        if (!n)
-            continue;
-        for (const auto& child : n->children) {
-            if (limit <= 0)
-                break;
-            bool match = hasWildcard
-                             ? re.match(child->name).hasMatch()
-                             : child->name.toLower().contains(lowerQuery);
-            if (match) {
-                results.push_back(child);
-                --limit;
-            }
-            if (child->isDir())
-                pending.push(child);
-        }
-    }
-}
-
 QString MainWindow::buildRowTooltip(const std::shared_ptr<FileNode>& node) const
 {
     QStringList lines;
@@ -1595,6 +1602,9 @@ void MainWindow::onContextMenu(const QPoint& pos)
     QAction* actCopy = menu->addAction(I18n::tr("ctx.copy_path"));
     connect(actCopy, &QAction::triggered, this, [this, node]() { copyPath(node->path); });
 
+    QAction* actMove = menu->addAction(I18n::tr("ctx.move_to"));
+    connect(actMove, &QAction::triggered, this, [this, node]() { moveToOtherDrive(node); });
+
     menu->addSeparator();
 
     QAction* actRecycle = menu->addAction(I18n::tr("ctx.recycle"));
@@ -1604,6 +1614,9 @@ void MainWindow::onContextMenu(const QPoint& pos)
     connect(actPerm, &QAction::triggered, this, QOverload<>::of(&MainWindow::deletePermanentSelected));
 
     menu->addSeparator();
+
+    QAction* actSync = menu->addAction(I18n::tr("app_sync.menu"));
+    connect(actSync, &QAction::triggered, this, &MainWindow::showAppPathSync);
 
     QAction* actProp = menu->addAction(I18n::tr("ctx.properties"));
     connect(actProp, &QAction::triggered, this, [this, node]() { showProperties(node); });
@@ -1616,6 +1629,189 @@ void MainWindow::onContextMenu(const QPoint& pos)
 
     menu->exec(QCursor::pos());
     delete menu;
+}
+
+void MainWindow::moveToOtherDrive(const std::shared_ptr<FileNode>& node)
+{
+    if (!node || node->parent.expired()) {
+        Dialogs::warn(this, APP_NAME, I18n::tr("dialog.delete.warn_root"));
+        return;
+    }
+    // The Windows directory itself is off limits for every direct action; the
+    // cleanup categories are the only route into it.
+    if (WinApi::isWindowsRoot(node->path)) {
+        Dialogs::warn(this, APP_NAME, I18n::tr("dialog.protect.windows"));
+        return;
+    }
+
+    // Determine default move directory from QSettings or another drive
+    QSettings settings(QStringLiteral("HKEY_CURRENT_USER\\Software\\NcduWin"), QSettings::NativeFormat);
+    QString defaultDir = settings.value(QStringLiteral("defaultMovePath")).toString();
+    if (defaultDir.isEmpty() || !QDir(defaultDir).exists()) {
+        QString curDrive = node->path.left(2).toUpper();
+        const QStringList drives = listDrives();
+        QString otherDrive;
+        for (const auto& d : drives) {
+            if (!d.startsWith(curDrive, Qt::CaseInsensitive)) {
+                otherDrive = d;
+                break;
+            }
+        }
+        if (otherDrive.isEmpty()) {
+            defaultDir = QDir::homePath() + QStringLiteral("/NcduWinMoved");
+        } else {
+            defaultDir = otherDrive + QStringLiteral("NcduWinMoved");
+        }
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(I18n::tr("move.title"));
+    dlg.setMinimumWidth(500);
+    auto* lay = new QVBoxLayout(&dlg);
+    lay->setContentsMargins(20, 20, 20, 16);
+    lay->setSpacing(12);
+
+    auto* title = new QLabel(I18n::tr("move.title"));
+    title->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700; color: %1;")
+        .arg(QString::fromLatin1(C::FG())));
+    lay->addWidget(title);
+
+    auto* tip = new QLabel(I18n::tr("move.tip"));
+    tip->setWordWrap(true);
+    tip->setStyleSheet(QStringLiteral("font-size: 12px; color: %1; background: %2; border: 1px solid %3; border-radius: 6px; padding: 8px;")
+        .arg(QString::fromLatin1(C::TEXT_SEC()), QString::fromLatin1(C::SURFACE_ALT()), QString::fromLatin1(C::BORDER())));
+    lay->addWidget(tip);
+
+    auto* srcLabel = new QLabel(QStringLiteral("<b>%1</b> %2 (%3)")
+        .arg(I18n::tr("move.source"), node->path, humanSize(node->size)));
+    srcLabel->setWordWrap(true);
+    lay->addWidget(srcLabel);
+
+    auto* targetRow = new QHBoxLayout;
+    auto* targetLabel = new QLabel(I18n::tr("move.target"));
+    auto* targetEdit = new QLineEdit(defaultDir);
+    auto* browseBtn = new QPushButton(I18n::tr("button.browse"));
+    browseBtn->setCursor(Qt::PointingHandCursor);
+    connect(browseBtn, &QPushButton::clicked, &dlg, [&dlg, targetEdit]() {
+        QString dir = QFileDialog::getExistingDirectory(&dlg, I18n::tr("move.select_folder"), targetEdit->text());
+        if (!dir.isEmpty()) targetEdit->setText(QDir::toNativeSeparators(dir));
+    });
+    targetRow->addWidget(targetLabel);
+    targetRow->addWidget(targetEdit, 1);
+    targetRow->addWidget(browseBtn);
+    lay->addLayout(targetRow);
+
+    auto* chkDefault = new QCheckBox(I18n::tr("move.set_default"));
+    chkDefault->setChecked(true);
+    lay->addWidget(chkDefault);
+
+    lay->addSpacing(8);
+    auto* btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    auto* cancelBtn = new QPushButton(I18n::tr("button.cancel"));
+    cancelBtn->setCursor(Qt::PointingHandCursor);
+    connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+    auto* startBtn = new QPushButton(I18n::tr("move.btn_start"));
+    startBtn->setObjectName(QStringLiteral("primary"));
+    startBtn->setCursor(Qt::PointingHandCursor);
+    connect(startBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    btnRow->addWidget(cancelBtn);
+    btnRow->addWidget(startBtn);
+    lay->addLayout(btnRow);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    QString chosenDir = targetEdit->text().trimmed();
+    if (chosenDir.isEmpty())
+        return;
+
+    if (chkDefault->isChecked()) {
+        settings.setValue(QStringLiteral("defaultMovePath"), chosenDir);
+    }
+    m_lastMoveTarget = chosenDir;
+
+    auto* progress = new QProgressDialog(I18n::tr("move.progress_title"), I18n::tr("button.cancel"), 0, 100, this);
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setWindowTitle(I18n::tr("move.title"));
+    progress->setMinimumDuration(0);
+    progress->setValue(0);
+
+    auto* worker = new SafeMoveWorker(node->path, chosenDir, this);
+    connect(worker, &SafeMoveWorker::progress, progress, [progress](int pct, qint64 copied, qint64 total, const QString& file) {
+        progress->setValue(pct);
+        progress->setLabelText(QStringLiteral("[%1% - %2 / %3]\n%4")
+            .arg(pct).arg(humanSize(copied)).arg(humanSize(total)).arg(file));
+    });
+    connect(worker, &SafeMoveWorker::statusMessage, progress, [progress](const QString& msg) {
+        progress->setLabelText(msg);
+    });
+    connect(progress, &QProgressDialog::canceled, worker, [worker]() {
+        worker->cancel();
+    });
+
+    connect(worker, &QThread::finished, this, [this, worker, progress, node]() {
+        progress->close();
+        progress->deleteLater();
+
+        if (worker->isSuccess()) {
+            QString finalDst = worker->finalDestPath();
+            afterDelete({node});
+            if (m_root)
+                updateDiskFreeLabel(m_root->path);
+
+            QMessageBox box(this);
+            box.setIcon(QMessageBox::Information);
+            box.setWindowTitle(I18n::tr("move.title"));
+            box.setText(I18n::tr("move.success", QMap<QString, QString>{{"path", finalDst}}));
+            box.setInformativeText(I18n::tr("move.sync_ask"));
+            auto* syncBtn = box.addButton(I18n::tr("app_sync.menu"), QMessageBox::AcceptRole);
+            box.addButton(I18n::tr("button.close"), QMessageBox::RejectRole);
+            box.setDefaultButton(qobject_cast<QPushButton*>(syncBtn));
+            box.exec();
+
+            if (box.clickedButton() == syncBtn) {
+                showAppPathSync();
+            }
+        } else {
+            Dialogs::warn(this, I18n::tr("move.title"),
+                I18n::tr("move.failed", QMap<QString, QString>{{"msg", worker->errorString()}}));
+        }
+        worker->deleteLater();
+    });
+
+    worker->start();
+}
+
+void MainWindow::showAppPathSync()
+{
+    // Shown non-modally: picking a target drive, listing a hundred thousand data
+    // folders and copying tens of gigabytes is a long business, and there is no
+    // reason for it to block scanning, cleaning up or minimising the main
+    // window. Only closing the main window waits for it (see closeEvent).
+    if (m_syncDialog) {
+        if (m_syncDialog->isMinimized())
+            m_syncDialog->setWindowState(m_syncDialog->windowState() & ~Qt::WindowMinimized);
+        m_syncDialog->show();
+        m_syncDialog->raise();
+        m_syncDialog->activateWindow();
+        return;
+    }
+
+    // The move tab is created once and outlives the dialog: a folder with tens of
+    // gigabytes in it takes far longer to copy than a dialog stays open, and the
+    // work has to keep going (with its progress) after the user closes it.
+    if (!m_movePanel)
+        m_movePanel = new AppDataMovePanel(this);
+
+    auto* dlg = new AppPathSyncDialog(this, m_lastMoveTarget, m_movePanel);
+    m_syncDialog = dlg;
+    // Deletes itself on close; m_syncDialog goes null with it, because QPointer
+    // watches the object rather than this window's destruction order.
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->show();
+    dlg->raise();
+    dlg->activateWindow();
 }
 
 void MainWindow::openPath(const QString& path)
@@ -1646,12 +1842,25 @@ void MainWindow::collectDeletable(
         auto n = it->data(0, Qt::UserRole).value<std::shared_ptr<FileNode>>();
         if (!n)
             continue;
-        if (n->parent.expired()) {
-            rejected.push_back(n);  // refuse to delete top-level drive/folder
+        if (n->parent.expired() || WinApi::isWindowsRoot(n->path)) {
+            // Top-level drive/folder, and the Windows directory itself: the only
+            // thing allowed to touch what is inside it is the cleanup categories.
+            rejected.push_back(n);
         } else {
             deletable.push_back(n);
         }
     }
+}
+
+// True when the refusal was about a protected system folder rather than a plain
+// top-level entry, so the user gets the matching explanation.
+static bool hasProtectedSystemDir(const std::vector<std::shared_ptr<FileNode>>& rejected)
+{
+    for (const auto& n : rejected) {
+        if (n && WinApi::isWindowsRoot(n->path))
+            return true;
+    }
+    return false;
 }
 
 void MainWindow::formatNames(const std::vector<std::shared_ptr<FileNode>>& nodes,
@@ -1676,46 +1885,57 @@ void MainWindow::recycleSelected()
     if (nodes.empty() && rejected.empty())
         return;
     if (!rejected.empty()) {
-        QMessageBox::warning(this, APP_NAME, I18n::tr("dialog.delete.warn_root"));
+        Dialogs::warn(this, APP_NAME,
+            I18n::tr(hasProtectedSystemDir(rejected) ? "dialog.protect.windows"
+                                                     : "dialog.delete.warn_root"));
         if (nodes.empty())
             return;
     }
 
     QString names, more;
     formatNames(nodes, names, more);
-    auto reply = QMessageBox::question(
-        this, I18n::tr("dialog.recycle.title"),
+    const bool confirmed = Dialogs::confirm(this, I18n::tr("dialog.recycle.title"),
         I18n::tr("dialog.recycle.body", QMap<QString, QString>{
             {"n", QString::number(static_cast<int>(nodes.size()))},
             {"names", names},
             {"more", more},
-        }),
-        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-    if (reply != QMessageBox::Yes)
+        }));
+    if (!confirmed)
         return;
 
     QStringList paths;
     for (const auto& n : nodes)
         paths << n->path;
 
-    // Run in background to keep UI responsive for large selections.
+    // Run in the background, one path at a time, so the dialog can show a real
+    // percentage and the item being worked on — an indeterminate spinner over a
+    // big selection reads exactly like a freeze.
     const int n = static_cast<int>(nodes.size());
     auto* progress = new QProgressDialog(
         I18n::tr("dialog.recycle.progress", QMap<QString, QString>{{"n", QString::number(n)}}),
-        QString(), 0, 0, this);
+        I18n::tr("button.cancel"), 0, n, this);
     progress->setWindowModality(Qt::WindowModal);
     progress->setWindowTitle(I18n::tr("dialog.recycle.title"));
-    progress->setCancelButton(nullptr);
     progress->setMinimumDuration(0);
-    progress->show();
+    progress->setValue(0);
+
+    const auto cancelledFlag = std::make_shared<std::atomic<bool>>(false);
+    connect(progress, &QProgressDialog::canceled, progress,
+            [cancelledFlag]() { cancelledFlag->store(true); });
 
     auto* watcher = new QFutureWatcher<bool>(this);
     auto nodeCopy = nodes;
     connect(watcher, &QFutureWatcher<bool>::finished, this,
-            [this, nodeCopy, n, progress, watcher]() {
+            [this, nodeCopy, n, progress, watcher, cancelledFlag]() {
                 progress->deleteLater();
                 const bool ok = watcher->result();
                 watcher->deleteLater();
+                if (cancelledFlag->load()) {
+                    // Whatever was already recycled stays recycled; the rest
+                    // was deliberately left untouched.
+                    m_statusLabel->setText(I18n::tr("dialog.recycle.cancelled"));
+                    return;
+                }
                 if (ok) {
                     afterDelete(nodeCopy);
                     if (m_root)
@@ -1725,18 +1945,29 @@ void MainWindow::recycleSelected()
                 } else {
                     // Recycle bin may fail for very large files or long paths.
                     // Offer permanent delete as a fallback.
-                    auto reply = QMessageBox::question(this,
-                        I18n::tr("dialog.recycle.fallback_title"),
-                        I18n::tr("dialog.recycle.fallback_body"),
-                        QMessageBox::Yes | QMessageBox::Cancel,
-                        QMessageBox::Cancel);
-                    if (reply == QMessageBox::Yes)
+                    if (Dialogs::confirm(this, I18n::tr("dialog.recycle.fallback_title"),
+                                         I18n::tr("dialog.recycle.fallback_body")))
                         deletePermanentAsync(nodeCopy);
                 }
             });
 
-    watcher->setFuture(QtConcurrent::run([paths]() -> bool {
-        return WinApi::sendToRecycleBin(paths);
+    watcher->setFuture(QtConcurrent::run([paths, progress, cancelledFlag]() -> bool {
+        bool allOk = true;
+        const int total = paths.size();
+        for (int i = 0; i < total; ++i) {
+            if (cancelledFlag->load())
+                return false;
+            QMetaObject::invokeMethod(progress, [progress, i, total, path = paths.at(i)]() {
+                progress->setValue(i);
+                progress->setLabelText(I18n::tr("dialog.recycle.progress_item",
+                    QMap<QString, QString>{{"done", QString::number(i + 1)},
+                                           {"total", QString::number(total)},
+                                           {"path", path}}));
+            }, Qt::QueuedConnection);
+            if (!WinApi::sendToRecycleBin(QStringList{paths.at(i)}))
+                allOk = false;
+        }
+        return allOk;
     }));
 }
 
@@ -1747,22 +1978,22 @@ void MainWindow::deletePermanentSelected()
     if (nodes.empty() && rejected.empty())
         return;
     if (!rejected.empty()) {
-        QMessageBox::warning(this, APP_NAME, I18n::tr("dialog.delete.warn_root"));
+        Dialogs::warn(this, APP_NAME,
+            I18n::tr(hasProtectedSystemDir(rejected) ? "dialog.protect.windows"
+                                                     : "dialog.delete.warn_root"));
         if (nodes.empty())
             return;
     }
 
     QString names, more;
     formatNames(nodes, names, more);
-    auto reply = QMessageBox::question(
-        this, I18n::tr("dialog.delete.title"),
+    const bool confirmed = Dialogs::confirm(this, I18n::tr("dialog.delete.title"),
         I18n::tr("dialog.delete.body", QMap<QString, QString>{
             {"n", QString::number(static_cast<int>(nodes.size()))},
             {"names", names},
             {"more", more},
-        }),
-        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-    if (reply != QMessageBox::Yes)
+        }));
+    if (!confirmed)
         return;
 
     deletePermanentAsync(nodes);
@@ -1778,20 +2009,27 @@ void MainWindow::deletePermanentAsync(
     const int n = static_cast<int>(nodes.size());
     auto* progress = new QProgressDialog(
         I18n::tr("dialog.delete.progress", QMap<QString, QString>{{"n", QString::number(n)}}),
-        QString(), 0, 0, this);
+        I18n::tr("button.cancel"), 0, n, this);
     progress->setWindowModality(Qt::WindowModal);
     progress->setWindowTitle(I18n::tr("dialog.delete.title"));
-    progress->setCancelButton(nullptr);
     progress->setMinimumDuration(0);
-    progress->show();
+    progress->setValue(0);
+
+    const auto cancelledFlag = std::make_shared<std::atomic<bool>>(false);
+    connect(progress, &QProgressDialog::canceled, progress,
+            [cancelledFlag]() { cancelledFlag->store(true); });
 
     auto* watcher = new QFutureWatcher<bool>(this);
     auto nodeCopy = nodes;
     connect(watcher, &QFutureWatcher<bool>::finished, this,
-            [this, nodeCopy, n, progress, watcher]() {
+            [this, nodeCopy, n, progress, watcher, cancelledFlag]() {
                 progress->deleteLater();
                 const bool ok = watcher->result();
                 watcher->deleteLater();
+                if (cancelledFlag->load()) {
+                    m_statusLabel->setText(I18n::tr("dialog.delete.cancelled"));
+                    return;
+                }
                 if (ok) {
                     afterDelete(nodeCopy);
                     if (m_root)
@@ -1799,13 +2037,27 @@ void MainWindow::deletePermanentAsync(
                     m_statusLabel->setText(I18n::tr("status.deleted",
                         QMap<QString, QString>{{"n", QString::number(n)}}));
                 } else {
-                    QMessageBox::warning(this, APP_NAME,
-                        I18n::tr("dialog.delete.failed"));
+                    Dialogs::warn(this, APP_NAME, I18n::tr("dialog.delete.failed"));
                 }
             });
 
-    watcher->setFuture(QtConcurrent::run([paths]() -> bool {
-        return WinApi::deletePermanent(paths);
+    watcher->setFuture(QtConcurrent::run([paths, progress, cancelledFlag]() -> bool {
+        bool allOk = true;
+        const int total = paths.size();
+        for (int i = 0; i < total; ++i) {
+            if (cancelledFlag->load())
+                return false;
+            QMetaObject::invokeMethod(progress, [progress, i, total, path = paths.at(i)]() {
+                progress->setValue(i);
+                progress->setLabelText(I18n::tr("dialog.delete.progress_item",
+                    QMap<QString, QString>{{"done", QString::number(i + 1)},
+                                           {"total", QString::number(total)},
+                                           {"path", path}}));
+            }, Qt::QueuedConnection);
+            if (!WinApi::deletePermanent(QStringList{paths.at(i)}))
+                allOk = false;
+        }
+        return allOk;
     }));
 }
 
@@ -1991,6 +2243,22 @@ void MainWindow::showProperties(const std::shared_ptr<FileNode>& node)
     if (node->isDir()) {
         addRow("properties.files", humanCount(node->fileCount));
         addRow("properties.folders", humanCount(node->dirCount));
+    }
+
+    QFileInfo fi(node->path);
+    if (fi.exists()) {
+        auto fmtTime = [](const QDateTime& dt) -> QString {
+            return dt.isValid() ? dt.toString(QStringLiteral("yyyy-MM-dd hh:mm:ss")) : QStringLiteral("-");
+        };
+        QDateTime birth = fi.birthTime();
+        if (birth.isValid())
+            addRow("properties.created", fmtTime(birth));
+        QDateTime mod = fi.lastModified();
+        if (mod.isValid())
+            addRow("properties.modified", fmtTime(mod));
+        QDateTime acc = fi.lastRead();
+        if (acc.isValid())
+            addRow("properties.accessed", fmtTime(acc));
     }
 
     QString desc = Identify::describe(node, [](const QString& key) { return I18n::tr(key); });
@@ -2238,12 +2506,9 @@ void MainWindow::checkForUpdate(bool silent)
         if (reply->error() != QNetworkReply::NoError) {
             if (!silent) {
                 m_statusLabel->setText(QString());
-                QMessageBox msgBox(this);
-                msgBox.setIcon(QMessageBox::Warning);
-                msgBox.setWindowTitle(I18n::tr("update.check_failed"));
-                msgBox.setText(I18n::tr("update.check_failed_body",
-                    QMap<QString, QString>{{"error", reply->errorString()}}));
-                msgBox.exec();
+                Dialogs::warn(this, I18n::tr("update.check_failed"),
+                    I18n::tr("update.check_failed_body",
+                        QMap<QString, QString>{{"error", reply->errorString()}}));
             } else {
                 Logger::warn(QStringLiteral("Silent update check failed: %1")
                                  .arg(reply->errorString()));
@@ -2256,12 +2521,9 @@ void MainWindow::checkForUpdate(bool silent)
         if (remote.isNull()) {
             if (!silent) {
                 m_statusLabel->setText(QString());
-                QMessageBox msgBox(this);
-                msgBox.setIcon(QMessageBox::Warning);
-                msgBox.setWindowTitle(I18n::tr("update.check_failed"));
-                msgBox.setText(I18n::tr("update.check_failed_body",
-                    QMap<QString, QString>{{"error", QStringLiteral("Invalid version response")}}));
-                msgBox.exec();
+                Dialogs::warn(this, I18n::tr("update.check_failed"),
+                    I18n::tr("update.check_failed_body",
+                        QMap<QString, QString>{{"error", QStringLiteral("Invalid version response")}}));
             } else {
                 Logger::warn(QStringLiteral("Silent update check: invalid version response"));
             }
@@ -2333,12 +2595,9 @@ void MainWindow::checkForUpdate(bool silent)
             }
         } else {
             if (!silent) {
-                QMessageBox msgBox(this);
-                msgBox.setIcon(QMessageBox::Information);
-                msgBox.setWindowTitle(I18n::tr("update.current"));
-                msgBox.setText(I18n::tr("update.current_body",
-                    QMap<QString, QString>{{"version", APP_VERSION}}));
-                msgBox.exec();
+                Dialogs::info(this, I18n::tr("update.current"),
+                    I18n::tr("update.current_body",
+                        QMap<QString, QString>{{"version", APP_VERSION}}));
             }
             // silent + up-to-date: nothing to show.
         }
@@ -2862,6 +3121,7 @@ void MainWindow::onCleanupFinished(int totalDeleted, int totalSkipped, qint64 to
 {
     m_cleanupWorker = nullptr;
     m_cleanupPanel->setCleaning(false);
+    m_cleanupPanel->endCleanProgress();
     m_cleanupPanel->removeCleanedItems(successItems);
     syncTreeAfterCleanup(successItems);
 
@@ -2892,7 +3152,7 @@ void MainWindow::onCleanupFinished(int totalDeleted, int totalSkipped, qint64 to
         if (static_cast<int>(failedItems.size()) > 10)
             failedMsg += I18n::tr("cleanup.failed_more", QMap<QString, QString>{
                 {"n", QString::number(static_cast<int>(failedItems.size()) - 10)}});
-        QMessageBox::warning(this, I18n::tr("cleanup.failed_title"),
+        Dialogs::warn(this, I18n::tr("cleanup.failed_title"),
             I18n::tr("cleanup.failed_body", QMap<QString, QString>{{"items", failedMsg}}));
     }
 }
@@ -2937,6 +3197,12 @@ void MainWindow::refreshTheme()
     qApp->setStyleSheet(loadQSS());
     // Panels with baked inline styles need to recompute them.
     m_cleanupPanel->refreshTheme();
+    if (m_systemOptPanel)
+        m_systemOptPanel->refreshTheme();
+    // The move tab can be out of sight while it works, so it is refreshed here
+    // too instead of only when its dialog is next opened.
+    if (m_movePanel)
+        m_movePanel->refreshTheme();
     m_legend->refreshTheme();
     applyUpdateToastStyle();
     // Type icons cache by color, so clear before rebuilding the list.
@@ -2984,9 +3250,27 @@ void MainWindow::retranslateUI()
     // Right panel tabs
     m_rightTabs->setTabText(0, I18n::tr("tab.treemap"));
     m_rightTabs->setTabText(1, I18n::tr("tab.cleanup"));
+    m_rightTabs->setTabText(2, I18n::tr("tab.sysopt"));
 
     // Cleanup panel
     m_cleanupPanel->retranslate();
+    if (m_systemOptPanel)
+        m_systemOptPanel->retranslate();
+
+    // Widgets and windows that outlive a language change. None of these is
+    // rebuilt when it is shown again, so this is the only chance to relabel
+    // them: the tab panels above are recreated per session, these are not.
+    if (m_syncDialog) {
+        // The move panel sits inside that dialog right now, and the dialog's own
+        // retranslate() forwards to it.
+        m_syncDialog->retranslate();
+    } else if (m_movePanel) {
+        // Closed: the panel is back with this window and out of sight, but it is
+        // shown again on the next open — with its rows already built.
+        m_movePanel->retranslate();
+    }
+    if (m_aiDialog)
+        m_aiDialog->retranslate();
 
     // Update toast (if built).
     retranslateUpdateToast();

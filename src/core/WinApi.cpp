@@ -1,9 +1,13 @@
 #include "WinApi.h"
 
+#include <QCoreApplication>
 #include <QDir>
+#include <QDirIterator>
+#include <QFile>
 #include <QFileInfo>
 
 #include "Logger.h"
+#include "I18n.h"
 
 #ifdef _WIN32
 // NOMINMAX must precede <windows.h> to prevent min/max macro pollution.
@@ -112,7 +116,10 @@ QString joinChild(const QString& parent, const QString& name)
 // succeeded (locked/in-use files return false but don't abort the loop).
 // Reparse points (junctions / directory symlinks) are unlinked rather than
 // followed, matching DiskScanner's behavior of not recursing through them.
-bool removeDirectoryRecursive(const QString& path, bool removeSelf = true)
+// *freedBytes (optional) accumulates the size of every file removed, so the
+// caller can show the deletion moving instead of staring at a stalled bar.
+bool removeDirectoryRecursive(const QString& path, bool removeSelf = true,
+                              std::atomic<qint64>* freedBytes = nullptr)
 {
     const QString pattern = makeSearchPattern(path);
 
@@ -120,6 +127,38 @@ bool removeDirectoryRecursive(const QString& path, bool removeSelf = true)
     HANDLE hFind = FindFirstFileW(lpcwstr(pattern), &fd);
     if (hFind == INVALID_HANDLE_VALUE)
         return false;
+
+    // Ask for the delete first and only pay for the attribute round-trip when
+    // Windows actually refuses. Clearing the read-only bit up-front costs two
+    // extra syscalls on *every* item — which is exactly what makes deleting a
+    // tree with tens of thousands of entries slow. (Doubles as the retry path
+    // for a directory whose read-only bit blocks RemoveDirectory.)
+    const auto unlinkOne = [freedBytes](LPCWSTR wide, const QString& shown, bool isDir,
+                                        qint64 bytes) {
+        const auto attempt = [&]() {
+            return isDir ? RemoveDirectoryW(wide) : DeleteFileW(wide);
+        };
+        if (attempt()) {
+            if (freedBytes && bytes > 0)
+                freedBytes->fetch_add(bytes, std::memory_order_relaxed);
+            return true;
+        }
+        DWORD err = GetLastError();
+        if (err == ERROR_ACCESS_DENIED) {
+            clearReadOnly(shown);
+            if (attempt()) {
+                if (freedBytes && bytes > 0)
+                    freedBytes->fetch_add(bytes, std::memory_order_relaxed);
+                return true;
+            }
+            err = GetLastError();
+        }
+        // Error 5 (ACCESS_DENIED) and 32 (SHARING_VIOLATION) are expected for
+        // locked/in-use files, so this stays at warn level without spam.
+        Logger::warn(QStringLiteral("[removeDir] delete failed: %1 err=%2 (dir=%3)")
+                         .arg(shown).arg(err).arg(isDir));
+        return false;
+    };
 
     bool ok = true;
     do {
@@ -131,42 +170,26 @@ bool removeDirectoryRecursive(const QString& path, bool removeSelf = true)
 
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
             if (isReparsePoint(fd.dwFileAttributes)) {
-                // Junction / directory symlink: remove the link only.
-                clearReadOnly(child);
-                if (!RemoveDirectoryW(lpcwstr(child))) {
-                    Logger::warn(QStringLiteral("[removeDir] RemoveDirectory(reparse) failed: %1 err=%2")
-                                     .arg(child).arg(GetLastError()));
+                // Junction / directory symlink: remove the link only, never the
+                // target. RemoveDirectoryW is exactly that (no /S equivalent).
+                if (!unlinkOne(lpcwstr(child), child, true, 0))
                     ok = false;
-                }
-            } else if (!removeDirectoryRecursive(child, true)) {
+            } else if (!removeDirectoryRecursive(child, true, freedBytes)) {
                 ok = false;
             }
         } else {
             // Regular file or file symlink.
-            clearReadOnly(child);
-            if (!DeleteFileW(lpcwstr(child))) {
-                const DWORD err = GetLastError();
-                // Error 5 (ACCESS_DENIED) and 32 (SHARING_VIOLATION) are
-                // expected for locked/in-use files — log at debug level,
-                // not warn, to avoid log spam on Temp directories.
-                Logger::warn(QStringLiteral("[removeDir] DeleteFile failed: %1 err=%2")
-                                .arg(child).arg(err));
+            const qint64 bytes = (static_cast<qint64>(fd.nFileSizeHigh) << 32)
+                                 | static_cast<qint64>(fd.nFileSizeLow);
+            if (!unlinkOne(lpcwstr(child), child, false, bytes))
                 ok = false;
-            }
         }
     } while (FindNextFileW(hFind, &fd));
 
     FindClose(hFind);
 
-    if (removeSelf) {
-        clearReadOnly(path);
-        if (!RemoveDirectoryW(lpcwstr(path))) {
-            const DWORD err = GetLastError();
-            Logger::warn(QStringLiteral("[removeDir] RemoveDirectory failed: %1 err=%2")
-                             .arg(path).arg(err));
-            ok = false;
-        }
-    }
+    if (removeSelf && !unlinkOne(lpcwstr(path), path, true, 0))
+        ok = false;
 
     return ok;
 }
@@ -175,10 +198,153 @@ bool removeDirectoryRecursive(const QString& path, bool removeSelf = true)
 #endif // _WIN32
 
 // ---------------------------------------------------------------------------
+// isWindowsRoot
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+namespace {
+
+// Lowercase, forward slashes, no trailing slash: "C:\Windows\", "c:/windows"
+// and "C:/Windows" all end up identical so they can be compared directly.
+QString normalizedKey(const QString& path)
+{
+    if (path.isEmpty())
+        return QString();
+    QString p = QDir::cleanPath(QDir::fromNativeSeparators(path)).toLower();
+    while (p.endsWith(QLatin1Char('/')))
+        p.chop(1);
+    return p;
+}
+
+} // namespace
+
+bool isWindowsRoot(const QString& path)
+{
+    const QString target = normalizedKey(path);
+    if (target.isEmpty())
+        return false;
+
+    QString winDir = qEnvironmentVariable("SystemRoot");
+    if (winDir.isEmpty())
+        winDir = QStringLiteral("C:\\Windows");
+    return target == normalizedKey(winDir);
+}
+#else
+bool isWindowsRoot(const QString&) { return false; }
+#endif
+
+// ---------------------------------------------------------------------------
+// renamePath / isReparsePointAt
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+bool renamePath(const QString& from, const QString& to, quint32* winError)
+{
+    if (from.isEmpty() || to.isEmpty())
+        return false;
+    const QString a = QDir::toNativeSeparators(from);
+    const QString b = QDir::toNativeSeparators(to);
+    // MoveFileW (not MoveFileExW with COPY_ALLOWED) never copies: on a different
+    // volume or with an existing target it simply fails, so the caller can fall
+    // back instead of unexpectedly streaming gigabytes around.
+    if (MoveFileW(lpcwstr(a), lpcwstr(b)) != 0) {
+        if (winError)
+            *winError = 0;
+        return true;
+    }
+    const DWORD err = GetLastError();
+    if (winError)
+        *winError = err;
+    // Logged here because this is the only place the Win32 error still exists:
+    // a rename of a folder an application has open fails with 32 and no other
+    // symptom, which is impossible to diagnose from the bool alone.
+    Logger::warn(QStringLiteral("[renamePath] MoveFileW failed: %1 -> %2 err=%3 (0x%4)")
+                     .arg(a, b)
+                     .arg(err)
+                     .arg(err, 0, 16));
+    return false;
+}
+
+bool isReparsePointAt(const QString& path)
+{
+    const DWORD attrs = GetFileAttributesW(lpcwstr(QDir::toNativeSeparators(path)));
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+#else
+bool renamePath(const QString& from, const QString& to, quint32* winError)
+{
+    if (winError)
+        *winError = 0;
+    return QFile::rename(from, to);
+}
+
+bool isReparsePointAt(const QString& path)
+{
+    return QFileInfo(path).isSymLink();
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// dirSizeNoReparse
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+qint64 dirSizeNoReparse(const QString& path, std::atomic<qint64>* visited)
+{
+    const QString pattern = makeSearchPattern(path);
+
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(lpcwstr(pattern), &fd);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return 0;
+
+    qint64 total = 0;
+    do {
+        const QString name = QString::fromWCharArray(fd.cFileName);
+        if (name == QLatin1String(".") || name == QLatin1String(".."))
+            continue;
+        // A junction or symlink is only a link, never storage of its own.
+        // Following it would count — and later copy — files that already live
+        // somewhere else.
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+            continue;
+
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            total += dirSizeNoReparse(joinChild(path, name), visited);
+        } else {
+            const qint64 bytes = (static_cast<qint64>(fd.nFileSizeHigh) << 32)
+                                 | static_cast<qint64>(fd.nFileSizeLow);
+            total += bytes;
+            // Only files are published here, never the subtree totals the
+            // recursion returns: adding a whole subtree on top of the files that
+            // were already counted would report the same bytes twice, and the
+            // counter must only ever grow for the UI to be able to trust it.
+            if (visited)
+                visited->fetch_add(bytes, std::memory_order_relaxed);
+        }
+    } while (FindNextFileW(hFind, &fd));
+
+    FindClose(hFind);
+    return total;
+}
+#else
+qint64 dirSizeNoReparse(const QString& path, std::atomic<qint64>* visited)
+{
+    qint64 total = 0;
+    QDirIterator it(path, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        it.next();
+        const qint64 bytes = it.fileInfo().size();
+        total += bytes;
+        if (visited)
+            visited->fetch_add(bytes, std::memory_order_relaxed);
+    }
+    return total;
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // deletePermanent
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
-bool deletePermanent(const QStringList& paths)
+bool deletePermanent(const QStringList& paths, std::atomic<qint64>* freedBytes)
 {
     if (paths.isEmpty())
         return true;
@@ -205,7 +371,7 @@ bool deletePermanent(const QStringList& paths)
                                      .arg(native).arg(err).arg(err, 0, 16));
                     ok = false;
                 }
-            } else if (!removeDirectoryRecursive(native)) {
+            } else if (!removeDirectoryRecursive(native, true, freedBytes)) {
                 Logger::warn(QStringLiteral("[deletePermanent] removeDirectoryRecursive failed: %1")
                                  .arg(native));
                 ok = false;
@@ -213,18 +379,22 @@ bool deletePermanent(const QStringList& paths)
         } else {
             // Regular file or file symlink.
             clearReadOnly(native);
+            // Measured before the delete: afterwards there is nothing left to ask.
+            const qint64 bytes = QFileInfo(native).size();
             if (!DeleteFileW(lpcwstr(native))) {
                 const DWORD err = GetLastError();
                 Logger::warn(QStringLiteral("[deletePermanent] DeleteFile failed: %1 attrs=0x%2 err=%3 (0x%4)")
                                  .arg(native).arg(attrs, 0, 16).arg(err).arg(err, 0, 16));
                 ok = false;
+            } else if (freedBytes && bytes > 0) {
+                freedBytes->fetch_add(bytes, std::memory_order_relaxed);
             }
         }
     }
     return ok;
 }
 #else
-bool deletePermanent(const QStringList&) { return false; }
+bool deletePermanent(const QStringList&, std::atomic<qint64>*) { return false; }
 #endif
 
 // ---------------------------------------------------------------------------
@@ -352,6 +522,184 @@ bool isAdmin()
 #else
 bool isAdmin() { return false; }
 #endif
+
+// ---------------------------------------------------------------------------
+// relaunchAsAdmin / processesLockingDir
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+#  include <RestartManager.h>
+#endif
+
+#ifdef _WIN32
+bool relaunchAsAdmin()
+{
+    const QString exe = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
+    // Rebuild the argument line exactly as passed in, quoting every argument
+    // so paths with spaces survive.
+    const QStringList args = QCoreApplication::arguments().mid(1);
+    QString params;
+    for (const QString& a : args) {
+        if (!params.isEmpty())
+            params += QLatin1Char(' ');
+        QString q = a;
+        q.replace(QLatin1Char('"'), QStringLiteral("\\\""));
+        params += QLatin1Char('"') + q + QLatin1Char('"');
+    }
+    const HINSTANCE h = ShellExecuteW(nullptr, L"runas", lpcwstr(exe),
+                                      params.isEmpty() ? nullptr : lpcwstr(params),
+                                      nullptr, SW_SHOWNORMAL);
+    // ShellExecuteW returns >32 on success; the SE_ERR_* codes start at 0.
+    if (h <= reinterpret_cast<HINSTANCE>(32)) {
+        Logger::warn(QStringLiteral("[relaunchAsAdmin] ShellExecuteW runas failed err=%1")
+                         .arg(reinterpret_cast<qintptr>(h)));
+        return false;
+    }
+    return true;
+}
+
+int processesLockingDir(const QString& dir, QStringList* procNames, int maxFiles)
+{
+    if (procNames)
+        procNames->clear();
+
+    // Restart Manager works on FILES, not directories — and the handle that
+    // blocks the rename can sit on any file in the tree. Sample a bounded set;
+    // trees bigger than the cap may hide their lock beyond it.
+    std::vector<std::wstring> files;
+    QDirIterator it(dir, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    while (it.hasNext() && static_cast<int>(files.size()) < maxFiles)
+        files.push_back(QDir::toNativeSeparators(it.next()).toStdWString());
+    if (files.empty())
+        return 0;
+
+    std::vector<LPCWSTR> paths;
+    paths.reserve(files.size());
+    for (const std::wstring& f : files)
+        paths.push_back(f.c_str());
+
+    DWORD session = 0;
+    WCHAR key[CCH_RM_SESSION_KEY + 1] = { 0 };
+    const DWORD startRc = RmStartSession(&session, 0, key);
+    if (startRc != ERROR_SUCCESS) {
+        Logger::warn(QStringLiteral("[processesLockingDir] RmStartSession failed rc=%1").arg(startRc));
+        return 0;
+    }
+    int found = 0;
+    const DWORD regRc = RmRegisterResources(session, static_cast<UINT>(paths.size()),
+                                            paths.data(), 0, nullptr, 0, nullptr);
+    if (regRc != ERROR_SUCCESS) {
+        Logger::warn(QStringLiteral("[processesLockingDir] RmRegisterResources failed rc=%1 files=%2")
+                         .arg(regRc).arg(paths.size()));
+    }
+    if (regRc == ERROR_SUCCESS) {
+        std::vector<RM_PROCESS_INFO> info(64);
+        std::vector<DWORD> reasons(64);
+        UINT needed = 0, got = 0;
+        // got is an IN/OUT parameter: on input it is the ARRAY CAPACITY, on
+        // output the number of entries filled. Passing 0 (as an uninitialized
+        // value) says "no room" and RmGetList answers MORE_DATA forever.
+        got = static_cast<UINT>(info.size());
+        DWORD rc = RmGetList(session, &needed, &got, info.data(), reasons.data());
+        Logger::info(QStringLiteral("[processesLockingDir] RmGetList rc=%1 needed=%2 got=%3")
+                         .arg(rc).arg(needed).arg(got));
+        // MORE_DATA means the array was too small: needed holds the real count.
+        if (rc == ERROR_MORE_DATA && needed > got) {
+            info.resize(needed);
+            reasons.resize(needed);
+            got = static_cast<UINT>(info.size());
+            rc = RmGetList(session, &needed, &got, info.data(), reasons.data());
+            Logger::info(QStringLiteral("[processesLockingDir] RmGetList retry rc=%1 got=%2")
+                             .arg(rc).arg(got));
+        }
+        // Partial fills still name real processes, so iterate whatever arrived.
+        for (UINT i = 0; i < got && i < info.size(); ++i) {
+            ++found;
+            QString name = QString::fromWCharArray(info[i].strAppName);
+            if (name.isEmpty()) {
+                // Some processes have no friendly name registered — fall back
+                // to their executable file name.
+                HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                       info[i].Process.dwProcessId);
+                if (h) {
+                    WCHAR buf[1024];
+                    DWORD sz = 1024;
+                    if (QueryFullProcessImageNameW(h, 0, buf, &sz))
+                        name = QFileInfo(QString::fromWCharArray(buf)).fileName();
+                    CloseHandle(h);
+                }
+            }
+            if (!name.isEmpty() && procNames && !procNames->contains(name))
+                procNames->push_back(name);
+        }
+    }
+    RmEndSession(session);
+    return found;
+}
+#else
+bool relaunchAsAdmin() { return false; }
+int processesLockingDir(const QString&, QStringList*, int) { return 0; }
+#endif
+
+// ---------------------------------------------------------------------------
+// writeDontDeleteMarker
+// ---------------------------------------------------------------------------
+namespace {
+
+// The marker's name for one language, or an empty string when that language has
+// no translation for it (I18n hands back the key itself in that case — never
+// usable as a file name).
+QString markerNameIn(const QString& lang)
+{
+    const QString key = QStringLiteral("app_move.marker_name");
+    const QString name = I18n::trIn(lang, key);
+    if (name.isEmpty() || name == key)
+        return QString();
+    return name;
+}
+
+}  // namespace
+
+QStringList dontDeleteMarkerNames()
+{
+    QStringList names;
+    const QString active = markerNameIn(I18n::currentLanguage());
+    if (!active.isEmpty())
+        names << active;   // the name a fresh move would use, first
+    for (const QString& lang : I18n::availableLanguages()) {
+        const QString name = markerNameIn(lang);
+        if (!name.isEmpty() && !names.contains(name))
+            names << name;
+    }
+    if (names.isEmpty())
+        // No locale files at all (a stripped build): still mark the folder,
+        // under the name this feature has always used.
+        names << QStringLiteral("!请勿删除、移动或重命名文件夹.ico");
+    return names;
+}
+
+bool writeDontDeleteMarker(const QString& dir)
+{
+    if (dir.isEmpty())
+        return false;
+    const QStringList names = dontDeleteMarkerNames();
+    // Already marked — in whatever language was active at the time. Adding the
+    // current language's name next to it would only put two icons in one folder.
+    for (const QString& name : names) {
+        if (QFile::exists(dir + QLatin1Char('/') + name))
+            return true;
+    }
+    const QString target = dir + QLatin1Char('/') + names.first();
+    // qt_add_resources keeps the file's directory in the alias, so the icon
+    // lives at :/moveguard/resources/... (verified by probe_lab/run4).
+    QFile res(QStringLiteral(":/moveguard/resources/dont_delete_folder.ico"));
+    if (!res.open(QIODevice::ReadOnly))
+        return false;
+    QFile out(target);
+    if (!out.open(QIODevice::WriteOnly))
+        return false;
+    out.write(res.readAll());
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // getDiskFreeSpace

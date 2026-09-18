@@ -37,14 +37,37 @@ void writeLine(const QString& level, const QString& msg)
 }
 
 #ifdef _WIN32
+// "Qt6Widgets.dll+0x1a2b3" — an address on its own says nothing about who
+// faulted, and a crash log that cannot be acted on is not worth writing.
+QString describeAddress(void* addr)
+{
+    HMODULE mod = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                               | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(addr), &mod)
+        && mod) {
+        wchar_t buf[MAX_PATH] = {};
+        const DWORD n = GetModuleFileNameW(mod, buf, MAX_PATH);
+        QString name = n ? QString::fromWCharArray(buf, static_cast<int>(n)) : QString();
+        const int slash = name.lastIndexOf(QLatin1Char('\\'));
+        if (slash >= 0)
+            name = name.mid(slash + 1);
+        return QStringLiteral("%1+0x%2")
+            .arg(name)
+            .arg(reinterpret_cast<quintptr>(addr) - reinterpret_cast<quintptr>(mod),
+                 0, 16);
+    }
+    return QStringLiteral("0x%1").arg(reinterpret_cast<quintptr>(addr), 0, 16);
+}
+
 LONG WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* ep)
 {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     void* addr = ep->ExceptionRecord->ExceptionAddress;
 
-    QString msg = QString("SEH CRASH: code=0x%1 addr=0x%2")
+    QString msg = QString("SEH CRASH: code=0x%1 addr=%2")
                       .arg((quint64)code, 8, 16, QChar('0'))
-                      .arg((quint64)addr, 16, 16, QChar('0'));
+                      .arg(describeAddress(addr));
 
     // Add extra info for common access violations.
     if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
@@ -56,6 +79,14 @@ LONG WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* ep)
     }
 
     writeLine("CRIT", msg);
+
+    // The frames say which call was running when it happened, which is what
+    // turns "it crashed" into something that can be looked up.
+    void* frames[32] = {};
+    const USHORT n = CaptureStackBackTrace(0, 32, frames, nullptr);
+    for (USHORT i = 0; i < n; ++i)
+        writeLine("CRIT", QString("  #%1 %2").arg(i).arg(describeAddress(frames[i])));
+
     return EXCEPTION_EXECUTE_HANDLER;  // let the process terminate
 }
 #endif

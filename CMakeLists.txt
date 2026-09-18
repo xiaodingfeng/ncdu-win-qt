@@ -1,13 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(NcduWin VERSION 1.0.7 LANGUAGES CXX)
+project(NcduWin VERSION 1.0.8 LANGUAGES CXX)
 
 # Set NcduWin as the default startup target in Visual Studio
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT NcduWin)
 
 # ---- Single source of truth for app metadata ----
 set(APP_NAME        "NcduWin")
-set(APP_VERSION     "1.0.7")
+set(APP_VERSION     "1.0.8")
 set(APP_HOMEPAGE    "https://ncduwin.fengzhengx.cn/")
 set(APP_SOURCE_URL  "https://github.com/xiaodingfeng/ncdu-win-qt")
 
@@ -64,11 +64,16 @@ set(SOURCES
     src/core/Identify.cpp
     src/core/WinApi.cpp
     src/core/Logger.cpp
+    src/core/SafeMoveWorker.cpp
     src/ui/MainWindow.cpp
     src/ui/SizeBarDelegate.cpp
     src/ui/TreemapWidget.cpp
     src/ui/BreadcrumbBar.cpp
     src/ui/LegendBar.cpp
+    src/ui/SystemOptPanel.cpp
+    src/ui/ToggleSwitch.cpp
+    src/ui/AppPathSyncDialog.cpp
+    src/ui/AppDataMovePanel.cpp
     src/cleanup/CleanupScanner.cpp
     src/cleanup/CleanupWorker.cpp
     src/cleanup/CleanupPanel.cpp
@@ -90,6 +95,13 @@ endif()
 
 add_executable(NcduWin WIN32 ${SOURCES})
 
+# The warning marker dropped into a folder data was moved to, so the user can
+# see the folder is a live junction target and must not be deleted.
+qt_add_resources(NcduWin "moveguard"
+    PREFIX "/moveguard"
+    FILES resources/dont_delete_folder.ico
+)
+
 set_target_properties(NcduWin PROPERTIES OUTPUT_NAME "NcduWin")
 
 target_include_directories(NcduWin PRIVATE
@@ -104,7 +116,7 @@ target_include_directories(NcduWin PRIVATE
 target_link_libraries(NcduWin PRIVATE Qt6::Widgets Qt6::Concurrent Qt6::Network)
 
 if(WIN32)
-    target_link_libraries(NcduWin PRIVATE shell32 shlwapi ole32 user32 kernel32 advapi32)
+    target_link_libraries(NcduWin PRIVATE shell32 shlwapi ole32 user32 kernel32 advapi32 rstrtmgr)
     if(MSVC)
         set_target_properties(NcduWin PROPERTIES
             LINK_FLAGS "/MANIFEST:EMBED /MANIFESTINPUT:\"${CMAKE_CURRENT_SOURCE_DIR}/app.manifest\" /MANIFESTUAC:NO"
@@ -114,10 +126,15 @@ endif()
 
 install(TARGETS NcduWin RUNTIME DESTINATION dist)
 
-add_custom_command(TARGET NcduWin POST_BUILD
+# Keep the locale files next to the executable in step with the sources. The app
+# reads them at runtime, and a change to them does not relink anything, so a
+# POST_BUILD step alone would silently ship yesterday's strings — this target
+# runs on every build instead.
+add_custom_target(copy_locales ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/locales"
             "$<TARGET_FILE_DIR:NcduWin>/locales"
+    DEPENDS NcduWin
     VERBATIM
 )
 
@@ -139,6 +156,7 @@ if(Qt6Test_FOUND)
     add_executable(test_scanner
         tests/test_scanner.cpp
         src/core/FormatHelpers.cpp
+        src/core/I18n.cpp
     )
     target_include_directories(test_scanner PRIVATE src src/core src/ui src/cleanup)
     target_link_libraries(test_scanner PRIVATE Qt6::Test Qt6::Concurrent)
@@ -156,6 +174,7 @@ add_executable(compare_scanners
     src/core/DiskScanner.cpp
     src/core/MftScanner.cpp
     src/core/FormatHelpers.cpp
+    src/core/I18n.cpp
     src/core/Logger.cpp
 )
 target_include_directories(compare_scanners PRIVATE src src/core src/ui src/cleanup)

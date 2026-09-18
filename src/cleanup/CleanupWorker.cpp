@@ -311,6 +311,15 @@ void CleanupWorker::cleanTarget(const CleanupTarget& target,
         return;
     }
 
+    // Safety gate: the Windows directory itself is off limits. Its contents are
+    // what the cleanup categories are for, and they are never addressed as the
+    // directory itself.
+    if (WinApi::isWindowsRoot(target.path)) {
+        Logger::warn(QStringLiteral("[cleanTarget] SKIPPED (protected root): %1").arg(target.path));
+        skipped = 1;
+        return;
+    }
+
     // Virtual groups — delete individual files inside the root.
     if (target.key == "cleanup.s_tmp_files") {
         cleanTmpFilesInRoot(target.path, deleted, skipped);
@@ -402,6 +411,14 @@ void CleanupWorker::cleanLargeFile(const LargeFile& lf,
         return;
     }
 
+    // Safety gate: same protection as for targets — the Windows directory itself
+    // is never removed as a "large file".
+    if (WinApi::isWindowsRoot(lf.path)) {
+        Logger::warn(QStringLiteral("[cleanLargeFile] SKIPPED (protected root): %1").arg(lf.path));
+        skipped = 1;
+        return;
+    }
+
     const QFileInfo info(lf.path);
     if (!info.exists()) {
         skipped = 1;
@@ -436,6 +453,7 @@ void CleanupWorker::run()
     int totalSkipped = 0;
     qint64 totalFreed = 0;
     const int totalItems = static_cast<int>(m_items.size());
+    int processed = 0;
     std::vector<ItemRef> successItems;
     std::vector<ItemRef> failedItems;
 
@@ -456,6 +474,7 @@ void CleanupWorker::run()
                 continue;
 
             emit progress(item.key);
+            emit itemStarted(++processed, totalItems, item.key);
 
             int d = 0, s = 0;
             qint64 f = 0;
@@ -487,6 +506,7 @@ void CleanupWorker::run()
             const QString label = info.exists()
                 ? info.fileName() : item.path;
             emit progress(label);
+            emit itemStarted(++processed, totalItems, label);
 
             int d = 0, s = 0;
             qint64 f = 0;

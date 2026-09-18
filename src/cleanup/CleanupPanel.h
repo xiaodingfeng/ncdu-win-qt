@@ -35,6 +35,11 @@ public:
 
     void startScanProgress();
     void stopScanProgress();
+    // Cleanup-run progress: a determinate bar (one step per checked item) so a
+    // long cleanup over thousands of files does not read as a freeze.
+    void beginCleanProgress(int totalItems);
+    void setCleanProgress(int done, int total);
+    void endCleanProgress();
     void addTarget(const CleanupTarget& target);
     void addLargeFile(const LargeFile& lf);
     void addDuplicateGroup(const DuplicateGroup& group);
@@ -74,6 +79,7 @@ private slots:
     void onLfTypeFilterChanged(int index);
     void onDupTypeFilterChanged(int index);
     void onCatItemDoubleClicked(QTreeWidgetItem* item, int column);
+    void onLfDetailClicked(QTreeWidgetItem* item);
     void onAiContextMenu(QTreeWidget* tree, const QPoint& pos);
     void onAiAnalyzeSelected();
 
@@ -94,6 +100,7 @@ private:
     QLabel* m_lfTypeLabel = nullptr;
     QLabel* m_dupTypeLabel = nullptr;
     QProgressBar* m_scanProgress = nullptr;
+    QProgressBar* m_cleanProgress = nullptr;  // determinate, while cleaning runs
     QLabel* m_selectedLabel = nullptr;
     QLabel* m_totalLabel = nullptr;
     QLabel* m_dupStatus = nullptr;        // dup-scan phase/progress/summary text
@@ -113,6 +120,7 @@ private:
     QTreeWidget* makeTree(const QStringList& headers, bool col3Fixed = false);
     void applyTargetTranslation(QTreeWidgetItem* item, const CleanupTarget& target);
     void applyLargeFileWarning(QTreeWidgetItem* item, const QString& level);
+    void showLargeFileDetails(QTreeWidgetItem* item);
     void updateSummary(qint64 freeBytes, qint64 totalBytes);
     void updateSelectedLabel();
     void updateTotalLabel();
@@ -123,7 +131,6 @@ private:
     std::vector<std::tuple<QString, QString, QString>> getCheckedTargets() const;
     std::vector<std::tuple<QString, QString, QString>> getCheckedLargeFiles() const;
     std::vector<std::tuple<QString, QString, QString>> getCheckedDuplicates() const;
-    qint64 getCheckedTotalSize() const;
     QString largeFileWarning(const QString& level) const;
     QString buildCleanupItemPrompt(const QString& category, const QString& path,
                                    qint64 size, int items, const QString& level,

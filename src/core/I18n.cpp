@@ -105,12 +105,13 @@ QString currentLanguage() {
     return g_currentLang;
 }
 
-void setLanguage(const QString& code) {
+void setLanguage(const QString& code, bool persist) {
     if (!supported().contains(code))
         return;
     loadTranslationsIfNeeded();
     g_currentLang = code;
-    settings().setValue(QStringLiteral("language"), code);
+    if (persist)
+        settings().setValue(QStringLiteral("language"), code);
 }
 
 QStringList availableLanguages() {
@@ -133,6 +134,20 @@ QString tr(const QString& key) {
     if (curIt != g_translations.end() && curIt->contains(key))
         return curIt->value(key);
     // Fall back to English so missing translations still render something.
+    auto enIt = g_translations.find(QStringLiteral("en"));
+    if (enIt != g_translations.end() && enIt->contains(key))
+        return enIt->value(key);
+    return key;
+}
+
+QString trIn(const QString& lang, const QString& key) {
+    // Loading is idempotent, and doing it here means a caller that reached for
+    // a named language first (a probe, an early settings read) still gets the
+    // real string instead of the key.
+    loadTranslationsIfNeeded();
+    auto it = g_translations.find(lang);
+    if (it != g_translations.end() && it->contains(key))
+        return it->value(key);
     auto enIt = g_translations.find(QStringLiteral("en"));
     if (enIt != g_translations.end() && enIt->contains(key))
         return enIt->value(key);

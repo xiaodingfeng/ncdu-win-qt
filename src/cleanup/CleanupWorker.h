@@ -41,6 +41,10 @@ public:
 
 signals:
     void progress(const QString& label);
+    // Emitted just before an item starts: which item (1-based) of how many,
+    // plus a short label for the UI. Gives the panel a real percentage while
+    // big targets (Temp, caches) grind through thousands of files.
+    void itemStarted(int index, int total, const QString& label);
     void itemDone(const QString& key, int deleted, int skipped, qint64 freed);
     void finished(int totalDeleted, int totalSkipped, qint64 totalFreed,
                   int totalItems,

@@ -260,13 +260,13 @@ void CleanupScanner::discoverTargets(std::vector<CleanupTarget>& out)
             ? qEnvironmentVariable("TEMP")
             : qEnvironmentVariable("TMP");
         if (!sysTemp.isEmpty() && pathUnder(sysTemp, rootNorm)) {
-            add("cleanup.junk.windows_temp", sysTemp,
+            add("junk.windows_temp", sysTemp,
                 DangerLevel::S, true, true, "cleanup.remark_s_temp");
         }
     }
 
     // User temp directory
-    add("cleanup.junk.user_temp",
+    add("junk.user_temp",
         QDir::cleanPath(userDir + "/AppData/Local/Temp"),
         DangerLevel::S, true, true, "cleanup.remark_s_temp");
 
@@ -390,7 +390,7 @@ void CleanupScanner::discoverTargets(std::vector<CleanupTarget>& out)
 
     // ── Windows known cache locations ──────────────────────────────────
     // Windows Temp (S-level)
-    add("cleanup.junk.windows_temp",
+    add("junk.windows_temp",
         QDir::cleanPath(winDir + "/Temp"),
         DangerLevel::S, true, true, "cleanup.remark_s_temp");
     // Windows Prefetch (A-level)

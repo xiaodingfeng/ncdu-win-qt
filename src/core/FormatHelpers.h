@@ -13,6 +13,11 @@ QString humanSize(qint64 bytes);
 // Format an item count: <1000 as integer, <1M as "X.Xk", else "X.XM".
 QString humanCount(int n);
 
+// Format a duration in milliseconds for the status bar: "820 ms", "3.4 s",
+// "1 min 12 s", "1 h 05 min". Localised unit suffixes are supplied by the
+// caller through I18n, so this returns digits plus a fixed short unit.
+QString humanDuration(qint64 ms);
+
 // Enumerate available Windows drive root paths (e.g. "C:\", "D:\").
 QStringList listDrives();
 
