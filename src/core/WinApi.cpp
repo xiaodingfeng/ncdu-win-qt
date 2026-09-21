@@ -3,8 +3,14 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QDirIterator>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QThread>
+
+#include <queue>
+#include <vector>
 
 #include "Logger.h"
 #include "I18n.h"
@@ -17,6 +23,10 @@
 #  include <windows.h>
 #  include <shellapi.h>
 #  include <shlobj.h>
+#  include <sddl.h>
+// CreateToolhelp32Snapshot / PROCESSENTRY32W: enumerating the running processes
+// is what makes "a program is running from inside this folder" answerable.
+#  include <tlhelp32.h>
 #endif
 
 namespace WinApi {
@@ -196,6 +206,33 @@ bool removeDirectoryRecursive(const QString& path, bool removeSelf = true,
 
 } // namespace
 #endif // _WIN32
+
+// ---------------------------------------------------------------------------
+// pathInsideDirectory — does this file sit under that folder?
+// ---------------------------------------------------------------------------
+
+// Case-insensitive and boundary-aware. Both halves matter: a plain prefix test
+// says "C:\Data2" is inside "C:\Data", which is how a process gets blamed for a
+// folder it has nothing to do with. Kept as pure string work, without touching
+// the file system, so the probe lab can check the awkward cases directly.
+bool pathInsideDirectory(const QString& file, const QString& dir)
+{
+    if (file.isEmpty() || dir.isEmpty())
+        return false;
+
+    const QString f = QDir::cleanPath(QDir::fromNativeSeparators(file)).toLower();
+    QString d = QDir::cleanPath(QDir::fromNativeSeparators(dir)).toLower();
+    while (d.endsWith(QLatin1Char('/')))
+        d.chop(1);
+    if (d.isEmpty() || f.isEmpty())
+        return false;
+    if (f == d)
+        return true;
+    // The character after the prefix must be a separator, which is exactly what
+    // rules out "C:\Data2" while still accepting "C:\Data\sub".
+    return f.startsWith(d) && f.size() > d.size()
+           && f.at(d.size()) == QLatin1Char('/');
+}
 
 // ---------------------------------------------------------------------------
 // isWindowsRoot
@@ -557,24 +594,326 @@ bool relaunchAsAdmin()
     return true;
 }
 
-int processesLockingDir(const QString& dir, QStringList* procNames, int maxFiles)
+namespace {
+
+// Restart Manager answers per (file, process) pair, so a process holding
+// several files of the same folder arrives several times.
+bool containsPid(const QVector<LockingProcess>& procs, quint32 pid)
 {
-    if (procNames)
-        procNames->clear();
+    for (const LockingProcess& p : procs)
+        if (p.pid == pid)
+            return true;
+    return false;
+}
 
-    // Restart Manager works on FILES, not directories — and the handle that
-    // blocks the rename can sit on any file in the tree. Sample a bounded set;
-    // trees bigger than the cap may hide their lock beyond it.
-    std::vector<std::wstring> files;
-    QDirIterator it(dir, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
-    while (it.hasNext() && static_cast<int>(files.size()) < maxFiles)
-        files.push_back(QDir::toNativeSeparators(it.next()).toStdWString());
-    if (files.empty())
+// The user a process runs as, as a SID string. Empty when the token cannot be
+// read, which callers treat as "cannot vouch for this one".
+QString sidStringOfToken(HANDLE process)
+{
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(process, TOKEN_QUERY, &token))
+        return QString();
+    DWORD need = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &need);
+    QString out;
+    if (need > 0) {
+        QByteArray buf(static_cast<int>(need), 0);
+        if (GetTokenInformation(token, TokenUser, buf.data(), need, &need)) {
+            auto* user = reinterpret_cast<TOKEN_USER*>(buf.data());
+            LPWSTR str = nullptr;
+            if (ConvertSidToStringSidW(user->User.Sid, &str)) {
+                out = QString::fromWCharArray(str);
+                LocalFree(str);
+            }
+        }
+    }
+    CloseHandle(token);
+    return out;
+}
+
+QString currentUserSidString()
+{
+    // Asked once: the answer cannot change while we run.
+    static const QString sid = sidStringOfToken(GetCurrentProcess());
+    return sid;
+}
+
+// May we end this process? When we may not, *blockKey* receives the I18n key
+// that explains it, so the UI can say why instead of silently skipping it.
+bool closableProcess(quint32 pid, const QString& exePath, const QString& appName,
+                     QString* blockKey)
+{
+    auto refuse = [blockKey](const char* key) {
+        if (blockKey)
+            *blockKey = QLatin1String(key);
+        return false;
+    };
+
+    // Ourselves: terminating the window that runs the move would abort the very
+    // operation the user is waiting for.
+    if (pid == 0 || pid == static_cast<quint32>(GetCurrentProcessId()))
+        return refuse("proc_close.block_self");
+
+    // Either name can be the one that matches: Restart Manager reports the
+    // friendly name ("Windows Explorer") while the guard list holds file names.
+    if (isNeverCloseName(exePath) || isNeverCloseName(appName))
+        return refuse("proc_close.block_system");
+
+    // Another logon session — a service in session 0, or another signed-in
+    // user — has no window of ours to close and no work of ours to save.
+    DWORD theirSession = 0, ourSession = 0;
+    ProcessIdToSessionId(pid, &theirSession);
+    ProcessIdToSessionId(GetCurrentProcessId(), &ourSession);
+    if (theirSession != ourSession)
+        return refuse("proc_close.block_session");
+
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h)
+        return refuse("proc_close.block_unknown");
+    const QString theirSid = sidStringOfToken(h);
+    CloseHandle(h);
+
+    const QString ourSid = currentUserSidString();
+    if (theirSid.isEmpty() || ourSid.isEmpty())
+        return refuse("proc_close.block_unknown");
+    if (theirSid.compare(ourSid, Qt::CaseInsensitive) != 0)
+        return refuse("proc_close.block_user");
+    return true;
+}
+
+} // namespace
+#endif // _WIN32
+
+// The guard list itself is pure Qt: it is what the UI explains, and it has to
+// exist on every platform so a build without the Restart Manager still answers
+// "may this be closed?" the same way.
+QStringList neverCloseNames()
+{
+    // Lower case, matched against both the executable name and the friendly
+    // name, which is why every entry carries the extension it will be compared
+    // against ("System" and "Registry" have none — those are not files).
+    return {
+        // Machine- or session-critical: terminating any of these logs the user
+        // out or bug-checks the box. No data folder is worth that.
+        QStringLiteral("system"), QStringLiteral("registry"),
+        QStringLiteral("smss.exe"), QStringLiteral("csrss.exe"),
+        QStringLiteral("wininit.exe"), QStringLiteral("winlogon.exe"),
+        QStringLiteral("services.exe"), QStringLiteral("lsass.exe"),
+        QStringLiteral("svchost.exe"), QStringLiteral("fontdrvhost.exe"),
+        QStringLiteral("dwm.exe"), QStringLiteral("audiodg.exe"),
+        QStringLiteral("sihost.exe"), QStringLiteral("ctfmon.exe"),
+        QStringLiteral("taskhostw.exe"), QStringLiteral("runtimebroker.exe"),
+        QStringLiteral("searchindexer.exe"),
+        // The shell. Windows does restart it, but the taskbar, the desktop
+        // icons and every open Explorer window go with it — and it is the most
+        // common holder of Documents / Desktop / Pictures, so seeing it means a
+        // manual step for the user, not an automatic one for us.
+        QStringLiteral("explorer.exe"),
+        // Security software. Killing it is pointless (it respawns) and is the
+        // fastest way to get this program quarantined by one of them.
+        QStringLiteral("msmpeng.exe"), QStringLiteral("nissrv.exe"),
+        QStringLiteral("securityhealthservice.exe"), QStringLiteral("msseces.exe"),
+        QStringLiteral("usysdiag.exe"), QStringLiteral("hipsdaemon.exe"),
+        QStringLiteral("qqpctray.exe"), QStringLiteral("qqpcsrv.exe"),
+        QStringLiteral("360tray.exe"), QStringLiteral("360safe.exe"),
+        QStringLiteral("zhudongfangyu.exe"),
+    };
+}
+
+bool isNeverCloseName(const QString& nameOrPath)
+{
+    // Takes a path or a bare name: Restart Manager hands back the latter for
+    // processes with no registered application name.
+    const QString base = QFileInfo(nameOrPath).fileName().toLower();
+    if (base.isEmpty())
+        return false;
+    return neverCloseNames().contains(base);
+}
+
+#ifdef _WIN32
+namespace {
+
+// How many files a single Restart Manager query is allowed to register, and how
+// many the walk will look at while choosing them. The second number only needs
+// to be large enough that a pathological tree cannot stall the probe: it runs on
+// a worker thread, but "slow" and "hung" look the same to the user.
+constexpr int kProbeWalkCap = 200000;
+
+// The *cap* most recently modified files under *dir*.
+//
+// Which files get registered is the whole difference between a query that works
+// and one that does not. RmGetList only reports processes holding a file that
+// was registered, and a folder like a video editor's working directory holds
+// hundreds of thousands of them, so "the first 800 the walk happens to return"
+// reliably misses the one that matters. A program holding a file open for
+// writing is, essentially by definition, holding a file it has just modified —
+// so picking the newest candidates turns an arbitrary sample into a targeted
+// one, at the cost of one bounded walk and O(cap) memory.
+//
+// Directory reparse points are not descended into: the folder being probed can
+// contain the junction this program left behind, and walking through it would
+// register the whole relocated tree (and, on a self-referential link, go round
+// in circles).
+std::vector<QString> newestFilesUnder(const QString& dir, int cap)
+{
+    struct Candidate {
+        qint64 mtime = 0;
+        QString path;
+    };
+    // A min-heap on mtime: the top is the oldest file kept so far, and therefore
+    // the one to evict when something newer turns up.
+    auto olderFirst = [](const Candidate& a, const Candidate& b) { return a.mtime > b.mtime; };
+    std::priority_queue<Candidate, std::vector<Candidate>, decltype(olderFirst)> heap(olderFirst);
+
+    int examined = 0;
+    bool capped = false;
+    QStringList stack;
+    stack << dir;
+    while (!stack.isEmpty() && !capped) {
+        const QString current = stack.takeLast();
+        QDirIterator it(current,
+                        QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden
+                            | QDir::System,
+                        QDirIterator::NoIteratorFlags);
+        while (it.hasNext()) {
+            const QFileInfo fi = it.nextFileInfo();
+            if (fi.isDir()) {
+                if (!isReparsePointAt(fi.absoluteFilePath()))
+                    stack << fi.absoluteFilePath();
+                continue;
+            }
+            if (++examined > kProbeWalkCap) {
+                capped = true;
+                break;
+            }
+            const Candidate c{fi.lastModified().toMSecsSinceEpoch(), fi.absoluteFilePath()};
+            if (static_cast<int>(heap.size()) < cap) {
+                heap.push(c);
+            } else if (c.mtime > heap.top().mtime) {
+                heap.pop();
+                heap.push(c);
+            }
+        }
+    }
+
+    std::vector<QString> out;
+    out.reserve(heap.size());
+    while (!heap.empty()) {
+        out.push_back(heap.top().path);
+        heap.pop();
+    }
+    if (capped)
+        Logger::warn(QStringLiteral("[probe] %1: walk stopped after %2 entries; the "
+                                    "lock may sit in the part that was not seen")
+                         .arg(dir).arg(kProbeWalkCap));
+    Logger::info(QStringLiteral("[probe] %1: %2 entries examined, %3 registered")
+                     .arg(dir).arg(examined).arg(out.size()));
+    return out;
+}
+
+// Fill in everything the UI needs about a process it already has a PID for.
+// Shared by both detections, because "who is this and may we close it" must not
+// depend on which detection noticed it.
+LockingProcess describeProcess(quint32 pid, const QString& friendlyName)
+{
+    LockingProcess lp;
+    lp.pid = pid;
+    lp.name = friendlyName;
+
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (h) {
+        WCHAR buf[1024];
+        DWORD sz = 1024;
+        if (QueryFullProcessImageNameW(h, 0, buf, &sz))
+            lp.exePath = QString::fromWCharArray(buf);
+        CloseHandle(h);
+    }
+    if (lp.name.isEmpty())
+        lp.name = lp.exePath.isEmpty() ? QString::number(pid)
+                                       : QFileInfo(lp.exePath).fileName();
+
+    lp.safeToClose = closableProcess(pid, lp.exePath, lp.name, &lp.blockKey);
+    return lp;
+}
+
+} // namespace
+
+// Processes whose executable is running FROM inside *dir*.
+//
+// Restart Manager reads the files a process holds open, which leaves it blind
+// to the case that hurts most: a program installed inside its own data folder
+// cannot be launched from a folder that will not rename, yet it may hold no
+// data file open at all — so the query returns an empty list and the user is
+// told nothing. One process enumeration answers it.
+int processesRunningFrom(const QString& dir, QVector<LockingProcess>* procs)
+{
+    int found = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        Logger::warn(QStringLiteral("[processesRunningFrom] snapshot failed err=%1")
+                         .arg(GetLastError()));
         return 0;
+    }
 
+    PROCESSENTRY32W pe;
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            const quint32 pid = pe.th32ProcessID;
+            // The idle process and the system process have no image to inspect.
+            if (pid == 0 || pid == 4)
+                continue;
+            HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if (!h)
+                continue;
+            WCHAR buf[1024];
+            DWORD sz = 1024;
+            const bool got = QueryFullProcessImageNameW(h, 0, buf, &sz) != 0;
+            CloseHandle(h);
+            if (!got)
+                continue;
+            const QString image = QString::fromWCharArray(buf);
+            if (!pathInsideDirectory(image, dir))
+                continue;
+
+            ++found;
+            if (!procs)
+                continue;
+            if (containsPid(*procs, pid))
+                continue;  // Restart Manager already named it; one row is enough
+            procs->push_back(describeProcess(pid, QString()));
+            Logger::info(QStringLiteral("[processesRunningFrom] %1 runs from inside %2")
+                             .arg(image, dir));
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+// Who is holding *dir* open. Two independent detectors, because either one on
+// its own leaves a hole:
+//   * Restart Manager knows which processes hold files open — but only the files
+//     it was told about, and only files (a folder handle held by a process whose
+//     working directory is there is invisible to it).
+//   * the image scan sees a program running from inside the folder — which is
+//     the strongest possible reason a folder will not rename, and the very case
+//     Restart Manager misses.
+// Held for both detectors: a process we must never close is never returned as
+// closable, whichever one noticed it.
+int processesLockingDir(const QString& dir, QVector<LockingProcess>* procs, int maxFiles)
+{
+    if (procs)
+        procs->clear();
+
+    const std::vector<QString> files = newestFilesUnder(dir, maxFiles);
+
+    std::vector<std::wstring> native;
+    native.reserve(files.size());
+    for (const QString& f : files)
+        native.push_back(QDir::toNativeSeparators(f).toStdWString());
     std::vector<LPCWSTR> paths;
-    paths.reserve(files.size());
-    for (const std::wstring& f : files)
+    paths.reserve(native.size());
+    for (const std::wstring& f : native)
         paths.push_back(f.c_str());
 
     DWORD session = 0;
@@ -582,11 +921,14 @@ int processesLockingDir(const QString& dir, QStringList* procNames, int maxFiles
     const DWORD startRc = RmStartSession(&session, 0, key);
     if (startRc != ERROR_SUCCESS) {
         Logger::warn(QStringLiteral("[processesLockingDir] RmStartSession failed rc=%1").arg(startRc));
-        return 0;
+        // The image scan needs no session, so the query still has an answer.
+        return processesRunningFrom(dir, procs);
     }
     int found = 0;
-    const DWORD regRc = RmRegisterResources(session, static_cast<UINT>(paths.size()),
-                                            paths.data(), 0, nullptr, 0, nullptr);
+    const DWORD regRc = paths.empty()
+                            ? ERROR_SUCCESS
+                            : RmRegisterResources(session, static_cast<UINT>(paths.size()),
+                                                  paths.data(), 0, nullptr, 0, nullptr);
     if (regRc != ERROR_SUCCESS) {
         Logger::warn(QStringLiteral("[processesLockingDir] RmRegisterResources failed rc=%1 files=%2")
                          .arg(regRc).arg(paths.size()));
@@ -613,32 +955,193 @@ int processesLockingDir(const QString& dir, QStringList* procNames, int maxFiles
         }
         // Partial fills still name real processes, so iterate whatever arrived.
         for (UINT i = 0; i < got && i < info.size(); ++i) {
+            const quint32 pid = info[i].Process.dwProcessId;
+            if (procs && containsPid(*procs, pid))
+                continue;  // Restart Manager reports one entry per file it holds
+            const LockingProcess lp =
+                describeProcess(pid, QString::fromWCharArray(info[i].strAppName));
+            if (procs)
+                procs->push_back(lp);
             ++found;
-            QString name = QString::fromWCharArray(info[i].strAppName);
-            if (name.isEmpty()) {
-                // Some processes have no friendly name registered — fall back
-                // to their executable file name.
-                HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
-                                       info[i].Process.dwProcessId);
-                if (h) {
-                    WCHAR buf[1024];
-                    DWORD sz = 1024;
-                    if (QueryFullProcessImageNameW(h, 0, buf, &sz))
-                        name = QFileInfo(QString::fromWCharArray(buf)).fileName();
-                    CloseHandle(h);
-                }
-            }
-            if (!name.isEmpty() && procNames && !procNames->contains(name))
-                procNames->push_back(name);
         }
     }
     RmEndSession(session);
-    return found;
+
+    // Second, independent detector. A query that named nobody is not evidence
+    // that nobody is there, and this is the cheapest way to make that gap
+    // smaller — a program running from inside the folder is a certain blocker
+    // even when it holds no data file open.
+    processesRunningFrom(dir, procs);
+
+    // The return value is the number of DISTINCT processes, so that it says the
+    // same thing as the list the caller is handed. Restart Manager's raw count
+    // is per file, which reads as "twelve programs" when it is one program
+    // holding twelve files.
+    return procs ? static_cast<int>(procs->size()) : found;
 }
 #else
 bool relaunchAsAdmin() { return false; }
-int processesLockingDir(const QString&, QStringList*, int) { return 0; }
+bool pathInsideDirectory(const QString&, const QString&) { return false; }
+int processesLockingDir(const QString&, QVector<LockingProcess>*, int) { return 0; }
+int processesRunningFrom(const QString&, QVector<LockingProcess>*) { return 0; }
 #endif
+
+// ---------------------------------------------------------------------------
+// Closing a process that is holding a folder open
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+namespace {
+
+struct CloseEnumContext {
+    DWORD pid = 0;
+    int sent = 0;
+};
+
+BOOL CALLBACK closeEnumProc(HWND hwnd, LPARAM param)
+{
+    auto* ctx = reinterpret_cast<CloseEnumContext*>(param);
+    DWORD owner = 0;
+    GetWindowThreadProcessId(hwnd, &owner);
+    if (owner != ctx->pid)
+        return TRUE;
+    // POSTED, not sent: the target handles it on its own message loop, so a
+    // program that takes its time saving its work never blocks us.
+    if (PostMessageW(hwnd, WM_CLOSE, 0, 0))
+        ++ctx->sent;
+    return TRUE;
+}
+
+}  // namespace
+
+int requestCloseProcess(quint32 pid)
+{
+    if (pid == 0)
+        return 0;
+    CloseEnumContext ctx;
+    ctx.pid = static_cast<DWORD>(pid);
+    EnumWindows(closeEnumProc, reinterpret_cast<LPARAM>(&ctx));
+    return ctx.sent;
+}
+
+bool processAlive(quint32 pid)
+{
+    if (pid == 0)
+        return false;
+    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                           static_cast<DWORD>(pid));
+    if (!h)
+        // Either already gone, or beyond our reach — and in the second case we
+        // could not have closed it anyway, so "gone" is the honest answer.
+        return false;
+    // A process handle becomes signalled the moment the process exits, which
+    // asks "is it dead yet?" without walking the process list.
+    const DWORD rc = WaitForSingleObject(h, 0);
+    CloseHandle(h);
+    return rc == WAIT_TIMEOUT;
+}
+
+bool terminateProcess(quint32 pid, quint32* winError)
+{
+    if (pid == 0)
+        return false;
+    HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+    if (!h) {
+        if (winError)
+            *winError = GetLastError();
+        return false;
+    }
+    const bool ok = TerminateProcess(h, 1) != FALSE;
+    if (!ok) {
+        if (winError)
+            *winError = GetLastError();
+    } else {
+        // Give it the moment it needs to actually disappear: checking liveness
+        // while it is still tearing down would call a successful kill a failure.
+        WaitForSingleObject(h, 5000);
+    }
+    CloseHandle(h);
+    return ok;
+}
+#else
+int requestCloseProcess(quint32) { return 0; }
+bool processAlive(quint32) { return false; }
+bool terminateProcess(quint32, quint32*) { return false; }
+#endif
+
+QVector<CloseOutcome> closeProcesses(const QVector<LockingProcess>& procs, int graceMs)
+{
+    QVector<CloseOutcome> out;
+    out.reserve(procs.size());
+
+    // Pass 1 — say please, to everyone at once. Doing it in one sweep means a
+    // batch of five programs shuts down inside one grace period instead of five.
+    QVector<int> waiting;
+    for (int i = 0; i < procs.size(); ++i) {
+        CloseOutcome o;
+        o.pid = procs[i].pid;
+        o.name = procs[i].name;
+
+        if (!procs[i].safeToClose) {
+            o.result = CloseOutcome::Refused;
+            o.blockKey = procs[i].blockKey;
+        } else if (!processAlive(procs[i].pid)) {
+            o.result = CloseOutcome::Exited;
+        } else {
+            requestCloseProcess(procs[i].pid);
+            waiting.push_back(i);   // result decided in pass 3
+        }
+        out.push_back(o);
+    }
+
+    // Pass 2 — one shared grace period. The loop is pumped in short slices so
+    // the window keeps painting while a slow program saves, instead of looking
+    // hung for the whole wait.
+    for (int elapsed = 0; !waiting.isEmpty() && elapsed < graceMs; elapsed += 30) {
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
+        for (int k = waiting.size() - 1; k >= 0; --k) {
+            if (!processAlive(procs[waiting[k]].pid))
+                waiting.remove(k);
+        }
+        if (!waiting.isEmpty())
+            QThread::msleep(30);
+    }
+
+    // Pass 3 — whatever is still standing ignored the request.
+    for (int i : waiting) {
+        out[i].result = (terminateProcess(procs[i].pid) && !processAlive(procs[i].pid))
+                            ? CloseOutcome::Killed
+                            : CloseOutcome::Survived;
+    }
+    return out;
+}
+
+QStringList respawnedAmong(const QVector<LockingProcess>& procs,
+                           const QStringList& closedImages)
+{
+    QStringList out;
+    if (closedImages.isEmpty())
+        return out;
+
+    // Identity across a restart is the image path, not the name and certainly
+    // not the PID: an update can rename the executable's display name, and every
+    // restart hands out a new number.
+    auto normalize = [](const QString& raw) {
+        return QDir::cleanPath(QDir::fromNativeSeparators(raw)).toLower();
+    };
+    QStringList closed;
+    closed.reserve(closedImages.size());
+    for (const QString& c : closedImages)
+        closed << normalize(c);
+
+    for (const LockingProcess& p : procs) {
+        const QString key = normalize(p.exePath.isEmpty() ? p.name : p.exePath);
+        if (key.isEmpty() || !closed.contains(key))
+            continue;
+        if (!out.contains(p.name))
+            out << p.name;
+    }
+    return out;
+}
 
 // ---------------------------------------------------------------------------
 // writeDontDeleteMarker

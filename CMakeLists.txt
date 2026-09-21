@@ -74,6 +74,8 @@ set(SOURCES
     src/ui/ToggleSwitch.cpp
     src/ui/AppPathSyncDialog.cpp
     src/ui/AppDataMovePanel.cpp
+    src/ui/FilterHeaderView.cpp
+    src/ui/LockerDialog.cpp
     src/cleanup/CleanupScanner.cpp
     src/cleanup/CleanupWorker.cpp
     src/cleanup/CleanupPanel.cpp
@@ -127,16 +129,28 @@ endif()
 install(TARGETS NcduWin RUNTIME DESTINATION dist)
 
 # Keep the locale files next to the executable in step with the sources. The app
-# reads them at runtime, and a change to them does not relink anything, so a
-# POST_BUILD step alone would silently ship yesterday's strings — this target
-# runs on every build instead.
-add_custom_target(copy_locales ALL
+# reads them at runtime, and editing them relinks nothing, so a POST_BUILD step
+# would not fire and a plain build would silently ship yesterday's strings —
+# every new key then renders as its own name in the UI.
+#
+# Hanging this off NcduWin as a dependency, rather than leaving it as an ALL
+# target, is what makes it fire for a single-target build too (``cmake --build
+# --target NcduWin``, which is how the day-to-day build and the probe lab call
+# it). An ALL target only runs when the whole project is built.
+#
+# The destination is spelled out with ${CMAKE_BINARY_DIR}/$<CONFIG> rather than
+# $<TARGET_FILE_DIR:NcduWin>: a generator expression naming a target creates a
+# real target-level dependency on it, which would close the cycle with the
+# dependency added on the next line. No output directory is overridden for
+# NcduWin, so this is the same folder, and $<CONFIG> keeps Debug and Release
+# apart in the multi-config generator.
+add_custom_target(copy_locales
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/locales"
-            "$<TARGET_FILE_DIR:NcduWin>/locales"
-    DEPENDS NcduWin
+            "${CMAKE_BINARY_DIR}/$<CONFIG>/locales"
     VERBATIM
 )
+add_dependencies(NcduWin copy_locales)
 
 # Deploy Qt DLLs matching the build configuration (Debug→debug DLLs, Release→release DLLs)
 add_custom_command(TARGET NcduWin POST_BUILD

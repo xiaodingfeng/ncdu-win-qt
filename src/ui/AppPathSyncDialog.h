@@ -59,9 +59,21 @@ private:
     // in lets the caller skip the pre-move "changed OK" popup, so choosing
     // "move files" goes straight into the progress. *markerDir* receives the
     // "do not delete" warning icon after the move.
+    //
+    // *closeRound* counts how many times this move has already been re-run after
+    // the user closed the programs holding files back; it stops the retry from
+    // becoming a loop (see kMaxCloseRounds).
     void moveContentsAsync(const QVector<QPair<QString, QString>>& pairs,
                            const QString& doneNotice = QString(),
-                           const QString& markerDir = QString());
+                           const QString& markerDir = QString(),
+                           int closeRound = 0);
+    // What a finished round has to say: the completion summary when everything
+    // moved, or the programs still holding the leftovers — with the offer to
+    // close them and carry on, which is the only way forward while the location
+    // has already changed underneath the files.
+    void reportMoveOutcome(const QVector<QPair<QString, QString>>& pairs,
+                           const QString& doneNotice, const QString& markerDir,
+                           int closeRound);
 
     QString m_suggestedPath;
     std::vector<AppSaveInfo> m_apps;

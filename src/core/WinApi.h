@@ -2,6 +2,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <QVector>
 #include <tuple>
 #include <utility>
 
@@ -88,16 +89,112 @@ bool isAdmin();
 // launch failed.
 bool relaunchAsAdmin();
 
-// Names of the processes currently holding open handles on files under *dir*
-// (Windows Restart Manager over up to *maxFiles* files, walking subdirectories).
-// Returns how many locking processes were found and fills *procNames* (may be
-// fewer than the return value when a name could not be resolved). An empty
-// result on a failed rename does NOT mean "nobody holds it" — the handle may
-// sit on a file beyond the sampling cap. A directory rename fails with
-// ERROR_ACCESS_DENIED (5) exactly when such a handle exists, and no amount of
-// elevation can close another process's handle — this is how the UI can say
-// WHO is in the way.
-int processesLockingDir(const QString& dir, QStringList* procNames, int maxFiles = 800);
+// ---------------------------------------------------------------------------
+// Who is holding a folder, and whether we may close them
+// ---------------------------------------------------------------------------
+
+// One process with an open handle on a file inside a folder we want to move —
+// or one that is simply running from inside it. Restart Manager is the only API
+// that answers "who holds this file", and it hands back a PID; the display name
+// and the image path are resolved here so the user is shown something they
+// recognise instead of a bare number. A folder that refuses to rename is often
+// blocked by the second kind, which Restart Manager cannot see at all.
+struct LockingProcess {
+    quint32 pid = 0;
+    QString name;      // application name, falling back to the executable name
+    QString exePath;   // full path of the running image; empty when unresolvable
+    // False when this process must never be closed by us. A move blocked by one
+    // of those can only ask the user to deal with it.
+    bool safeToClose = false;
+    // Why it is not closable, as an I18n key (empty when safe). Held as a key
+    // rather than as finished text so a language switch re-renders it.
+    QString blockKey;
+};
+
+// Is *file* that folder, or anywhere beneath it? Case-insensitive and
+// boundary-aware ("C:\Data2" is not inside "C:\Data"), normalising first and
+// touching no file system, so the probe lab can check the awkward spellings.
+bool pathInsideDirectory(const QString& file, const QString& dir);
+
+// Who is holding *dir* open: the number of distinct processes found, with one
+// entry each in *procs* (Restart Manager reports one entry per file a process
+// holds, which is folded down to one per process).
+//
+// Two independent detectors, because either one alone leaves a hole. Restart
+// Manager knows which processes hold files open, but only the files it was told
+// about — the *maxFiles* newest are registered, since a program holding a file
+// is holding one it just wrote — and only files, never a folder handle. The
+// image scan then catches a program running from inside the folder, which is
+// the strongest possible reason it will not rename.
+//
+// An empty result is therefore much stronger evidence than it used to be, but
+// still not proof: a folder handle held by a process whose working directory is
+// here is invisible to both.
+int processesLockingDir(const QString& dir, QVector<LockingProcess>* procs,
+                        int maxFiles = 800);
+
+// Processes whose executable is running from inside *dir*. Entries are appended
+// to *procs* (deduplicated by PID against what is already there) and the number
+// found is returned. Kept separate from processesLockingDir so the narrow
+// question stays answerable on its own.
+int processesRunningFrom(const QString& dir, QVector<LockingProcess>* procs);
+
+// The executable names this program refuses to close, lower case. Terminating
+// any of them can take the session (or the machine) down, and none of them is
+// ever the reason a user's data folder stays locked for long.
+QStringList neverCloseNames();
+
+// True when *nameOrPath* names one of those. Accepts either a bare file name or
+// a full path, and either the friendly name or the executable name, because
+// Restart Manager reports the former and the guard list holds the latter.
+bool isNeverCloseName(const QString& nameOrPath);
+
+// Ask *pid* to quit the way clicking its window's close button would: WM_CLOSE
+// to every top-level window it owns. Returns how many windows were notified.
+// This is the polite first step — it is what lets a program save its work.
+int requestCloseProcess(quint32 pid);
+
+// True while the process still exists. A process we are not allowed to open
+// reads as gone, which is the safe answer: we could not have closed it anyway.
+bool processAlive(quint32 pid);
+
+// Force it. Only ever called for a process that ignored the polite request.
+bool terminateProcess(quint32 pid, quint32* winError = nullptr);
+
+// What happened to one process during one close round.
+struct CloseOutcome {
+    enum Result {
+        Exited,    // gone: closed itself, or was already gone
+        Killed,    // ignored the request and was terminated
+        Refused,   // never touched (see *blockKey*)
+        Survived,  // still running even after the forced attempt
+    };
+    quint32 pid = 0;
+    QString name;
+    Result result = Refused;
+    QString blockKey;   // I18n key when result == Refused
+};
+
+// Closes every process in *procs*: request first, let them all shut down
+// together for up to *graceMs*, then force whatever is left. Entries whose
+// safeToClose is false come back as Refused and are never touched.
+//
+// The wait pumps the event loop in short slices, so the window keeps painting
+// while a slow program saves its work instead of looking hung.
+QVector<CloseOutcome> closeProcesses(const QVector<LockingProcess>& procs,
+                                     int graceMs = 4000);
+
+// Which of *procs* are programs from *closedImages*: ones a previous round in
+// this batch got rid of and which are holding the folder again. That is a
+// program that restarts itself — a helper process, a tray agent, a service —
+// and it is the one case where closing again cannot possibly help, so the UI
+// says so instead of asking a second time.
+//
+// *closedImages* holds image paths; the match is on the image path for both
+// sides (a name is only used when a process has no readable path), because that
+// is what survives a restart. Returns the display names, deduplicated.
+QStringList respawnedAmong(const QVector<LockingProcess>& procs,
+                           const QStringList& closedImages);
 
 // Drop the "do not delete / move / rename this folder" warning icon into *dir*.
 // The icon is language-neutral; the FILE NAME is not — it is the sentence the

@@ -1,5 +1,6 @@
 #include "AppPathSyncDialog.h"
 
+#include <QApplication>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -23,6 +24,7 @@
 #include "AppDataMovePanel.h"
 #include "KnownFolderTable.h"
 #include "KnownFolderPath.h"
+#include "LockerDialog.h"
 #include "WinApi.h"
 #include "Logger.h"
 #include "FormatHelpers.h"
@@ -39,6 +41,12 @@
 #endif
 
 namespace {
+
+// How many times a move may be re-run after the user closed the programs holding
+// files back. One retry covers the real case (a program releases its handles and
+// the rest of the files follow); anything beyond that is a program that comes
+// straight back, and an endless prompt loop is worse than an honest report.
+constexpr int kMaxCloseRounds = 2;
 
 // One spelling for every path this dialog shows, compares or stores.
 // (KnownFolderPath.h carries the resolution itself, so the same code the app
@@ -637,7 +645,7 @@ bool AppPathSyncDialog::updateAppPath(const QString& appId, const QString& newPa
 
 void AppPathSyncDialog::moveContentsAsync(const QVector<QPair<QString, QString>>& pairs,
                                           const QString& doneNotice,
-                                          const QString& markerDir)
+                                          const QString& markerDir, int closeRound)
 {
     if (pairs.isEmpty())
         return;
@@ -648,8 +656,14 @@ void AppPathSyncDialog::moveContentsAsync(const QVector<QPair<QString, QString>>
     qint64 total = 0;
     for (const auto& p : pairs)
         total += WinApi::dirSizeNoReparse(p.first);
-    if (total <= 0)
+    // Nothing measurable left — an empty tree, or one holding nothing but the
+    // reparse points the mover will not touch. There is no progress to report,
+    // but there is still an outcome to explain, so it is reported right away
+    // instead of the window going quiet.
+    if (total <= 0) {
+        reportMoveOutcome(pairs, doneNotice, markerDir, closeRound);
         return;
+    }
 
     auto* progress = new QProgressDialog(
         I18n::tr("app_sync.move_moving", QMap<QString, QString>{
@@ -685,7 +699,7 @@ void AppPathSyncDialog::moveContentsAsync(const QVector<QPair<QString, QString>>
 
     auto* watcher = new QFutureWatcher<void>(this);
     connect(watcher, &QFutureWatcher<void>::finished, this,
-            [this, progress, watcher, cancelled, pairsCopy, doneNotice, markerDir]() {
+            [this, progress, watcher, cancelled, pairsCopy, doneNotice, markerDir, closeRound]() {
                 progress->close();
                 progress->deleteLater();
                 watcher->deleteLater();
@@ -696,20 +710,7 @@ void AppPathSyncDialog::moveContentsAsync(const QVector<QPair<QString, QString>>
                 // goes in whatever happened.
                 if (!markerDir.isEmpty())
                     WinApi::writeDontDeleteMarker(markerDir);
-                // Interrupted mid-way is fine and expected (Explorer behaves
-                // the same); silently stopping would not be. Anything still in
-                // an old folder stays there and is reported.
-                for (const auto& p : pairsCopy) {
-                    if (QDir(p.first).exists() && !QDir(p.first).isEmpty()) {
-                        Dialogs::warn(this, I18n::tr("app_sync.move_dlg_title"),
-                                      I18n::tr("app_sync.move_partial"));
-                        return;
-                    }
-                }
-                // One popup after the move: the completion summary the caller
-                // handed in (it deliberately skipped its pre-move success box).
-                if (!doneNotice.isEmpty())
-                    Dialogs::info(this, I18n::tr("app_sync.title"), doneNotice);
+                reportMoveOutcome(pairsCopy, doneNotice, markerDir, closeRound);
             });
     watcher->setFuture(QtConcurrent::run([pairsCopy, copied, cancelled]() {
         for (const auto& p : pairsCopy) {
@@ -718,4 +719,97 @@ void AppPathSyncDialog::moveContentsAsync(const QVector<QPair<QString, QString>>
             moveContentsRecursive(p.first, p.second, copied.get(), cancelled.get());
         }
     }));
+}
+
+void AppPathSyncDialog::reportMoveOutcome(const QVector<QPair<QString, QString>>& pairs,
+                                          const QString& doneNotice,
+                                          const QString& markerDir, int closeRound)
+{
+    // Whatever is still sitting in an old folder is what did not make it.
+    // Its presence is not an error in itself — Explorer leaves files behind the
+    // same way — but WHICH files, and who is holding them, has to reach the user.
+    QVector<QPair<QString, QString>> left;
+    for (const auto& p : pairs) {
+        if (QDir(p.first).exists() && !QDir(p.first).isEmpty())
+            left.append(p);
+    }
+
+    if (left.isEmpty()) {
+        // One popup after the move: the completion summary the caller handed in
+        // (it deliberately skipped its pre-move success box).
+        if (!doneNotice.isEmpty())
+            Dialogs::info(this, I18n::tr("app_sync.title"), doneNotice);
+        return;
+    }
+
+    if (closeRound < kMaxCloseRounds) {
+        // Ask who is holding them, and let the user clear it. Naming the program
+        // is the whole difference between "some files stayed behind" and a user
+        // who can actually do something about it.
+        QVector<WinApi::LockingProcess> procs;
+        for (const auto& p : left) {
+            QVector<WinApi::LockingProcess> found;
+            WinApi::processesLockingDir(p.first, &found, 400);
+            for (const WinApi::LockingProcess& lp : found) {
+                bool seen = false;
+                for (const WinApi::LockingProcess& already : procs)
+                    if (already.pid == lp.pid)
+                        seen = true;
+                if (!seen)
+                    procs.append(lp);
+            }
+        }
+
+        if (!procs.isEmpty()) {
+            // Nothing closable means nothing to offer: the only honest thing is
+            // the report at the end of this function, which names them.
+            bool closable = false;
+            for (const WinApi::LockingProcess& lp : procs)
+                if (lp.safeToClose)
+                    closable = true;
+            if (closable) {
+                // No "skip" button here: the location change has already
+                // happened, so there is no folder to skip — either the files
+                // follow, or they stay where they are.
+                const LockerDialog::Answer answer = LockerDialog::ask(
+                    this, I18n::tr("app_sync.title"),
+                    left.size() == 1
+                        ? I18n::tr(QStringLiteral("app_sync.locked_intro"),
+                                   QMap<QString, QString>{{"name", left.first().first}})
+                        : I18n::tr(QStringLiteral("app_sync.locked_intro_many"),
+                                   QMap<QString, QString>{{"count", QString::number(left.size())}}),
+                    procs,
+                    I18n::tr(QStringLiteral("app_sync.btn_close_retry")),
+                    QString(), /*allowSkip=*/false);
+
+                if (answer == LockerDialog::CloseAndContinue) {
+                    QApplication::setOverrideCursor(Qt::WaitCursor);
+                    const QVector<WinApi::CloseOutcome> outcomes =
+                        WinApi::closeProcesses(procs);
+                    QApplication::restoreOverrideCursor();
+
+                    const QString report = LockerDialog::outcomeText(outcomes);
+                    if (!report.isEmpty())
+                        Logger::info(QStringLiteral("[app_sync] programs holding the old "
+                                                   "locations:\n%1").arg(report));
+
+                    if (LockerDialog::anyClosed(outcomes)) {
+                        // moveContentsRecursive is a plain "move what is still
+                        // here" walk, so running it again IS the retry: it picks
+                        // up exactly the files that stayed behind, and nothing
+                        // else.
+                        moveContentsAsync(left, doneNotice, markerDir, closeRound + 1);
+                        return;
+                    }
+                    // Nothing went away. Asking again would get the same answer,
+                    // so the round ends with what could not be done — which is
+                    // what the report below says.
+                }
+            }
+        }
+    }
+
+    Dialogs::warn(this, I18n::tr("app_sync.title"),
+                  closeRound == 0 ? I18n::tr("app_sync.move_partial")
+                                  : I18n::tr("app_sync.retry_give_up"));
 }

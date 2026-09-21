@@ -74,6 +74,35 @@ dependencies bundled, and supports English / 简体中文 out of the box.
   remove source flow, with one-click restore if any step fails; the target
   folder gets a "do not delete, move or rename" marker so it is never
   removed by mistake and taken out of sync.
+- **Programs holding the folder** — a move starts by checking which programs
+  have the folder open, names each one with its PID, and offers to close them:
+  ask politely first, force only what ignores the request. Critical system
+  programs (Explorer, logon processes, security software) are never closed
+  automatically and are only pointed out. A move that still does not finish
+  shows the same list and can be retried; skipping a folder leaves it exactly
+  as it was, unticked and ready to move later. A move that fails says which
+  program is in the way, why it cannot be closed, and whether to quit it by
+  hand or restart and retry immediately — never just "a program is using it".
+- **A restore checks nobody is using the original folder first** — moving back
+  empties the original location before writing the data into it, which cannot be
+  done while the program that owns the data is running: it would write into a
+  folder being emptied under it, and the copy that comes back could never be
+  verified. So "restore" asks who is holding the folder before it touches
+  anything. Closable programs get one offer to be closed, and are re-checked
+  afterwards; if they cannot go — or restart themselves — the restore simply
+  does not start, leaves the junction and both copies exactly as they were, and
+  says who is in the way and whether to quit it by hand or retry after a reboot.
+- **Leftovers are cleaned up, not left behind** — when a restore cannot delete
+  the copy it made because files inside are still open, it does not report
+  success and move on: it names the holders, offers to close them, and tries
+  again. Whatever remains is recorded as this app's own, the row grows a
+  "remove leftover" action, and a later move offers to clear it instead of
+  stopping at "a folder with that name already exists".
+- **Filter by status** — the Status column of the app data folder list carries
+  its own filter: tick several states at once (say "Incomplete" and "Ready") and
+  the panel stays open while you do. Filtered-out folders are hidden, not
+  dropped, so their ticks survive; the totals, and the move itself, only ever
+  count the rows you can see.
 - **Scan timing** — the status bar shows how long each scan actually took,
   formatted as ms / s / min-s / h-min.
 - **Auto-scan on startup** — instantly shows your home directory usage
@@ -197,9 +226,9 @@ ncdu-win-qt/
 ├── tests/
 │   ├── test_scanner.cpp    # C++ unit tests (Qt Test)
 │   └── compare_scanners.cpp  # Scanner comparison benchmarks
-├── probe_lab/              # Regression harness (7 probes / 118 assertions)
+├── probe_lab/              # Regression harness (9 probes / 292 assertions)
 │   ├── CMakeLists.txt
-│   └── run1/ … run7/       # Move safety / marker names / known folders / language refresh
+│   └── run1/ … run9/       # Move safety / marker names / known folders / language / lockers / leftovers / state filter
 ├── resources/              # Resources embedded into the binary
 │   └── dont_delete_folder.ico  # "Do not delete" marker for move targets
 ├── docs/                   # Website & screenshots

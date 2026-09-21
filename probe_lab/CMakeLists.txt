@@ -76,7 +76,9 @@ target_link_libraries(knownfolder_probe PRIVATE Qt6::Core
 find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)
 add_executable(ui_render_probe run6/ui_render_probe.cpp
     ${PROJ}/src/ui/AppDataMovePanel.cpp
+    ${PROJ}/src/ui/FilterHeaderView.cpp
     ${PROJ}/src/ui/AppPathSyncDialog.cpp
+    ${PROJ}/src/ui/LockerDialog.cpp
     ${PROJ}/src/core/WinApi.cpp
     ${PROJ}/src/core/Logger.cpp
     ${PROJ}/src/core/I18n.cpp
@@ -97,7 +99,9 @@ target_link_libraries(ui_render_probe PRIVATE Qt6::Widgets Qt6::Concurrent
 # NCDU_SRC_DIR. Needs locales/ next to the exe.
 add_executable(lang_refresh_probe run7/lang_refresh_probe.cpp
     ${PROJ}/src/ui/AppDataMovePanel.cpp
+    ${PROJ}/src/ui/FilterHeaderView.cpp
     ${PROJ}/src/ui/AppPathSyncDialog.cpp
+    ${PROJ}/src/ui/LockerDialog.cpp
     ${PROJ}/src/ai/AiAnalysisDialog.cpp
     ${PROJ}/src/core/WinApi.cpp
     ${PROJ}/src/core/Logger.cpp
@@ -110,4 +114,32 @@ set_target_properties(lang_refresh_probe PROPERTIES AUTOMOC ON)
 target_compile_definitions(lang_refresh_probe PRIVATE NCDU_SRC_DIR="${PROJ}/src")
 target_include_directories(lang_refresh_probe PRIVATE ${PROJ}/src ${PROJ}/src/core ${PROJ}/src/ui ${PROJ}/src/ai)
 target_link_libraries(lang_refresh_probe PRIVATE Qt6::Widgets Qt6::Concurrent
+    shell32 shlwapi ole32 user32 kernel32 advapi32 rstrtmgr)
+
+# The "these programs are using this folder" prompt. It is the only screen the
+# user sees when a move is blocked, so it is checked both ways: its logic (which
+# rows, which buttons, what each button reports) and its looks, as a PNG. It
+# needs locales/ next to the exe for its own strings.
+add_executable(locker_dialog_probe run8/locker_dialog_probe.cpp
+    ${PROJ}/src/ui/LockerDialog.cpp
+    ${PROJ}/src/core/WinApi.cpp
+    ${PROJ}/src/core/Logger.cpp
+    ${PROJ}/src/core/I18n.cpp)
+set_target_properties(locker_dialog_probe PROPERTIES AUTOMOC ON)
+target_include_directories(locker_dialog_probe PRIVATE ${PROJ}/src ${PROJ}/src/core ${PROJ}/src/ui)
+target_link_libraries(locker_dialog_probe PRIVATE Qt6::Widgets
+    shell32 shlwapi ole32 user32 kernel32 advapi32 rstrtmgr)
+
+# The state filter: the funnel in the folder list's header and the panel it
+# opens. Pure UI, and both halves fail invisibly — a funnel whose target
+# overlaps the sort area turns filtering into re-sorting, and a panel that
+# closes on every tick makes picking several states impossible — so both are
+# clicked here rather than looked at.
+add_executable(state_filter_probe run9/state_filter_probe.cpp
+    ${PROJ}/src/ui/FilterHeaderView.cpp
+    ${PROJ}/src/core/Logger.cpp
+    ${PROJ}/src/core/I18n.cpp)
+set_target_properties(state_filter_probe PROPERTIES AUTOMOC ON)
+target_include_directories(state_filter_probe PRIVATE ${PROJ}/src ${PROJ}/src/core ${PROJ}/src/ui)
+target_link_libraries(state_filter_probe PRIVATE Qt6::Widgets
     shell32 shlwapi ole32 user32 kernel32 advapi32 rstrtmgr)

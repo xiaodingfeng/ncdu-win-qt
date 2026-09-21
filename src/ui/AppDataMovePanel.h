@@ -6,16 +6,24 @@
 #include <QLabel>
 #include <QElapsedTimer>
 #include <QFutureWatcher>
+#include <QSet>
 #include <QStringList>
 #include <QVector>
+#include <array>
 #include <atomic>
 #include <memory>
 #include <vector>
+
+#include "MoveSelect.h"
+#include "WinApi.h"
 
 class QProcess;
 class QProgressBar;
 class QComboBox;
 class QTimer;
+class FilterHeaderView;
+class StateFilterPopup;
+struct StateFilterEntry;
 
 // Moves any application's data folder (AppData / LocalAppData / Documents) to a
 // different drive and leaves a directory junction behind, so software that has
@@ -53,6 +61,11 @@ public:
         qint64 dst = -1;
     };
 
+    // The I18n key of a row state. Public because the state column is sized from
+    // the longest of these names, and a check that the column really holds them
+    // has to walk the same list rather than its own copy of it.
+    static QString stateKeyOf(int state);
+
     // What the worker that measures both trees reports while it works. Shared
     // with that worker rather than owned by the panel alone: a worker still
     // walking a tree when the panel is destroyed must not write into memory the
@@ -72,6 +85,9 @@ private slots:
     void onScan();
     void onMoveSelected();
     void onRestore(int row);
+    // Drops a leftover copy this app failed to delete (see DataDir::residueTarget):
+    // asks who is holding it, offers to close them, and deletes it for real.
+    void onCleanResidue(int row);
     void onItemChanged(QTreeWidgetItem* item, int column);
     void onPathClicked(QTreeWidgetItem* item, int column);
     void onHeaderClicked(int column);
@@ -81,6 +97,7 @@ private slots:
     void onCopyProbeReady();
     void onCopyTick();
     void onJobTick();
+    void onLockProbeReady();
     void onScopeChanged(int index);
     void onAddScope();
     void onRemoveScope();
@@ -103,6 +120,13 @@ private:
         // been verified. The rename is atomic, which is what lets the original
         // stay intact until the junction is actually in place.
         QString oldPath;
+        // A copy of this folder's data that this app put on another drive and
+        // then could not delete — because a program still had a file inside it
+        // open. The data itself is home: this is only the leftover, and the
+        // folder it names is one this app is responsible for. Keeping the record
+        // is the whole point: it is what turns "a folder with that name already
+        // exists" into "that is our own leftover, here is how to clear it".
+        QString residueTarget;
         qint64 size = -1;    // -1 while still unknown
         int state = 0;       // see kState* in the .cpp
         // How far this folder's relocation got, as recorded in the journal
@@ -121,6 +145,19 @@ private:
         // nothing to act on.
         QString failKey;
         QMap<QString, QString> failArgs;
+        // True once this session has offered to close the programs holding this
+        // folder, and the user said yes. Without it a folder that is held open
+        // by something we cannot close would ask again after every failed
+        // retry, turning one stubborn process into an endless loop of prompts.
+        bool closeAttempted = false;
+        // Image paths of the programs we actually got rid of when that offer
+        // was accepted. A program that shows up holding the folder again is one
+        // that restarted itself (a helper process, a tray agent, a service), and
+        // that is a different answer for the user than "some program is using
+        // it": no number of further close rounds will ever finish the move.
+        // Identified by image path rather than by name, because that is what
+        // survives a restart.
+        QStringList closedImages;
     };
 
     // One repair the recovery pass wants to perform on an interrupted move.
@@ -160,8 +197,35 @@ private:
     void setSort(int column, Qt::SortOrder order);
     bool rowLessThan(const DataDir& a, const DataDir& b) const;
     int rowOfDir(int dirIndex) const;
-    QString stateKeyOf(int state) const;
+    // Widths of the two columns whose content is wording rather than data, both
+    // measured from the labels that actually go in them in the current language.
+    // Fixed numbers cannot work: "状态" and "清理残留" are one width in Chinese
+    // and a very different one in English, and a column that is a few pixels
+    // short does not look cramped, it clips a button mid-word.
+    int stateColumnWidth() const;
+    int actionColumnWidth() const;
+    void applyColumnWidths();
     bool relocated(const DataDir& d) const;
+
+    // ---- state filter ----
+    // The state a row is really showing. "Waiting behind the move that is
+    // running" belongs to the queue rather than to the folder, so it is worked
+    // out here instead of being stored — and the filter has to see the very
+    // same answer the row does, or it would hide rows that are on screen.
+    int effectiveState(int dirIndex) const;
+    bool passesStateFilter(int dirIndex) const;
+    bool stateFilterActive() const;
+    QSet<int> stateFilterSelection() const;
+    // What the filter panel lists: every state that is actually in the list,
+    // with how many folders are in it, plus any state the filter is already on
+    // (a selection that quietly disappeared could not be switched off again).
+    QVector<StateFilterEntry> stateFilterEntries() const;
+    QString stateFilterTooltip() const;
+    void onStateFilterRequested(const QPoint& globalPos);
+    // Re-derives the visible rows from the selection. The list itself is left
+    // untouched: rows are hidden, never dropped, so nothing else that indexes a
+    // row by its folder has to learn about the filter.
+    void applyStateFilter();
     QString dstOf(const QString& root, const QString& name) const;
     int queueIndexOf(int dirIndex) const;
     // The folders the user ticked that can actually be queued for a move now.
@@ -172,8 +236,50 @@ private:
     void startVerify();
     void runRestoreStep();
     void finishRestore();
+    // What a restore does once the original folder is known to be free: the
+    // junction goes first, then whatever occupies the original path is measured
+    // against the copy, and an empty path is simply copied into. Split out
+    // because the precheck arrives here through its own detour — the question
+    // "who is holding this folder" has to be answered before any of it starts.
+    void startRestoreHandover(int dirIndex);
+    // Remembers which programs this panel actually got rid of, by image path, so
+    // a later round can tell "some program holds it" apart from "this program
+    // starts itself again". Shared by the move's precheck and the restore's.
+    void rememberClosedImages(DataDir& d, const QVector<WinApi::CloseOutcome>& outcomes);
+    // Why a restore stopped because the original folder is still held: the named
+    // holders when there are any, and the vaguer wording when there are none.
+    // Both are actionable — "close DJI Studio" and "retry after a reboot" are
+    // things a user can do, "the restore failed" is not.
+    void failRestoreLocked(int dirIndex, const QVector<WinApi::LockingProcess>& procs);
+    // The restore got the data home, but the copy on the other drive would not
+    // go away. One offer to close whatever is holding it, then a second delete
+    // attempt; either way the folder is recorded as this app's own leftover
+    // rather than being rounded up to "done".
+    void settleResidue();
+    // The leftover-cleanup job: find who is holding the folder, offer to close
+    // them, then delete. Its own small state machine because it is neither a
+    // move nor a restore — nothing is copied, and the only thing at stake is
+    // disk space and a folder name we want back.
+    void startResidueCleanup(int dirIndex);
+    void runCleanStep();
+    void finishClean();
     void setBusy(bool busy);
     void startProc(const QString& program, const QStringList& args);
+
+    // Starts the "who is holding this folder open?" query for the folder the job
+    // is on. Runs on a worker thread — walking a large tree to sample it is IO,
+    // and the UI thread has a progress bar to paint.
+    void startLockProbe(const QString& dir);
+    // What to do once the user has been told which programs hold the folder.
+    enum LockerAnswer {
+        LockerProceed,      // they are gone (or were never a problem): carry on
+        LockerSkipFolder,   // leave this folder alone, continue with the rest
+        LockerAbortBatch,   // stop the whole batch here
+    };
+    // Puts the prompt for the last probe's result on screen and, when the user
+    // agrees, closes the closable programs. Never called before anything has
+    // been copied, except by the failed hand-over, which has already copied.
+    LockerAnswer askAboutLockers(int dirIndex, const QString& introKey);
     // *freed* (optional) is handed to the worker so it can accumulate the bytes
     // it removes; the shared_ptr keeps that counter alive for as long as the
     // worker may still be using it, independent of this panel's lifetime.
@@ -226,11 +332,21 @@ private:
     int m_sortColumn = 2;   // "占用空间"
     Qt::SortOrder m_sortOrder = Qt::DescendingOrder;
 
+    // Which states the list is limited to, indexed by state VALUE (they run
+    // 0..kStateCount-1 without a gap). All false means no filter, which is the
+    // reason this is a fixed array rather than a QSet: "nothing selected" has
+    // to be a state of its own, telling "show everything" apart from "show
+    // nothing".
+    std::array<bool, MoveSelect::kStateCount> m_stateFilter{};
+
     // move job
     std::vector<int> m_moveQueue;  // indices into m_dirs
     int m_movePos = 0;
     int m_moveOk = 0;
     int m_moveFailed = 0;
+    // Folders the user told us to leave alone because a program was using them.
+    // Counted apart from failures: nothing went wrong, the user chose to wait.
+    int m_moveSkipped = 0;
     bool m_moveActive = false;  // a move is running; further folders may be queued
     // The target root the current/last batch was aimed at; after a successful
     // move it receives the "do not delete" warning icon (360-style).
@@ -239,6 +355,11 @@ private:
     QFutureWatcher<bool>* m_deleteWatcher = nullptr;
     QFutureWatcher<VerifyResult>* m_verifyWatcher = nullptr;
     bool m_deleteOk = false;
+    // The processes the last probe found holding the folder open, and the worker
+    // that found them. The probe result is read by whoever launched it, which is
+    // either the pre-copy check or a failed hand-over.
+    QFutureWatcher<QVector<WinApi::LockingProcess>>* m_lockWatcher = nullptr;
+    QVector<WinApi::LockingProcess> m_lockProcs;
     // True when the last helper process could not be launched at all. Its exit
     // code is meaningless in that case (it reads as 0 = success).
     bool m_procFailedToStart = false;
@@ -252,6 +373,28 @@ private:
     int m_restoreRow = -1;  // index into m_dirs
     bool m_restoreActive = false;
     bool m_restoreFailed = false;
+    // Path of a leftover the restore could not delete. Non-empty turns the
+    // closing message from "restored" into "restored, and here is what is still
+    // on the other drive" — which is the difference between a user who knows
+    // what happened and one who finds out from Explorer.
+    QString m_restoreResidue;
+    // How many times the restore has offered to close the programs holding the
+    // original folder. One offer, then a refusal: a program that is holding the
+    // folder again after being closed is one that restarts itself, and asking a
+    // second time would end exactly where the first round did.
+    int m_restoreAskRound = 0;
+
+    // leftover-cleanup job
+    int m_cleanRow = -1;  // index into m_dirs
+    bool m_cleanActive = false;
+    // What the row was before the cleanup borrowed its state. The cleanup shows
+    // "dropping a leftover" while it runs, and a finished job must hand the row
+    // back rather than leave it looking busy for ever.
+    int m_cleanPrevState = MoveSelect::kStateIdle;
+    // Why the cleanup gave up, as an I18n key plus arguments, so the row can say
+    // what stands in the way instead of only that it failed.
+    QString m_cleanFailKey;
+    QMap<QString, QString> m_cleanFailArgs;
 
     // recovery pass
     QVector<RepairItem> m_repairs;
@@ -272,6 +415,9 @@ private:
     QPushButton* m_scanBtn = nullptr;
     QPushButton* m_moveBtn = nullptr;
     QTreeWidget* m_tree = nullptr;
+    // The tree's own header, kept typed so its funnel's highlight and tooltip
+    // can be driven from here.
+    FilterHeaderView* m_header = nullptr;
     QFutureWatcher<qint64>* m_sizeWatcher = nullptr;
     bool m_busy = false;
     bool m_scanned = false;
