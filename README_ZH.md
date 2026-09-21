@@ -4,7 +4,7 @@
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![Qt6](https://img.shields.io/badge/GUI-Qt6-green.svg)](https://www.qt.io)
 [![Platform: Windows](https://img.shields.io/badge/platform-windows-lightgrey.svg)](#支持的平台)
-[![Version](https://img.shields.io/badge/version-1.0.8-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-1.0.9-blue.svg)](#)
 
 **[English](README.md)** | **[中文](README_ZH.md)**
 
@@ -91,7 +91,7 @@ cd ncdu-win-qt
 scripts\build.bat
 ```
 
-构建脚本产出 `dist\NcduWin_1.0.8_Setup.exe` 安装包（含所有 Qt 依赖）。
+构建脚本产出 `dist\NcduWin_1.0.9_Setup.exe` 安装包（含所有 Qt 依赖）。
 
 ### 选项 C — 在 Visual Studio 中打开
 
