@@ -95,6 +95,8 @@
 #include "SafeMoveWorker.h"
 #include "AppPathSyncDialog.h"
 #include "AppDataMovePanel.h"
+#include "LockerDialog.h"
+#include "OpGuard.h"
 #include "MftScanner.h"
 #include "version.h"
 #include "AiService.h"
@@ -1731,13 +1733,25 @@ void MainWindow::moveToOtherDrive(const std::shared_ptr<FileNode>& node)
     }
     m_lastMoveTarget = chosenDir;
 
+    // A move renames the folder aside and links it back, and a rename fails for
+    // as long as any program holds a file inside it. Learning that after the copy
+    // means throwing the copy away and starting over, so the question is asked
+    // here — before a single byte moves, where answering it costs the user
+    // nothing at all.
+    guardThen(QStringList{node->path}, /*fatal=*/true,
+              [this, node, chosenDir]() { startSafeMove(node, chosenDir); });
+}
+
+void MainWindow::startSafeMove(const std::shared_ptr<FileNode>& node,
+                               const QString& targetDir)
+{
     auto* progress = new QProgressDialog(I18n::tr("move.progress_title"), I18n::tr("button.cancel"), 0, 100, this);
     progress->setWindowModality(Qt::WindowModal);
     progress->setWindowTitle(I18n::tr("move.title"));
     progress->setMinimumDuration(0);
     progress->setValue(0);
 
-    auto* worker = new SafeMoveWorker(node->path, chosenDir, this);
+    auto* worker = new SafeMoveWorker(node->path, targetDir, this);
     connect(worker, &SafeMoveWorker::progress, progress, [progress](int pct, qint64 copied, qint64 total, const QString& file) {
         progress->setValue(pct);
         progress->setLabelText(QStringLiteral("[%1% - %2 / %3]\n%4")
@@ -1782,6 +1796,7 @@ void MainWindow::moveToOtherDrive(const std::shared_ptr<FileNode>& node)
 
     worker->start();
 }
+
 
 void MainWindow::showAppPathSync()
 {
@@ -1907,6 +1922,20 @@ void MainWindow::recycleSelected()
     for (const auto& n : nodes)
         paths << n->path;
 
+    // Ask before anything moves: is a program holding one of these open? A
+    // Recycle Bin operation that stops halfway leaves some items moved and some
+    // still there, and the user is left to work out which by hand. The question
+    // is asked here, where closing the holder still costs nothing at all.
+    guardThen(paths, /*fatal=*/true, [this, nodes]() { doRecycle(nodes); });
+}
+
+// The Recycle Bin half of the job, run once the pre-flight has cleared the way.
+void MainWindow::doRecycle(const std::vector<std::shared_ptr<FileNode>>& nodes)
+{
+    QStringList paths;
+    for (const auto& n : nodes)
+        paths << n->path;
+
     // Run in the background, one path at a time, so the dialog can show a real
     // percentage and the item being worked on — an indeterminate spinner over a
     // big selection reads exactly like a freeze.
@@ -1923,40 +1952,60 @@ void MainWindow::recycleSelected()
     connect(progress, &QProgressDialog::canceled, progress,
             [cancelledFlag]() { cancelledFlag->store(true); });
 
-    auto* watcher = new QFutureWatcher<bool>(this);
+    auto* watcher = new QFutureWatcher<QVector<WinApi::DeleteResult>>(this);
     auto nodeCopy = nodes;
-    connect(watcher, &QFutureWatcher<bool>::finished, this,
+    connect(watcher, &QFutureWatcher<QVector<WinApi::DeleteResult>>::finished, this,
             [this, nodeCopy, n, progress, watcher, cancelledFlag]() {
                 progress->deleteLater();
-                const bool ok = watcher->result();
+                const QVector<WinApi::DeleteResult> results = watcher->result();
                 watcher->deleteLater();
+
+                // Whatever happened, the tree is brought in line with the disk
+                // first: some items may have moved and others not at all, and the
+                // sizes on screen still describe the state before.
+                resyncNodesFromDisk(nodeCopy);
+                if (m_root)
+                    updateDiskFreeLabel(m_root->path);
+
                 if (cancelledFlag->load()) {
                     // Whatever was already recycled stays recycled; the rest
                     // was deliberately left untouched.
                     m_statusLabel->setText(I18n::tr("dialog.recycle.cancelled"));
                     return;
                 }
-                if (ok) {
-                    afterDelete(nodeCopy);
-                    if (m_root)
-                        updateDiskFreeLabel(m_root->path);
+
+                const OpGuard::Tally t = OpGuard::tally(results);
+                if (t.bad == 0) {
                     m_statusLabel->setText(I18n::tr("status.moved_recycle",
                         QMap<QString, QString>{{"n", QString::number(n)}}));
-                } else {
-                    // Recycle bin may fail for very large files or long paths.
-                    // Offer permanent delete as a fallback.
-                    if (Dialogs::confirm(this, I18n::tr("dialog.recycle.fallback_title"),
-                                         I18n::tr("dialog.recycle.fallback_body")))
-                        deletePermanentAsync(nodeCopy);
+                    return;
+                }
+
+                // Offer permanent deletion only where it can help. The Recycle
+                // Bin refuses for reasons permanent deletion does not care about
+                // (an item too big for the bin, a path past the length limit), and
+                // for items that are simply not there any more there is nothing
+                // left to offer at all.
+                if (OpGuard::onlyAlreadyGone(results)) {
+                    Dialogs::info(this, I18n::tr("op_result.title"),
+                                  OpGuard::resultBody(results, /*recycled=*/true));
+                    return;
+                }
+                if (Dialogs::confirm(this, I18n::tr("dialog.recycle.fallback_title"),
+                                     I18n::tr("dialog.recycle.fallback_body",
+                                              QMap<QString, QString>{
+                                                  {"lines",
+                                                   OpGuard::resultLines(results, true)}}))) {
+                    deletePermanentAsync(nodeCopy);
                 }
             });
 
-    watcher->setFuture(QtConcurrent::run([paths, progress, cancelledFlag]() -> bool {
-        bool allOk = true;
+    watcher->setFuture(QtConcurrent::run([paths, progress, cancelledFlag]() {
+        QVector<WinApi::DeleteResult> results;
         const int total = paths.size();
         for (int i = 0; i < total; ++i) {
             if (cancelledFlag->load())
-                return false;
+                break;
             QMetaObject::invokeMethod(progress, [progress, i, total, path = paths.at(i)]() {
                 progress->setValue(i);
                 progress->setLabelText(I18n::tr("dialog.recycle.progress_item",
@@ -1964,12 +2013,32 @@ void MainWindow::recycleSelected()
                                            {"total", QString::number(total)},
                                            {"path", path}}));
             }, Qt::QueuedConnection);
-            if (!WinApi::sendToRecycleBin(QStringList{paths.at(i)}))
-                allOk = false;
+
+            WinApi::DeleteResult r;
+            r.path = paths.at(i);
+            if (!QFileInfo::exists(r.path)) {
+                // The list the user was looking at no longer matches the disk.
+                // Reporting that as a failure would be both wrong and useless.
+                r.gone = true;
+                r.reason = WinApi::DeleteReason::Missing;
+                results << r;
+                continue;
+            }
+            int shellCode = 0;
+            WinApi::sendToRecycleBin(QStringList{r.path}, &shellCode);
+            r.gone = !QFileInfo::exists(r.path);
+            if (!r.gone) {
+                r.winError = static_cast<quint32>(shellCode);
+                r.reason = WinApi::classifyShellError(shellCode);
+                if (r.reason == WinApi::DeleteReason::None)
+                    r.reason = WinApi::DeleteReason::Unknown;
+            }
+            results << r;
         }
-        return allOk;
+        return results;
     }));
 }
+
 
 void MainWindow::deletePermanentSelected()
 {
@@ -2006,6 +2075,22 @@ void MainWindow::deletePermanentAsync(
     for (const auto& n : nodes)
         paths << n->path;
 
+    // The same question the Recycle Bin path asks, and it matters more here:
+    // permanent deletion does not fail as a unit. It removes everything it can
+    // reach and leaves the rest, so a folder nobody can account for — half its
+    // files gone, still sitting in the row at its old size — is the usual outcome
+    // of asking while a program has one of those files open.
+    guardThen(paths, /*fatal=*/true,
+              [this, nodes]() { doDeletePermanent(nodes); });
+}
+
+void MainWindow::doDeletePermanent(
+    const std::vector<std::shared_ptr<FileNode>>& nodes)
+{
+    QStringList paths;
+    for (const auto& n : nodes)
+        paths << n->path;
+
     const int n = static_cast<int>(nodes.size());
     auto* progress = new QProgressDialog(
         I18n::tr("dialog.delete.progress", QMap<QString, QString>{{"n", QString::number(n)}}),
@@ -2019,34 +2104,49 @@ void MainWindow::deletePermanentAsync(
     connect(progress, &QProgressDialog::canceled, progress,
             [cancelledFlag]() { cancelledFlag->store(true); });
 
-    auto* watcher = new QFutureWatcher<bool>(this);
-    auto nodeCopy = nodes;
-    connect(watcher, &QFutureWatcher<bool>::finished, this,
-            [this, nodeCopy, n, progress, watcher, cancelledFlag]() {
+    auto* watcher = new QFutureWatcher<QVector<WinApi::DeleteResult>>(this);
+    connect(watcher, &QFutureWatcher<QVector<WinApi::DeleteResult>>::finished, this,
+            [this, nodes, progress, watcher, cancelledFlag]() {
                 progress->deleteLater();
-                const bool ok = watcher->result();
+                const QVector<WinApi::DeleteResult> results = watcher->result();
                 watcher->deleteLater();
+
+                // Before anything is said about the outcome, the tree has to
+                // match the disk. Which rows survived and how big they are now is
+                // not something the result list can answer on its own — a folder
+                // that lost most of its files is still the same folder.
+                resyncNodesFromDisk(nodes);
+                if (m_root)
+                    updateDiskFreeLabel(m_root->path);
+
                 if (cancelledFlag->load()) {
                     m_statusLabel->setText(I18n::tr("dialog.delete.cancelled"));
                     return;
                 }
-                if (ok) {
-                    afterDelete(nodeCopy);
-                    if (m_root)
-                        updateDiskFreeLabel(m_root->path);
-                    m_statusLabel->setText(I18n::tr("status.deleted",
-                        QMap<QString, QString>{{"n", QString::number(n)}}));
-                } else {
-                    Dialogs::warn(this, APP_NAME, I18n::tr("dialog.delete.failed"));
+
+                const OpGuard::Tally t = OpGuard::tally(results);
+                m_statusLabel->setText(t.bad == 0
+                    ? I18n::tr("status.deleted",
+                               QMap<QString, QString>{{"n", QString::number(t.ok)}})
+                    : I18n::tr("op_result.status_partial",
+                               QMap<QString, QString>{{"ok", QString::number(t.ok)},
+                                                      {"freed", humanSize(t.freed)},
+                                                      {"bad", QString::number(t.bad)}}));
+
+                if (t.bad > 0) {
+                    // Which item is still there, and why. "部分项目无法删除" was the
+                    // whole message before, and it named neither.
+                    Dialogs::info(this, I18n::tr("op_result.title"),
+                                  OpGuard::resultBody(results, /*recycled=*/false));
                 }
             });
 
-    watcher->setFuture(QtConcurrent::run([paths, progress, cancelledFlag]() -> bool {
-        bool allOk = true;
+    watcher->setFuture(QtConcurrent::run([paths, progress, cancelledFlag]() {
+        QVector<WinApi::DeleteResult> results;
         const int total = paths.size();
         for (int i = 0; i < total; ++i) {
             if (cancelledFlag->load())
-                return false;
+                break;
             QMetaObject::invokeMethod(progress, [progress, i, total, path = paths.at(i)]() {
                 progress->setValue(i);
                 progress->setLabelText(I18n::tr("dialog.delete.progress_item",
@@ -2054,27 +2154,33 @@ void MainWindow::deletePermanentAsync(
                                            {"total", QString::number(total)},
                                            {"path", path}}));
             }, Qt::QueuedConnection);
-            if (!WinApi::deletePermanent(QStringList{paths.at(i)}))
-                allOk = false;
+            const QVector<WinApi::DeleteResult> one =
+                WinApi::deletePermanentDetailed(QStringList{paths.at(i)});
+            if (!one.isEmpty())
+                results << one.first();
         }
-        return allOk;
+        return results;
     }));
 }
+
 
 std::shared_ptr<FileNode> MainWindow::findNodeByPath(const QString& path) const
 {
     if (!m_root)
         return nullptr;
-    QString norm = QFileInfo(path).absoluteFilePath().toLower();
-    QString rootNorm = QFileInfo(m_root->path).absoluteFilePath().toLower();
-    if (norm == rootNorm)
-        return m_root;
-    // Verify that norm is under rootNorm.
-    if (!norm.startsWith(rootNorm + '/'))
+    // The relative part, rather than a prefix built here. A whole-drive scan
+    // has the root "D:/", and comparing a path against that plus a separator
+    // asks about "d://" — which nothing is ever under. Every lookup came back
+    // empty, so a deleted row was never corrected: it stayed on screen at its
+    // old size, and deleting it again could only report it as already gone.
+    QString rel;
+    if (!WinApi::splitInside(path, m_root->path, &rel))
         return nullptr;
-    QString rel = norm.mid(rootNorm.length() + 1);
+    if (rel.isEmpty())
+        return m_root;
+
     auto node = m_root;
-    auto parts = rel.split('/', Qt::SkipEmptyParts);
+    auto parts = rel.split(QLatin1Char('/'), Qt::SkipEmptyParts);
     for (const auto& part : parts) {
         QString partNorm = part.toLower();
         std::shared_ptr<FileNode> found;
@@ -2117,42 +2223,290 @@ bool MainWindow::pruneMissingFromNode(const std::shared_ptr<FileNode>& node)
     return false;
 }
 
-void MainWindow::syncTreeAfterCleanup(
-    const std::vector<CleanupWorker::ItemRef>& successItems)
+// --------------------------------------------------------------------------- //
+// Keep the tree honest about what is on the disk
+// --------------------------------------------------------------------------- //
+
+// Deleting only partly works all the time — one file open in some program, a
+// folder Windows still holds a handle on — and the old refresh only ran when the
+// operation reported complete success. A partly deleted folder therefore kept
+// whatever size the last scan had measured, a number that now described files
+// that were gone. So the answer comes from the disk: drop the rows that are no
+// longer there, and re-measure the ones that are.
+//
+// Called after *every* destructive operation, successful or not, because "some
+// of it worked" is the case that needs it most.
+//
+// Two ways in, one body. Deleting and recycling already hold the very nodes
+// they worked on, so they hand those over and nothing can fail to resolve on the
+// way; the cleanup categories report paths, and those get looked up.
+void MainWindow::resyncPathsFromDisk(const QStringList& paths)
 {
-    std::vector<std::shared_ptr<FileNode>> nodesToRemove;
-    bool pruned = false;
+    if (paths.isEmpty())
+        return;
 
-    for (const auto& item : successItems) {
-        if (item.type == "file") {
-            // Remove from large files list.
-            m_largeFiles.erase(
-                std::remove_if(m_largeFiles.begin(), m_largeFiles.end(),
-                               [&](const LargeFile& lf) { return lf.path == item.path; }),
-                m_largeFiles.end());
-            auto node = findNodeByPath(item.path);
-            if (node && !node->parent.expired())
-                nodesToRemove.push_back(node);
-        } else if (item.type == "target") {
-            auto node = findNodeByPath(item.path);
-            if (!node)
-                continue;
-            if (!QFileInfo::exists(item.path)) {
-                if (!node->parent.expired())
-                    nodesToRemove.push_back(node);
-            } else if (node->isDir()) {
-                if (pruneMissingFromNode(node))
-                    pruned = true;
-            }
-        }
+    std::vector<std::shared_ptr<FileNode>> nodes;
+    for (const QString& path : paths) {
+        if (auto node = findNodeByPath(path))
+            nodes.push_back(node);
     }
-
-    if (!nodesToRemove.empty()) {
-        afterDelete(nodesToRemove);
-    } else if (pruned && m_current) {
-        navigateTo(m_current);
-    }
+    resyncNodesFromDisk(nodes);
 }
+
+void MainWindow::resyncNodesFromDisk(
+    const std::vector<std::shared_ptr<FileNode>>& nodes)
+{
+    if (nodes.empty())
+        return;
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    m_statusLabel->setText(I18n::tr("status.resyncing"));
+
+    // Nodes that have to have their total added up again because a child of
+    // theirs changed. Nodes measured straight from the disk are excluded from
+    // that: recomputing one of those from its children would put back the very
+    // staleness this exists to remove, since a child's size is itself a number
+    // from the last scan.
+    std::set<FileNode*> measured;
+    std::set<FileNode*> seen;
+    std::set<FileNode*> handled;
+    std::vector<std::shared_ptr<FileNode>> propagate;
+
+    auto markPropagate = [&propagate, &seen](const std::shared_ptr<FileNode>& n) {
+        if (n && seen.insert(n.get()).second)
+            propagate.push_back(n);
+    };
+
+    for (const auto& node : nodes) {
+        if (!node || !handled.insert(node.get()).second)
+            continue;   // already detached from the tree, or named twice
+        auto parent = node->parent.lock();
+
+        if (!QFileInfo::exists(node->path)) {
+            // Gone: the row goes with it. This covers both "this operation
+            // removed it" and "the row described a path that was already gone".
+            if (parent) {
+                auto it = std::find(parent->children.begin(), parent->children.end(), node);
+                if (it != parent->children.end())
+                    parent->children.erase(it);
+                markPropagate(parent);
+            }
+            continue;
+        }
+        if (!node->isDir())
+            continue;
+
+        // Still there, and at most partly deleted. What is under it right now is
+        // the only honest size for the row.
+        pruneMissingFromNode(node);
+        const WinApi::DirStat stat = WinApi::dirStatNoReparse(node->path);
+        node->size = stat.size;
+        node->fileCount = stat.fileCount;
+        node->dirCount = stat.dirCount;
+        measured.insert(node.get());
+        markPropagate(parent);
+    }
+
+    for (const auto& node : propagate) {
+        if (!measured.count(node.get()))
+            recomputeSizes(node);
+    }
+
+    QApplication::restoreOverrideCursor();
+
+    if (m_current)
+        navigateTo(m_current);
+}
+
+// --------------------------------------------------------------------------- //
+// Pre-flight: who is holding what we are about to delete, recycle or move
+// --------------------------------------------------------------------------- //
+// Deleting used to be a one-way street. If a program had a file open, the delete
+// either half-succeeded — everything but that file went, and the folder stayed —
+// or failed with a sentence that named nobody. Both are the same missing
+// question, asked too late; the software-data panel has been asking it up front
+// all along. This is that question, for the operations that never asked it.
+//
+//   * Fatal    — deleting and moving. If the holders cannot be closed, nothing
+//                is touched at all: half a delete is worse than no delete, since
+//                it leaves a folder the user cannot account for.
+//   * Advisory — cleanup. Skipping a file a program is using is normal there
+//                (Temp and caches are never idle), so the holders are named and
+//                the run goes ahead.
+
+void MainWindow::guardThen(const QStringList& paths, bool fatal,
+                           std::function<void()> action)
+{
+    if (m_guardWatcher) {
+        // One guarded operation at a time: two probes in flight would leave the
+        // second one's answer attached to the first one's action.
+        m_statusLabel->setText(I18n::tr("op_guard.busy"));
+        return;
+    }
+    m_guardPaths = paths;
+    m_guardFatal = fatal;
+    m_guardAction = std::move(action);
+    m_guardOffered = false;
+    m_guardClosedImages.clear();
+    runGuardProbe();
+}
+
+void MainWindow::runGuardProbe()
+{
+    // A progress dialog that only appears when the check is slow. Empty folders
+    // and small ones answer at once, and flashing a dialog before every delete
+    // would be worse than the pause it is there to explain.
+    //
+    // It is deliberately not a member: it lives exactly as long as the probe
+    // does, so there is nothing about it that could go stale. The finished
+    // handler holds it (by QPointer, so a teardown that takes the window along
+    // cannot leave the capture dangling), which is the whole of what keeps it
+    // alive — a cached member would only be one more thing retranslateUI had to
+    // remember, for a window the user cannot even reach past its own modality.
+    QPointer<QProgressDialog> progress =
+        new QProgressDialog(I18n::tr("op_guard.checking"),
+                            QString(), 0, 0, this);
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setWindowTitle(I18n::tr("op_guard.title"));
+    progress->setMinimumDuration(350);
+    progress->setCancelButton(nullptr);
+
+    m_guardWatcher = new QFutureWatcher<QVector<WinApi::LockingProcess>>(this);
+    const QStringList paths = m_guardPaths;
+    connect(m_guardWatcher, &QFutureWatcher<QVector<WinApi::LockingProcess>>::finished,
+            this, [this, progress]() {
+                // Closed before the answer is dealt with: the answer may raise
+                // the "these programs are using this folder" prompt, and two
+                // windows stacking here would make the second look like a
+                // reaction to the first.
+                if (progress) {
+                    progress->close();
+                    progress->deleteLater();
+                }
+                onGuardProbed();
+            });
+    m_guardWatcher->setFuture(QtConcurrent::run(
+        [paths]() { return OpGuard::probe(paths); }));
+}
+
+void MainWindow::onGuardProbed()
+{
+    const QVector<WinApi::LockingProcess> procs = m_guardWatcher->result();
+    m_guardWatcher->deleteLater();
+    m_guardWatcher = nullptr;
+
+    if (OpGuard::blocksOperation(procs)) {
+        const int closable = LockerDialog::closableCount(procs);
+
+        if (closable > 0 && !m_guardOffered) {
+            // Ask once. The offer is worth making exactly while closing the
+            // programs costs the user nothing, which is now — nothing has been
+            // deleted and nothing has been copied.
+            const LockerDialog::Answer answer = LockerDialog::ask(
+                this, I18n::tr("op_guard.title"),
+                I18n::tr("op_guard.intro"),
+                procs,
+                I18n::tr("op_guard.btn_close"),
+                QString(),                 /*skipText unused*/
+                /*allowSkip=*/false);
+            if (answer != LockerDialog::CloseAndContinue) {
+                // "Not now". Nothing was touched, so there is nothing to explain.
+                finishGuard(false);
+                return;
+            }
+
+            m_guardOffered = true;
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            const QVector<WinApi::CloseOutcome> outcomes = WinApi::closeProcesses(procs);
+            QApplication::restoreOverrideCursor();
+
+            // Remember what actually went away, by image path: the only thing
+            // that survives a restart, and therefore the only way to tell "a
+            // program is holding it" apart from "a program restarts itself".
+            for (const WinApi::CloseOutcome& o : outcomes) {
+                if (o.result == WinApi::CloseOutcome::Survived)
+                    continue;
+                for (const WinApi::LockingProcess& p : procs) {
+                    if (p.pid != o.pid)
+                        continue;
+                    const QString key = p.exePath.isEmpty() ? p.name : p.exePath;
+                    if (!key.isEmpty() && !m_guardClosedImages.contains(key))
+                        m_guardClosedImages << key;
+                    break;
+                }
+            }
+            const QString report = LockerDialog::outcomeText(outcomes);
+            if (!report.isEmpty()) {
+                Logger::info(QStringLiteral("[guard] programs holding %1:\n%2")
+                                 .arg(m_guardPaths.join(QStringLiteral(", ")), report));
+            }
+
+            // Ask the disk again rather than assume. A program that came back is
+            // a program that will come back, and that is worth saying instead of
+            // discovering it halfway through a delete.
+            runGuardProbe();
+            return;
+        }
+
+        // Still held. Either nothing could be closed, or closing was already
+        // tried — and either way the user needs to know who is in the way, since
+        // "被占用" on its own gives them nowhere to go.
+        const QStringList names = OpGuard::namesOf(procs);
+        if (m_guardFatal) {
+            const QStringList back = WinApi::respawnedAmong(procs, m_guardClosedImages);
+            const QString body =
+                !back.isEmpty()
+                    ? I18n::tr("op_guard.blocked_respawn",
+                               QMap<QString, QString>{{"procs",
+                                                       back.join(QStringLiteral("、"))}})
+                    : (closable == 0
+                           ? I18n::tr("op_guard.blocked_noclose",
+                                      QMap<QString, QString>{
+                                          {"procs", names.join(QStringLiteral("、"))}})
+                           : I18n::tr("op_guard.blocked_body",
+                                      QMap<QString, QString>{
+                                          {"procs", names.join(QStringLiteral("、"))}}));
+            Dialogs::warn(this, I18n::tr("op_guard.blocked_title"), body);
+            finishGuard(false);
+            return;
+        }
+
+        // Advisory: name them, then do what can be done. Refusing the whole
+        // cleanup over a file a program happens to be holding would leave the
+        // user with nothing at all.
+        Logger::info(QStringLiteral("[guard] cleaning anyway, held by: %1")
+                         .arg(names.join(QStringLiteral(", "))));
+        m_statusLabel->setText(I18n::tr("op_guard.advisory",
+                                        QMap<QString, QString>{
+                                            {"procs", names.join(QStringLiteral("、"))}}));
+    }
+
+    finishGuard(true);
+}
+
+void MainWindow::finishGuard(bool proceed)
+{
+    std::function<void()> action = std::move(m_guardAction);
+    m_guardAction = nullptr;
+    m_guardPaths.clear();
+    m_guardClosedImages.clear();
+    m_guardOffered = false;
+    if (proceed && action)
+        action();
+}
+
+
+void MainWindow::syncTreeAfterCleanup(const std::vector<CleanupWorker::ItemRef>& items)
+{
+    // A cleanup reports items, not paths, and both lists matter here: a category
+    // that was cleaned can still hold files a program had open, and those are
+    // exactly the ones that change what its row should say.
+    QStringList touched;
+    for (const auto& item : items)
+        touched << item.path;
+    resyncPathsFromDisk(touched);
+}
+
 
 void MainWindow::afterDelete(const std::vector<std::shared_ptr<FileNode>>& nodes)
 {
@@ -3075,6 +3429,30 @@ void MainWindow::onCleanTargets(
             ? CleanupWorker::DeleteMode::RecycleBin
             : CleanupWorker::DeleteMode::Permanent;
 
+    // Cleanup is the one place where a program holding a file open is not a
+    // reason to stop: Temp, caches, logs and Downloads are never fully idle, and
+    // skipping what is in use is what this mode is for. The holders are still
+    // named — the difference is that this pre-flight informs rather than refuses.
+    QStringList guardPaths;
+    for (const auto& [key, path] : targetItems) {
+        // Emptying the Recycle Bin is not an operation on that path, so there is
+        // nothing there to be held open.
+        if (key == QLatin1String("cleanup.b_recycle"))
+            continue;
+        guardPaths << path;
+    }
+    for (const QString& fp : fileItems)
+        guardPaths << fp;
+
+    guardThen(guardPaths, /*fatal=*/false,
+              [this, items, mode]() { startCleanup(items, mode); });
+}
+
+// The cleanup run itself, started once the pre-flight has had its say.
+void MainWindow::startCleanup(
+    const std::vector<std::tuple<QString, QString, QString>>& items,
+    CleanupWorker::DeleteMode mode)
+{
     // Cancel any existing cleanup worker.
     if (m_cleanupWorker) {
         m_cleanupWorker->cancel();
@@ -3101,6 +3479,7 @@ void MainWindow::onCleanTargets(
     m_cleanupWorker->start();
 }
 
+
 void MainWindow::onCleanupProgress(const QString& label)
 {
     m_statusLabel->setText(I18n::tr("status.cleaning", QMap<QString, QString>{{"item", label}}));
@@ -3122,14 +3501,42 @@ void MainWindow::onCleanupFinished(int totalDeleted, int totalSkipped, qint64 to
     m_cleanupWorker = nullptr;
     m_cleanupPanel->setCleaning(false);
     m_cleanupPanel->endCleanProgress();
-    m_cleanupPanel->removeCleanedItems(successItems);
-    syncTreeAfterCleanup(successItems);
 
-    m_statusLabel->setText(I18n::tr("cleanup.clean_done", QMap<QString, QString>{
+    // Only the items that were actually finished leave the list. One that still
+    // holds files because a program is using them stays where the user will look
+    // to try again — taking the row away would claim a cleanup that did not
+    // happen, and there would be nothing left to press the second time.
+    std::vector<CleanupWorker::ItemRef> finishedItems;
+    int leftovers = 0;
+    for (const auto& item : successItems) {
+        if (item.skipped > 0)
+            ++leftovers;
+        else
+            finishedItems.push_back(item);
+    }
+    m_cleanupPanel->removeCleanedItems(finishedItems);
+
+    // Every path that was touched goes to the tree, both lists: the size of a
+    // row has to match the disk whether the item was cleaned, partly cleaned or
+    // not cleaned at all.
+    std::vector<CleanupWorker::ItemRef> touching = successItems;
+    touching.insert(touching.end(), failedItems.begin(), failedItems.end());
+    syncTreeAfterCleanup(touching);
+
+    QString status = I18n::tr("cleanup.clean_done", QMap<QString, QString>{
         {"freed", humanSize(totalFreed)},
         {"deleted", humanCount(totalDeleted)},
         {"skipped", humanCount(totalSkipped)},
-    }));
+    });
+    if (leftovers > 0) {
+        // Not a dialog: a Temp folder keeping a few files that are open is
+        // normal, and interrupting the user over it every time would train them
+        // to dismiss the dialog that matters. It is said, though.
+        status += QStringLiteral("  ")
+                  + I18n::tr("cleanup.kept_status",
+                             QMap<QString, QString>{{"n", QString::number(leftovers)}});
+    }
+    m_statusLabel->setText(status);
 
     // Update disk free space.
     if (m_root) {
@@ -3138,24 +3545,35 @@ void MainWindow::onCleanupFinished(int totalDeleted, int totalSkipped, qint64 to
         m_cleanupPanel->updateFreeSpace(free, total);
     }
 
-    if (!failedItems.empty()) {
-        QStringList failedParts;
-        int failLimit = std::min<int>(10, static_cast<int>(failedItems.size()));
-        for (int i = 0; i < failLimit; ++i) {
-            const auto& item = failedItems[i];
-            QString label = item.type == "target"
-                                ? I18n::tr(item.key)
-                                : QFileInfo(item.path).fileName();
-            failedParts << QStringLiteral("\u2022 %1").arg(label);
-        }
-        QString failedMsg = failedParts.join("\n");
-        if (static_cast<int>(failedItems.size()) > 10)
-            failedMsg += I18n::tr("cleanup.failed_more", QMap<QString, QString>{
-                {"n", QString::number(static_cast<int>(failedItems.size()) - 10)}});
-        Dialogs::warn(this, I18n::tr("cleanup.failed_title"),
-            I18n::tr("cleanup.failed_body", QMap<QString, QString>{{"items", failedMsg}}));
+    if (failedItems.empty())
+        return;
+
+    // What did not get cleaned, and why. The old summary listed the items under
+    // "可能是文件被占用或权限不足" and left the user to work out which — while the
+    // answer was already known to whoever tried to delete it.
+    QStringList failedParts;
+    for (const auto& item : failedItems) {
+        const QString label = item.type == QLatin1String("target")
+                                  ? I18n::tr(item.key)
+                                  : QFileInfo(item.path).fileName();
+        const QString why = OpGuard::reasonSentence(item.reason, item.winError);
+        failedParts << QStringLiteral("\u2022 ")
+                           + (why.isEmpty()
+                                  ? label
+                                  : I18n::tr("cleanup.failed_item",
+                                             QMap<QString, QString>{{"name", label},
+                                                                    {"reason", why}}));
     }
+    const int failLimit = std::min<int>(10, static_cast<int>(failedParts.size()));
+    QString failedMsg = failedParts.mid(0, failLimit).join(QStringLiteral("\n"));
+    if (static_cast<int>(failedParts.size()) > failLimit) {
+        failedMsg += I18n::tr("cleanup.failed_more", QMap<QString, QString>{
+            {"n", QString::number(static_cast<int>(failedParts.size()) - failLimit)}});
+    }
+    Dialogs::warn(this, I18n::tr("cleanup.failed_title"),
+        I18n::tr("cleanup.failed_body", QMap<QString, QString>{{"items", failedMsg}}));
 }
+
 
 void MainWindow::onCleanupRescan()
 {

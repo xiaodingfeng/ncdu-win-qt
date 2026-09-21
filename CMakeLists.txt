@@ -76,6 +76,7 @@ set(SOURCES
     src/ui/AppDataMovePanel.cpp
     src/ui/FilterHeaderView.cpp
     src/ui/LockerDialog.cpp
+    src/ui/OpGuard.cpp
     src/cleanup/CleanupScanner.cpp
     src/cleanup/CleanupWorker.cpp
     src/cleanup/CleanupPanel.cpp

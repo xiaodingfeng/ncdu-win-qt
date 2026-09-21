@@ -5,6 +5,7 @@
 #include <QVector>
 #include <tuple>
 #include <utility>
+#include <atomic>
 
 // WinApi - thin C++ wrapper around the Windows-specific operations used by
 // NcduWin (recycle bin, permanent deletion, explorer reveal, default open,
@@ -14,15 +15,87 @@
 // so callers can include this header unconditionally.
 namespace WinApi {
 
+// ---------------------------------------------------------------------------
+// Why a deletion was refused, and what became of each path
+// ---------------------------------------------------------------------------
+// "Failed" used to be the whole vocabulary: the Win32 error went to the log and
+// nowhere else, so a user who asked to delete a folder and got nothing back
+// could not tell "a program has it open, close it and retry" apart from "this
+// path was never there, there is nothing to do" apart from "no permission, run
+// this elevated". Those three lead to different next steps, which is the point.
+
+enum class DeleteReason {
+    None,               // it is gone; there is nothing to explain
+    Missing,            // there was nothing there to begin with
+    InUse,              // a file inside is open in another program
+    AccessDenied,       // permissions, or a system-protected path
+    ReadOnly,           // the read-only attribute could not be cleared
+    DirectoryNotEmpty,  // something inside survived and holds the folder down
+    PathTooLong,        // past what Windows will address
+    WriteProtected,     // the volume refuses writes
+    TooLargeForBin,     // the Recycle Bin will not take an item this big
+    CrossVolume,        // the shell will not move it to the bin from here
+    Aborted,            // the shell reported the operation as cancelled
+    Unknown,
+};
+
+// Map a GetLastError() value to a reason.
+DeleteReason classifyWinError(quint32 winError);
+
+// Map a SHFileOperationW return value (the DE_* family) to a reason. A separate
+// function because it is a separate code space: 0x85 means "too large for the
+// Recycle Bin" and has nothing to do with Win32 error 133.
+DeleteReason classifyShellError(int shellCode);
+
+// The I18n key that renders a reason ("op_reason.*"); empty for None.
+QString deleteReasonKey(DeleteReason reason);
+
+// What became of one path that was asked to go away.
+//
+// *partial* is the case the folder tree used to get wrong: a folder with one
+// file held open loses every other file and stays where it is, so its row has to
+// keep its name and take a much smaller size - not sit at the size it had
+// before. *freedBytes* is what actually went away underneath it.
+//
+// *gone* says the path is not there any more - either because this call removed
+// it (reason None) or because it was never there to begin with (reason Missing).
+// The two are different sentences to the user: one means the disk just got
+// bigger, the other means the list they were looking at was stale.
+struct DeleteResult {
+    QString path;
+    bool gone = false;
+    bool partial = false;
+    DeleteReason reason = DeleteReason::None;
+    quint32 winError = 0;
+    qint64 freedBytes = 0;
+};
+
+// Delete permanently, one report per path instead of one boolean for the batch.
+// The batch answer is still what decides whether the operation worked; this is
+// what lets the caller say which item was left behind, why, and how much room
+// the attempt actually recovered.
+QVector<DeleteResult> deletePermanentDetailed(const QStringList& paths,
+                                              std::atomic<qint64>* freedBytes = nullptr);
+
 // Move a list of paths to the Windows recycle bin via SHFileOperationW.
 // Returns true when the operation reports full success (no errors and no
 // user-aborted operations). On non-Windows builds returns false.
-bool sendToRecycleBin(const QStringList& paths);
+//
+// *shellCode*, when given, receives the SHFileOperationW return value (0 on
+// success, otherwise a DE_* code) so the caller can turn it into a reason with
+// classifyShellError(). It exists because "some items could not be moved to the
+// Recycle Bin" was all the UI could say while the actual cause - an item too big
+// for the bin, a path that is too long, a locked file - was right there in the
+// return value.
+bool sendToRecycleBin(const QStringList& paths, int* shellCode = nullptr);
 
 // Permanently delete a list of paths (bypass the recycle bin), clearing the
 // read-only attribute on each item first. Directories are removed recursively;
 // reparse points (junctions / directory symlinks) are unlinked without
-// following their target. Returns true only when every path was deleted.
+// following their target. Returns true only when no path is left on disk: a
+// path that was already gone counts as done rather than as a failure, because
+// there is nothing left to do about it (and calling that a failure would make a
+// stale row read as a refused delete).
 //
 // When *freedBytes is given it is accumulated with the size of every file as it
 // is removed, so a caller can watch the work happen and show its progress. The
@@ -61,16 +134,42 @@ bool isReparsePointAt(const QString& path);
 // still being measured. The counter only ever grows.
 qint64 dirSizeNoReparse(const QString& path, std::atomic<qint64>* visited = nullptr);
 
+// What is in a folder now: the size of everything under it, and how many files
+// and subdirectories that is. One walk instead of three.
+//
+// Exists for the folder tree's "what is actually left" refresh. After a delete
+// that only partly worked the row has to take the numbers the disk reports now,
+// and the old size is not a number the caller can correct on its own: files with
+// no row of their own went too. Like dirSizeNoReparse it never descends through
+// a reparse point, so the numbers describe this folder and not whatever its
+// junctions point at.
+struct DirStat {
+    qint64 size = 0;
+    int fileCount = 0;
+    int dirCount = 0;
+};
+DirStat dirStatNoReparse(const QString& path);
+
 // Clean the CONTENTS of a directory (files and subdirectories) but keep the
 // directory itself. Files that are locked/in-use are skipped silently.
 // Returns (deletedCount, skippedCount). Use this for system directories
 // (Temp, Logs, caches) that must not be removed themselves.
-std::pair<int, int> cleanDirectoryContents(const QString& dirPath);
+//
+// *why*, when given, receives why the first skipped entry was skipped (None when
+// nothing was skipped) and *sample* the path it happened to, so a cleanup that
+// left files behind can name one of them instead of only counting them.
+std::pair<int, int> cleanDirectoryContents(const QString& dirPath,
+                                           DeleteReason* why = nullptr,
+                                           QString* sample = nullptr);
 
 // Same as cleanDirectoryContents but moves the top-level children to the
 // Recycle Bin instead of permanently deleting them (the directory itself is
 // kept). Returns (movedCount, skippedCount). On non-Windows returns {0,0}.
-std::pair<int, int> cleanDirectoryContentsToRecycleBin(const QString& dirPath);
+//
+// *shellCode* carries the SHFileOperationW return value the same way
+// sendToRecycleBin does, so a cleanup that moved nothing can say why.
+std::pair<int, int> cleanDirectoryContentsToRecycleBin(const QString& dirPath,
+                                                       int* shellCode = nullptr);
 
 // Reveal a file or folder in Windows Explorer (explorer /select,"path").
 void revealInExplorer(const QString& path);
@@ -115,6 +214,14 @@ struct LockingProcess {
 // boundary-aware ("C:\Data2" is not inside "C:\Data"), normalising first and
 // touching no file system, so the probe lab can check the awkward spellings.
 bool pathInsideDirectory(const QString& file, const QString& dir);
+
+// The same question, keeping the detail the answer was made of: true when *file*
+// is *dir* or sits beneath it, and *rel* — when one is asked for — set to the
+// part below *dir*, empty when the two are the same path. The awkward spelling
+// lives here rather than at each call site: a drive root keeps its separator
+// through normalisation, so "D:/" compared with a separator appended asks about
+// "d://", which nothing is ever under.
+bool splitInside(const QString& file, const QString& dir, QString* rel = nullptr);
 
 // Who is holding *dir* open: the number of distinct processes found, with one
 // entry each in *procs* (Restart Manager reports one entry per file a process

@@ -162,7 +162,7 @@ ncdu-win-qt/
 ├── tests/
 │   ├── test_scanner.cpp    # C++ 单元测试 (Qt Test)
 │   └── compare_scanners.cpp  # 扫描器对比基准测试
-├── probe_lab/              # 回归靶场（9 个探针 / 292 项断言）
+├── probe_lab/              # 回归靶场（9 个探针 / 368 项断言）
 │   ├── CMakeLists.txt
 │   └── run1/ … run9/       # 搬移安全 / 标记文件名 / 系统文件夹 / 语言刷新 / 占用识别 / 残留清理 / 状态筛选
 ├── resources/              # 随程序嵌入的资源

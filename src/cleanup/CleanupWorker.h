@@ -7,6 +7,7 @@
 #include <atomic>
 
 #include "CleanupTarget.h"
+#include "WinApi.h"
 
 // CleanupWorker - asynchronous cleanup execution thread.
 //
@@ -26,10 +27,51 @@ public:
     enum class DeleteMode { Permanent, RecycleBin };
 
     // A single item reference for processing. type is "target" or "file".
+    //
+    // Everything after *path* is filled in by the worker on the way out and read
+    // back from the successItems / failedItems the caller is handed. They are
+    // what lets the cleanup summary name the cause instead of listing an item and
+    // leaving the user to guess — "已清理 0 项" with no reason was a dead end.
     struct ItemRef {
         QString type;  // "target" or "file"
         QString key;
         QString path;
+        // Why what was left behind was left behind. None when nothing was.
+        WinApi::DeleteReason reason = WinApi::DeleteReason::None;
+        QString reasonPath;   // one example of what was left, when there is one
+        quint32 winError = 0;
+        int skipped = 0;      // how many entries stayed behind
+    };
+
+    // What cleaning one item produced. Bundled because it grew past the point
+    // where four out-parameters stayed readable.
+    struct Outcome {
+        int deleted = 0;
+        int skipped = 0;
+        qint64 freed = 0;
+        WinApi::DeleteReason reason = WinApi::DeleteReason::None;
+        QString sample;
+        quint32 winError = 0;
+    };
+
+    // Remembers the FIRST thing that went wrong while cleaning one item. Later
+    // ones are almost always the same cause repeated: a Temp folder with four
+    // hundred files open in one program is one sentence, not four hundred.
+    struct FirstFailure {
+        WinApi::DeleteReason reason = WinApi::DeleteReason::None;
+        QString sample;
+        quint32 winError = 0;
+
+        bool has() const { return reason != WinApi::DeleteReason::None; }
+
+        void note(WinApi::DeleteReason why, const QString& path, quint32 err)
+        {
+            if (reason != WinApi::DeleteReason::None || why == WinApi::DeleteReason::None)
+                return;
+            reason = why;
+            sample = path;
+            winError = err;
+        }
     };
 
     CleanupWorker(const std::vector<ItemRef>& items,
@@ -56,13 +98,14 @@ protected:
 
 private:
     // Delete a single path according to m_mode (Recycle Bin or permanent).
-    bool removePath(const QString& path) const;
-    void cleanTmpFilesInRoot(const QString& root, int& deleted, int& skipped);
-    void cleanPycFilesInRoot(const QString& root, int& deleted, int& skipped);
-    void cleanLargeArchivesInRoot(const QString& root, int& deleted, int& skipped);
-    void cleanDownloadsFiles(const QString& root, int& deleted, int& skipped);
-    void cleanTarget(const CleanupTarget& target, int& deleted, int& skipped, qint64& freed);
-    void cleanLargeFile(const LargeFile& lf, int& deleted, int& skipped, qint64& freed);
+    // *fail*, when given, records why the first refusal happened.
+    bool removePath(const QString& path, FirstFailure* fail = nullptr) const;
+    void cleanTmpFilesInRoot(const QString& root, Outcome& out, FirstFailure& fail);
+    void cleanPycFilesInRoot(const QString& root, Outcome& out, FirstFailure& fail);
+    void cleanLargeArchivesInRoot(const QString& root, Outcome& out, FirstFailure& fail);
+    void cleanDownloadsFiles(const QString& root, Outcome& out, FirstFailure& fail);
+    void cleanTarget(const CleanupTarget& target, Outcome& out);
+    void cleanLargeFile(const LargeFile& lf, Outcome& out);
     bool isApplicationPath(const QString& path) const;
 
     std::vector<ItemRef> m_items;

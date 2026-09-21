@@ -226,7 +226,7 @@ ncdu-win-qt/
 ├── tests/
 │   ├── test_scanner.cpp    # C++ unit tests (Qt Test)
 │   └── compare_scanners.cpp  # Scanner comparison benchmarks
-├── probe_lab/              # Regression harness (9 probes / 292 assertions)
+├── probe_lab/              # Regression harness (9 probes / 368 assertions)
 │   ├── CMakeLists.txt
 │   └── run1/ … run9/       # Move safety / marker names / known folders / language / lockers / leftovers / state filter
 ├── resources/              # Resources embedded into the binary

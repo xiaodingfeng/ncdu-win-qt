@@ -51,6 +51,7 @@
 #include "FormatHelpers.h"
 #include "InstalledApps.h"
 #include "LockerDialog.h"
+#include "OpGuard.h"
 #include "WinApi.h"
 #include "MoveDstResolver.h"
 #include "MoveSelect.h"
@@ -318,32 +319,10 @@ bool holdsNothing(const QString& path)
                          | QDir::Hidden | QDir::System).isEmpty();
 }
 
-// True when every program holding the folder open is one this app never closes
-// — a system or security one. Restart Manager reports every process with a
-// handle on a file in the tree, and a handle that merely READS (an indexer
-// walking the folder, a scanner between two passes, Explorer painting a
-// thumbnail) does not keep the folder from being replaced. Interrupting the user
-// over a set of processes that nothing can be done about would make the prompt
-// meaningless, so when those are the ONLY holders the job walks on and their
-// names go to the log.
-bool onlyBackgroundHolders(const QVector<WinApi::LockingProcess>& procs)
-{
-    for (const WinApi::LockingProcess& p : procs) {
-        if (p.safeToClose || p.blockKey != QLatin1String("proc_close.block_system"))
-            return false;
-    }
-    return true;
-}
-
-QStringList namesOf(const QVector<WinApi::LockingProcess>& procs)
-{
-    QStringList names;
-    for (const WinApi::LockingProcess& p : procs) {
-        if (!p.name.isEmpty() && !names.contains(p.name))
-            names << p.name;
-    }
-    return names;
-}
+// "Who is holding this folder, and may we close them" lives in OpGuard now,
+// next to the same question the folder tree's delete and move paths ask — one
+// definition of "only system programs have it open", so the two halves of the
+// app cannot disagree about what is worth interrupting the user for.
 
 QString robocopyPath()
 {
@@ -2465,7 +2444,7 @@ void AppDataMovePanel::onLockProbeReady()
     // those — a program actually running out of the folder, say — is worth
     // showing before a single byte moves, because that is the one moment where
     // closing it costs the user nothing.
-    if (m_lockProcs.isEmpty() || onlyBackgroundHolders(m_lockProcs)) {
+    if (m_lockProcs.isEmpty() || OpGuard::onlyBackgroundHolders(m_lockProcs)) {
         if (!m_lockProcs.isEmpty()) {
             QStringList names;
             for (const WinApi::LockingProcess& p : m_lockProcs)
@@ -3185,7 +3164,7 @@ void AppDataMovePanel::runRestoreStep()
         // The answer decides everything: go, offer to close and ask again, or
         // refuse. Nothing has been touched at this point, which is what makes a
         // refusal cheap.
-        const bool blocked = !m_lockProcs.isEmpty() && !onlyBackgroundHolders(m_lockProcs);
+        const bool blocked = !m_lockProcs.isEmpty() && !OpGuard::onlyBackgroundHolders(m_lockProcs);
         switch (MoveSelect::restoreGate(blocked, LockerDialog::closableCount(m_lockProcs),
                                         m_restoreAskRound > 0)) {
         case MoveSelect::kRestoreGo:
@@ -3194,7 +3173,7 @@ void AppDataMovePanel::runRestoreStep()
                 // line in the log, not worth a prompt.
                 Logger::info(QStringLiteral("[restore] %1 is open in programs we never "
                                             "close, restoring anyway: %2")
-                                 .arg(d.path, namesOf(m_lockProcs).join(QStringLiteral(", "))));
+                                 .arg(d.path, OpGuard::namesOf(m_lockProcs).join(QStringLiteral(", "))));
             }
             startRestoreHandover(dirIndex);
             return;
@@ -3215,7 +3194,7 @@ void AppDataMovePanel::runRestoreStep()
                 failMove(dirIndex, QStringLiteral("app_move.fail_restore_locked"),
                          QMap<QString, QString>{
                              {"name", d.name},
-                             {"procs", namesOf(m_lockProcs).join(QStringLiteral("、"))}});
+                             {"procs", OpGuard::namesOf(m_lockProcs).join(QStringLiteral("、"))}});
                 d.state = kStateMoved;
                 if (row >= 0)
                     refreshRow(row);
@@ -3253,7 +3232,7 @@ void AppDataMovePanel::runRestoreStep()
             // the reason is named — a half-finished restore would be worse than
             // no restore at all.
             Logger::info(QStringLiteral("[restore] %1 refused: %2 holding %3")
-                             .arg(d.path, namesOf(m_lockProcs).join(QStringLiteral(", ")),
+                             .arg(d.path, OpGuard::namesOf(m_lockProcs).join(QStringLiteral(", ")),
                                   d.linkTarget));
             failRestoreLocked(dirIndex, m_lockProcs);
             d.state = kStateMoved;
@@ -3318,7 +3297,7 @@ void AppDataMovePanel::runRestoreStep()
 
     case kRsHomeProbed: {
         Logger::info(QStringLiteral("[restore] %1 refused: original path still held by %2")
-                         .arg(d.path, namesOf(m_lockProcs).join(QStringLiteral(", "))));
+                         .arg(d.path, OpGuard::namesOf(m_lockProcs).join(QStringLiteral(", "))));
         failRestoreLocked(dirIndex, m_lockProcs);
         d.state = kStateFailed;
         if (row >= 0)
@@ -3494,7 +3473,7 @@ void AppDataMovePanel::failRestoreLocked(int dirIndex,
 {
     const DataDir& d = m_dirs[dirIndex];
     const QStringList respawned = WinApi::respawnedAmong(procs, d.closedImages);
-    const QStringList names = respawned.isEmpty() ? namesOf(procs) : respawned;
+    const QStringList names = respawned.isEmpty() ? OpGuard::namesOf(procs) : respawned;
     if (names.isEmpty()) {
         failMove(dirIndex, QStringLiteral("app_move.fail_restore_locked_unknown"),
                  QMap<QString, QString>{{"name", d.name}});

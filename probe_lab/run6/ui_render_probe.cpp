@@ -28,8 +28,10 @@
 #include "AppPathSyncDialog.h"
 #include "FilterHeaderView.h"
 #include "I18n.h"
+#include "LockerDialog.h"
 #include "Logger.h"
 #include "MoveSelect.h"
+#include "OpGuard.h"
 
 static FILE* gLog = nullptr;
 static int gPass = 0, gFail = 0;
@@ -323,6 +325,121 @@ int main(int argc, char** argv)
         CHECK(unique && seen == (1 << MoveSelect::kStateCount) - 1,
               "the filter lists every state exactly once");
     }
+
+    // ---- the pre-flight's verdicts ------------------------------------------
+    // Deleting used to have no pre-flight at all: a program holding a file meant
+    // a half-deleted folder and a sentence that named nobody. These two decisions
+    // are what stands between the user and that outcome — when is a holder worth
+    // interrupting for, and when is there nothing left to try.
+    {
+        auto holder = [](const QString& name, bool safeToClose, const QString& blockKey) {
+            WinApi::LockingProcess p;
+            p.pid = 1;
+            p.name = name;
+            p.safeToClose = safeToClose;
+            p.blockKey = blockKey;
+            return p;
+        };
+
+        const QVector<WinApi::LockingProcess> empty;
+        CHECK(!OpGuard::blocksOperation(empty),
+              "nothing holding the folder means nothing to ask about");
+
+        const QVector<WinApi::LockingProcess> systemOnly = {
+            holder(QStringLiteral("MsMpEng"), false, QStringLiteral("proc_close.block_system")),
+            holder(QStringLiteral("SearchIndexer"), false,
+                   QStringLiteral("proc_close.block_system")),
+        };
+        CHECK(OpGuard::onlyBackgroundHolders(systemOnly),
+              "a folder held only by system programs is not worth interrupting for");
+        CHECK(!OpGuard::blocksOperation(systemOnly),
+              "and those holders do not stop the operation");
+
+        QVector<WinApi::LockingProcess> mixed = systemOnly;
+        mixed << holder(QStringLiteral("MyApp"), false, QStringLiteral("proc_close.block_user"));
+        mixed << holder(QStringLiteral("Editor"), true, QString());
+        CHECK(!OpGuard::onlyBackgroundHolders(mixed),
+              "one program the user can act on is enough to stop");
+        CHECK(OpGuard::blocksOperation(mixed), "and that one does stop the operation");
+        CHECK(OpGuard::namesOf(mixed).size() == 4, "every holder is named once");
+        CHECK(LockerDialog::closableCount(mixed) == 1,
+              "only the closable one is offered for closing");
+    }
+
+    // ---- the result report --------------------------------------------------
+    // Exactly the case that used to be silent: a delete where one item went, one
+    // was never there, one lost half its files and one would not budge. The
+    // report has to name the ones that need attention, keep the error code when
+    // the reason is unknown, and read as a sentence rather than as keys.
+    for (const QString& lang : {QStringLiteral("zh"), QStringLiteral("en")}) {
+        I18n::setLanguage(lang, /*persist=*/false);
+
+        WinApi::DeleteResult gone;
+        gone.path = QStringLiteral("C:/tmp/removed.txt");
+        gone.gone = true;
+        gone.freedBytes = 2048;
+
+        WinApi::DeleteResult missing;
+        missing.path = QStringLiteral("C:/tmp/never-there.txt");
+        missing.gone = true;
+        missing.reason = WinApi::DeleteReason::Missing;
+
+        WinApi::DeleteResult half;
+        half.path = QStringLiteral("C:/tmp/half");
+        half.reason = WinApi::DeleteReason::InUse;
+        half.freedBytes = 4096;
+        half.partial = true;
+
+        WinApi::DeleteResult stuck;
+        stuck.path = QStringLiteral("C:/tmp/stuck.txt");
+        stuck.reason = WinApi::DeleteReason::Unknown;
+        stuck.winError = 0x20;
+
+        const QVector<WinApi::DeleteResult> results = {gone, missing, half, stuck};
+
+        CHECK(OpGuard::allClean({gone}), "a run that removed everything is clean");
+        CHECK(!OpGuard::allClean(results), "a run with leftovers is not");
+        CHECK(!OpGuard::onlyAlreadyGone(results),
+              "a run that failed for a real reason is not 'nothing left to try'");
+        CHECK(OpGuard::onlyAlreadyGone({gone, missing}),
+              "a run whose only trouble was missing paths has nothing left to try");
+
+        const OpGuard::Tally t = OpGuard::tally(results);
+        CHECK(t.ok == 1 && t.bad == 3 && t.freed == 2048,
+              "the tally counts what went, what did not, and what came back");
+
+        CHECK(OpGuard::survivorsOf(results).size() == 2,
+              "the rows to keep are the paths still on the disk");
+        CHECK(OpGuard::vanishedOf(results).size() == 2, "the rows to drop are the ones that went");
+        CHECK(OpGuard::missingOf(results).size() == 1,
+              "missing paths are told apart from deleted ones");
+
+        const QString body = OpGuard::resultBody(results, /*recycled=*/false);
+        CHECK(!body.isEmpty(), "a report with leftovers is not empty");
+        CHECK(!body.contains(QStringLiteral("op_result."))
+                  && !body.contains(QStringLiteral("op_reason.")),
+              "the report is rendered text, not I18n keys");
+        CHECK(body.contains(QStringLiteral("half"))
+                  && body.contains(QStringLiteral("stuck.txt")),
+              "the report names the items that need attention");
+        CHECK(body.contains(QStringLiteral("0x20")),
+              "an unknown reason carries its error code into the sentence");
+        CHECK(!body.contains(QStringLiteral("removed.txt")),
+              "an item that simply worked is counted, not listed");
+
+        // The two sentences that matter most have to be different sentences:
+        // "it was never there" and "something is holding it" send the user to
+        // completely different next steps.
+        CHECK(OpGuard::reasonSentence(WinApi::DeleteReason::Missing, 0)
+                  != OpGuard::reasonSentence(WinApi::DeleteReason::InUse, 0),
+              "a missing file and a locked file do not read the same");
+        CHECK(OpGuard::resultLine(gone, /*recycled=*/true)
+                  != OpGuard::resultLine(gone, /*recycled=*/false),
+              "a Recycle-Bin result reads differently from a permanent one");
+        CHECK(OpGuard::resultLines({gone}, false).isEmpty(),
+              "a run with nothing wrong has no lines to show");
+    }
+    I18n::setLanguage(QStringLiteral("zh"), /*persist=*/false);   // as found
 
     fprintf(gLog, "[INFO] process exit is not the verdict for the PNG checks: %d failed\n", gFail);
 

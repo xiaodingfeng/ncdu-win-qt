@@ -79,6 +79,7 @@ add_executable(ui_render_probe run6/ui_render_probe.cpp
     ${PROJ}/src/ui/FilterHeaderView.cpp
     ${PROJ}/src/ui/AppPathSyncDialog.cpp
     ${PROJ}/src/ui/LockerDialog.cpp
+    ${PROJ}/src/ui/OpGuard.cpp
     ${PROJ}/src/core/WinApi.cpp
     ${PROJ}/src/core/Logger.cpp
     ${PROJ}/src/core/I18n.cpp
@@ -102,6 +103,7 @@ add_executable(lang_refresh_probe run7/lang_refresh_probe.cpp
     ${PROJ}/src/ui/FilterHeaderView.cpp
     ${PROJ}/src/ui/AppPathSyncDialog.cpp
     ${PROJ}/src/ui/LockerDialog.cpp
+    ${PROJ}/src/ui/OpGuard.cpp
     ${PROJ}/src/ai/AiAnalysisDialog.cpp
     ${PROJ}/src/core/WinApi.cpp
     ${PROJ}/src/core/Logger.cpp

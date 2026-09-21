@@ -301,6 +301,39 @@ int main(int argc, char** argv)
         CHECK(!WinApi::pathInsideDirectory(QStringLiteral("C:\\Data"), QString()),
               "containment: nothing is inside an empty folder path");
 
+        // The same question with the part below the folder kept, which is what
+        // the tree uses to walk down to a row. A drive root is the case that
+        // broke: "D:/" keeps its separator through normalisation, so a prefix
+        // built by appending one asks about "d://" and nothing matches — every
+        // lookup under a whole-drive scan failed silently.
+        QString rel = QStringLiteral("not cleared");
+        CHECK(WinApi::splitInside(QStringLiteral("D:/software/PixWit"),
+                                  QStringLiteral("D:/"), &rel),
+              "split: a folder directly under a drive root is inside that root");
+        CHECK(rel == QStringLiteral("software/pixwit"),
+              "split: and the part below the root comes back normalised");
+        CHECK(WinApi::splitInside(QStringLiteral("D:\\software\\PixWit"),
+                                  QStringLiteral("D:\\"), &rel),
+              "split: the same holds when both halves are spelled with backslashes");
+        CHECK(rel == QStringLiteral("software/pixwit"),
+              "split: and the answer is the same either way");
+        CHECK(WinApi::splitInside(QStringLiteral("D:/"), QStringLiteral("D:/"), &rel),
+              "split: a drive root is inside itself");
+        CHECK(rel.isEmpty(),
+              "split: with nothing below it, which is how the root node is found");
+        CHECK(WinApi::splitInside(QStringLiteral("D:/a/b/c"), QStringLiteral("D:/a"), &rel),
+              "split: a deeper path is inside a folder root");
+        CHECK(rel == QStringLiteral("b/c"),
+              "split: and keeps every segment, not just the last");
+        CHECK(!WinApi::splitInside(QStringLiteral("D:/software2"), QStringLiteral("D:/software"), &rel),
+              "split: a sibling with a longer name is outside");
+        CHECK(rel.isEmpty(),
+              "split: a failed answer leaves no half-built relative path behind");
+        CHECK(WinApi::splitInside(QStringLiteral("D:/software"), QStringLiteral("D:/"), nullptr),
+              "split: the relative part is optional");
+        CHECK(WinApi::pathInsideDirectory(QStringLiteral("D:/software"), QStringLiteral("D:/")),
+              "containment: and the plain question agrees, now that one is the other");
+
         // --- the lock beyond the sampling cap ---
         const QString many = base + QStringLiteral("/many");
         QDir().mkpath(many);
@@ -396,6 +429,178 @@ int main(int argc, char** argv)
                 runner.waitForFinished(2000);
             }
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Scenario H: why a deletion was refused. The delete report is what the UI
+    // turns into a sentence, so the classification has to be right for the codes
+    // Windows really hands back — and the two code spaces have to stay apart.
+    // ---------------------------------------------------------------------
+    CHECK(WinApi::classifyWinError(2) == WinApi::DeleteReason::Missing,
+          "error 2 (file not found) reads as missing");
+    CHECK(WinApi::classifyWinError(3) == WinApi::DeleteReason::Missing,
+          "error 3 (path not found) reads as missing");
+    CHECK(WinApi::classifyWinError(5) == WinApi::DeleteReason::AccessDenied,
+          "error 5 reads as access denied");
+    CHECK(WinApi::classifyWinError(19) == WinApi::DeleteReason::WriteProtected,
+          "error 19 reads as write-protected");
+    CHECK(WinApi::classifyWinError(32) == WinApi::DeleteReason::InUse,
+          "error 32 (sharing violation) reads as in use");
+    CHECK(WinApi::classifyWinError(33) == WinApi::DeleteReason::InUse,
+          "error 33 (lock violation) reads as in use");
+    CHECK(WinApi::classifyWinError(145) == WinApi::DeleteReason::DirectoryNotEmpty,
+          "error 145 reads as folder not empty");
+    CHECK(WinApi::classifyWinError(206) == WinApi::DeleteReason::PathTooLong,
+          "error 206 reads as path too long");
+    CHECK(WinApi::classifyWinError(0) == WinApi::DeleteReason::None,
+          "no error is not a reason");
+    CHECK(WinApi::classifyWinError(123) == WinApi::DeleteReason::Unknown,
+          "an unmapped error is reported as unknown, never guessed at");
+
+    // The Recycle Bin answers in its own code space, where 0x85 has nothing to
+    // do with Win32 error 133. Keeping the two apart is the whole point of
+    // having two functions.
+    CHECK(WinApi::classifyShellError(0) == WinApi::DeleteReason::None,
+          "shell 0 is success");
+    CHECK(WinApi::classifyShellError(0x75) == WinApi::DeleteReason::Aborted,
+          "shell 0x75 is an aborted operation");
+    CHECK(WinApi::classifyShellError(0x78) == WinApi::DeleteReason::AccessDenied,
+          "shell 0x78 is access denied");
+    CHECK(WinApi::classifyShellError(0x79) == WinApi::DeleteReason::PathTooLong
+              && WinApi::classifyShellError(0x81) == WinApi::DeleteReason::PathTooLong,
+          "both shell path-length codes read as path too long");
+    CHECK(WinApi::classifyShellError(0x85) == WinApi::DeleteReason::TooLargeForBin,
+          "shell 0x85 reads as too large for the Recycle Bin");
+    CHECK(WinApi::classifyShellError(0x7C) == WinApi::DeleteReason::Missing,
+          "shell 0x7C reads as nothing there");
+    CHECK(WinApi::classifyShellError(0x87) == WinApi::DeleteReason::CrossVolume,
+          "shell 0x87 reads as a place the bin cannot take things from");
+    CHECK(WinApi::classifyShellError(0x9999) == WinApi::DeleteReason::Unknown,
+          "an unmapped shell code is unknown");
+
+    // Every reason has to name a string, and no two may share one: a reason that
+    // renders as another reason's sentence is worse than saying nothing.
+    {
+        const QVector<WinApi::DeleteReason> all = {
+            WinApi::DeleteReason::Missing,           WinApi::DeleteReason::InUse,
+            WinApi::DeleteReason::AccessDenied,      WinApi::DeleteReason::ReadOnly,
+            WinApi::DeleteReason::DirectoryNotEmpty, WinApi::DeleteReason::PathTooLong,
+            WinApi::DeleteReason::WriteProtected,    WinApi::DeleteReason::TooLargeForBin,
+            WinApi::DeleteReason::CrossVolume,       WinApi::DeleteReason::Aborted,
+            WinApi::DeleteReason::Unknown,
+        };
+        QStringList keys;
+        bool everyOneNamed = true;
+        for (const WinApi::DeleteReason r : all) {
+            const QString key = WinApi::deleteReasonKey(r);
+            if (key.isEmpty() || keys.contains(key))
+                everyOneNamed = false;
+            keys << key;
+        }
+        CHECK(everyOneNamed, "every reason has a string of its own");
+        CHECK(WinApi::deleteReasonKey(WinApi::DeleteReason::None).isEmpty(),
+              "a deletion that worked has nothing to explain");
+    }
+
+    // The shell-code out-parameter is part of the contract, not decoration: the
+    // fallback prompt reads it to decide whether "delete it for real" can help.
+    {
+        int shellCode = -1;
+        CHECK(WinApi::sendToRecycleBin({}, &shellCode) && shellCode == 0,
+              "an empty Recycle-Bin run succeeds and reports code 0");
+    }
+
+    // ---------------------------------------------------------------------
+    // Scenario I: one delete, three answers. The report has to tell "we removed
+    // it" apart from "it was never there" apart from "something inside is open"
+    // — those are three different things to say to a user, and the third one has
+    // to carry the proof that part of the folder did go.
+    // ---------------------------------------------------------------------
+    {
+        const QString reportDir = base + "/report";
+        QDir(reportDir).removeRecursively();
+        QDir().mkpath(reportDir + "/open");
+
+        QFile plain(reportDir + "/plain.txt");
+        plain.open(QIODevice::WriteOnly);
+        plain.write(QByteArray(64, 'x'));
+        plain.close();
+
+        QFile keep(reportDir + "/open/locked.txt");
+        keep.open(QIODevice::WriteOnly);
+        keep.write(QByteArray(32, 'y'));
+        keep.close();
+        QFile drop(reportDir + "/open/free.txt");
+        drop.open(QIODevice::WriteOnly);
+        drop.write(QByteArray(16, 'z'));
+        drop.close();
+
+        HANDLE lock = CreateFileW(
+            reinterpret_cast<const wchar_t*>(
+                QDir::toNativeSeparators(reportDir + "/open/locked.txt").utf16()),
+            GENERIC_READ, 0 /*no sharing*/, nullptr, OPEN_EXISTING, 0, nullptr);
+        CHECK(lock != INVALID_HANDLE_VALUE, "fixture: the file inside the folder is locked");
+
+        const QVector<WinApi::DeleteResult> results = WinApi::deletePermanentDetailed({
+            reportDir + "/plain.txt",
+            reportDir + "/open",
+            reportDir + "/never-existed",
+        });
+        CHECK(results.size() == 3, "one report per path, not one for the batch");
+
+        CHECK(results[0].gone && results[0].reason == WinApi::DeleteReason::None,
+              "a file that was removed reports as removed");
+        CHECK(results[0].freedBytes >= 64, "and says how much room came back");
+        CHECK(!QFileInfo::exists(reportDir + "/plain.txt"), "fixture: the file is gone");
+
+        CHECK(!results[1].gone, "a folder with a file held open survives");
+        CHECK(results[1].reason == WinApi::DeleteReason::InUse,
+              "and says the file inside is in use");
+        CHECK(results[1].partial && results[1].freedBytes > 0,
+              "and reports the part of itself that did go");
+        CHECK(QFileInfo::exists(reportDir + "/open")
+                  && QFileInfo::exists(reportDir + "/open/locked.txt")
+                  && !QFileInfo::exists(reportDir + "/open/free.txt"),
+              "fixture: exactly the free file went, the held one stayed");
+
+        CHECK(results[2].gone && results[2].reason == WinApi::DeleteReason::Missing,
+              "a path that was never there is gone, but says it was never there");
+        CHECK(results[2].freedBytes == 0,
+              "and claims no room back, because it freed none");
+        // A path that was already absent does not fail the batch: the goal was
+        // "make sure this is off the disk", and it already is. Saying "failed"
+        // here would make a stale row look like a refused delete.
+        CHECK(WinApi::deletePermanent({reportDir + "/never-existed"}),
+              "the batch answer counts an already-absent path as done, not as failed");
+
+        if (lock != INVALID_HANDLE_VALUE)
+            CloseHandle(lock);
+    }
+
+    // ---------------------------------------------------------------------
+    // Scenario J: the numbers the tree refresh runs on. One walk, three answers
+    // — the size alone is not enough, because a partly deleted folder has to
+    // show a smaller size AND a smaller file count.
+    // ---------------------------------------------------------------------
+    {
+        const QString statDir = base + "/stat";
+        QDir(statDir).removeRecursively();
+        QDir().mkpath(statDir + "/a/b");
+        auto write = [](const QString& path, int bytes) {
+            QFile f(path);
+            f.open(QIODevice::WriteOnly);
+            f.write(QByteArray(bytes, 'q'));
+        };
+        write(statDir + "/one.txt", 100);
+        write(statDir + "/a/two.txt", 200);
+        write(statDir + "/a/b/three.txt", 300);
+
+        const WinApi::DirStat stat = WinApi::dirStatNoReparse(statDir);
+        CHECK(stat.size == 600, "the walk adds up every file below the folder");
+        CHECK(stat.fileCount == 3, "and counts the files");
+        CHECK(stat.dirCount == 2, "and counts the subdirectories, not the folder itself");
+        CHECK(WinApi::dirStatNoReparse(base + "/does-not-exist").size == 0,
+              "a folder that is not there measures as nothing");
     }
 
     fprintf(gLog, "RESULT: %d passed, %d failed\n", gPass, gFail);

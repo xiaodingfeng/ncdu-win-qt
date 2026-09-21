@@ -35,8 +35,10 @@ namespace WinApi {
 // sendToRecycleBin
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
-bool sendToRecycleBin(const QStringList& paths)
+bool sendToRecycleBin(const QStringList& paths, int* shellCode)
 {
+    if (shellCode)
+        *shellCode = 0;
     if (paths.isEmpty())
         return true;
 
@@ -65,10 +67,23 @@ bool sendToRecycleBin(const QStringList& paths)
     op.lpszProgressTitle = nullptr;
 
     const int result = SHFileOperationW(&op);
+    if (shellCode) {
+        // A user-aborted operation comes back as 0 with the abort flag set on
+        // some shells and as DE_OPCANCELLED (0x75) on others; report it as one
+        // thing, because it is one thing.
+        constexpr int kShellOpCancelled = 0x75;
+        *shellCode = (result != 0) ? result
+                                   : (op.fAnyOperationsAborted ? kShellOpCancelled : 0);
+    }
     return result == 0 && op.fAnyOperationsAborted == FALSE;
 }
 #else
-bool sendToRecycleBin(const QStringList&) { return false; }
+bool sendToRecycleBin(const QStringList&, int* shellCode)
+{
+    if (shellCode)
+        *shellCode = 0;
+    return false;
+}
 #endif
 
 // ---------------------------------------------------------------------------
@@ -129,22 +144,28 @@ QString joinChild(const QString& parent, const QString& name)
 // *freedBytes (optional) accumulates the size of every file removed, so the
 // caller can show the deletion moving instead of staring at a stalled bar.
 bool removeDirectoryRecursive(const QString& path, bool removeSelf = true,
-                              std::atomic<qint64>* freedBytes = nullptr)
+                              std::atomic<qint64>* freedBytes = nullptr,
+                              quint32* firstError = nullptr)
 {
     const QString pattern = makeSearchPattern(path);
 
     WIN32_FIND_DATAW fd;
     HANDLE hFind = FindFirstFileW(lpcwstr(pattern), &fd);
-    if (hFind == INVALID_HANDLE_VALUE)
+    if (hFind == INVALID_HANDLE_VALUE) {
+        // Not being able to enumerate the folder is itself the reason the
+        // caller will report, so it has to survive the walk's return value.
+        if (firstError && *firstError == 0)
+            *firstError = GetLastError();
         return false;
+    }
 
     // Ask for the delete first and only pay for the attribute round-trip when
     // Windows actually refuses. Clearing the read-only bit up-front costs two
     // extra syscalls on *every* item — which is exactly what makes deleting a
     // tree with tens of thousands of entries slow. (Doubles as the retry path
     // for a directory whose read-only bit blocks RemoveDirectory.)
-    const auto unlinkOne = [freedBytes](LPCWSTR wide, const QString& shown, bool isDir,
-                                        qint64 bytes) {
+    const auto unlinkOne = [freedBytes, firstError](LPCWSTR wide, const QString& shown,
+                                                   bool isDir, qint64 bytes) {
         const auto attempt = [&]() {
             return isDir ? RemoveDirectoryW(wide) : DeleteFileW(wide);
         };
@@ -163,6 +184,11 @@ bool removeDirectoryRecursive(const QString& path, bool removeSelf = true,
             }
             err = GetLastError();
         }
+        // The FIRST failure is the one worth keeping: it is the one the caller
+        // turns into "why could this not be deleted". Later ones are almost
+        // always the same cause repeated (one program holding many files).
+        if (firstError && *firstError == 0)
+            *firstError = err;
         // Error 5 (ACCESS_DENIED) and 32 (SHARING_VIOLATION) are expected for
         // locked/in-use files, so this stays at warn level without spam.
         Logger::warn(QStringLiteral("[removeDir] delete failed: %1 err=%2 (dir=%3)")
@@ -184,7 +210,7 @@ bool removeDirectoryRecursive(const QString& path, bool removeSelf = true,
                 // target. RemoveDirectoryW is exactly that (no /S equivalent).
                 if (!unlinkOne(lpcwstr(child), child, true, 0))
                     ok = false;
-            } else if (!removeDirectoryRecursive(child, true, freedBytes)) {
+            } else if (!removeDirectoryRecursive(child, true, freedBytes, firstError)) {
                 ok = false;
             }
         } else {
@@ -215,13 +241,27 @@ bool removeDirectoryRecursive(const QString& path, bool removeSelf = true,
 // says "C:\Data2" is inside "C:\Data", which is how a process gets blamed for a
 // folder it has nothing to do with. Kept as pure string work, without touching
 // the file system, so the probe lab can check the awkward cases directly.
+//
+// It is splitInside with the detail dropped, so the awkward spellings are
+// handled in exactly one place.
 bool pathInsideDirectory(const QString& file, const QString& dir)
 {
+    return splitInside(file, dir, nullptr);
+}
+
+bool splitInside(const QString& file, const QString& dir, QString* rel)
+{
+    if (rel)
+        rel->clear();
     if (file.isEmpty() || dir.isEmpty())
         return false;
 
     const QString f = QDir::cleanPath(QDir::fromNativeSeparators(file)).toLower();
     QString d = QDir::cleanPath(QDir::fromNativeSeparators(dir)).toLower();
+    // The trailing separator has to go from the folder's side. A drive root has
+    // one and keeps it through cleanPath, which turns the prefix test below into
+    // a question about "d://" — the reason every lookup under a whole-drive scan
+    // came back empty while the same code worked for a folder.
     while (d.endsWith(QLatin1Char('/')))
         d.chop(1);
     if (d.isEmpty() || f.isEmpty())
@@ -230,8 +270,89 @@ bool pathInsideDirectory(const QString& file, const QString& dir)
         return true;
     // The character after the prefix must be a separator, which is exactly what
     // rules out "C:\Data2" while still accepting "C:\Data\sub".
-    return f.startsWith(d) && f.size() > d.size()
-           && f.at(d.size()) == QLatin1Char('/');
+    if (!f.startsWith(d) || f.size() <= d.size()
+        || f.at(d.size()) != QLatin1Char('/'))
+        return false;
+    if (rel)
+        *rel = f.mid(d.size() + 1);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// classifyWinError / classifyShellError / deleteReasonKey
+// ---------------------------------------------------------------------------
+// Numeric codes rather than the ERROR_* names, so this stays compilable (and
+// checkable by the probe lab) without <windows.h>. Each value is the one
+// Windows documents.
+DeleteReason classifyWinError(quint32 winError)
+{
+    switch (winError) {
+    case 2:    // ERROR_FILE_NOT_FOUND
+    case 3:    // ERROR_PATH_NOT_FOUND
+        return DeleteReason::Missing;
+    case 5:    // ERROR_ACCESS_DENIED
+        return DeleteReason::AccessDenied;
+    case 19:   // ERROR_WRITE_PROTECT
+        return DeleteReason::WriteProtected;
+    case 32:   // ERROR_SHARING_VIOLATION - a file inside is open somewhere
+    case 33:   // ERROR_LOCK_VIOLATION
+        return DeleteReason::InUse;
+    case 145:  // ERROR_DIR_NOT_EMPTY - a subdirectory survived
+        return DeleteReason::DirectoryNotEmpty;
+    case 206:  // ERROR_FILENAME_EXCED_RANGE
+        return DeleteReason::PathTooLong;
+    default:
+        // 0 means "no failure was recorded", which is not a reason at all.
+        return winError == 0 ? DeleteReason::None : DeleteReason::Unknown;
+    }
+}
+
+// The Recycle Bin speaks its own dialect: SHFileOperationW returns 0 on success
+// and one of the DE_* values otherwise, and 0x85 ("too large for the bin") is
+// the single most common one in practice.
+DeleteReason classifyShellError(int shellCode)
+{
+    switch (shellCode) {
+    case 0:
+        return DeleteReason::None;
+    case 0x74:   // DE_ROOTDIR - a drive root can never be recycled
+        return DeleteReason::AccessDenied;
+    case 0x75:   // DE_OPCANCELLED
+        return DeleteReason::Aborted;
+    case 0x78:   // DE_ACCESSDENIEDSRC
+        return DeleteReason::AccessDenied;
+    case 0x79:   // DE_PATHTOODEEP
+    case 0x81:   // DE_FILENAMETOOLONG
+        return DeleteReason::PathTooLong;
+    case 0x7C:   // DE_INVALIDFILES - the source is not a file or folder
+        return DeleteReason::Missing;
+    case 0x85:   // DE_FILE_TOO_LARGE
+        return DeleteReason::TooLargeForBin;
+    case 0x87:   // DE_SRC_IS_DVD
+    case 0x88:   // DE_SRC_IS_CDRECORD
+        return DeleteReason::CrossVolume;
+    default:
+        return DeleteReason::Unknown;
+    }
+}
+
+QString deleteReasonKey(DeleteReason reason)
+{
+    switch (reason) {
+    case DeleteReason::Missing:           return QStringLiteral("op_reason.missing");
+    case DeleteReason::InUse:             return QStringLiteral("op_reason.in_use");
+    case DeleteReason::AccessDenied:      return QStringLiteral("op_reason.access_denied");
+    case DeleteReason::ReadOnly:          return QStringLiteral("op_reason.read_only");
+    case DeleteReason::DirectoryNotEmpty: return QStringLiteral("op_reason.dir_not_empty");
+    case DeleteReason::PathTooLong:       return QStringLiteral("op_reason.path_too_long");
+    case DeleteReason::WriteProtected:    return QStringLiteral("op_reason.write_protected");
+    case DeleteReason::TooLargeForBin:    return QStringLiteral("op_reason.too_large_bin");
+    case DeleteReason::CrossVolume:       return QStringLiteral("op_reason.cross_volume");
+    case DeleteReason::Aborted:           return QStringLiteral("op_reason.aborted");
+    case DeleteReason::Unknown:           return QStringLiteral("op_reason.unknown");
+    case DeleteReason::None:
+    default:                              return QString();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -378,40 +499,119 @@ qint64 dirSizeNoReparse(const QString& path, std::atomic<qint64>* visited)
 #endif
 
 // ---------------------------------------------------------------------------
+// dirStatNoReparse
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+DirStat dirStatNoReparse(const QString& path)
+{
+    DirStat stat;
+    const QString pattern = makeSearchPattern(path);
+
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(lpcwstr(pattern), &fd);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return stat;
+
+    do {
+        const QString name = QString::fromWCharArray(fd.cFileName);
+        if (name == QLatin1String(".") || name == QLatin1String(".."))
+            continue;
+        // A junction is a link, not storage: it has no bytes to add and it is not
+        // a subdirectory of this folder either.
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+            continue;
+
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            const DirStat sub = dirStatNoReparse(joinChild(path, name));
+            stat.size += sub.size;
+            stat.fileCount += sub.fileCount;
+            stat.dirCount += 1 + sub.dirCount;
+        } else {
+            stat.size += (static_cast<qint64>(fd.nFileSizeHigh) << 32)
+                         | static_cast<qint64>(fd.nFileSizeLow);
+            stat.fileCount += 1;
+        }
+    } while (FindNextFileW(hFind, &fd));
+
+    FindClose(hFind);
+    return stat;
+}
+#else
+DirStat dirStatNoReparse(const QString& path)
+{
+    DirStat stat;
+    QDirIterator it(path,
+                    QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot
+                        | QDir::Hidden | QDir::System | QDir::NoSymLinks,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QFileInfo fi = it.nextFileInfo();
+        if (fi.isDir()) {
+            ++stat.dirCount;
+        } else {
+            stat.size += fi.size();
+            ++stat.fileCount;
+        }
+    }
+    return stat;
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // deletePermanent
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
-bool deletePermanent(const QStringList& paths, std::atomic<qint64>* freedBytes)
+// Bare existence, without following a reparse point: a junction whose target is
+// gone still exists as a link, and "gone" has to mean the link is gone.
+bool attrsExist(const QString& native)
 {
-    if (paths.isEmpty())
-        return true;
+    return GetFileAttributesW(lpcwstr(native)) != INVALID_FILE_ATTRIBUTES;
+}
 
-    bool ok = true;
+QVector<DeleteResult> deletePermanentDetailed(const QStringList& paths,
+                                              std::atomic<qint64>* freedBytes)
+{
+    QVector<DeleteResult> results;
+    results.reserve(paths.size());
+
     for (const QString& p : paths) {
+        DeleteResult r;
+        r.path = p;
         const QString native = QDir::toNativeSeparators(p);
+        std::atomic<qint64> freed{0};
+
         const DWORD attrs = GetFileAttributesW(lpcwstr(native));
         if (attrs == INVALID_FILE_ATTRIBUTES) {
             const DWORD err = GetLastError();
             Logger::warn(QStringLiteral("[deletePermanent] GetFileAttributes failed: %1 err=%2 (0x%3)")
                              .arg(native).arg(err).arg(err, 0, 16));
-            ok = false;
+            // A path that is not there is not a failure of ours: it is either a
+            // stale entry in the list the caller was handed, or something this
+            // same batch already removed. Either way it must not be dressed up
+            // as "已删除" - the two read very differently to a user.
+            r.winError = err;
+            r.reason = classifyWinError(err);
+            r.gone = (r.reason == DeleteReason::Missing);
+            // The reason is kept on purpose: "gone because we removed it" and
+            // "gone because it was never there" are both gone, and the report
+            // says very different things about them.
+            results.push_back(r);
             continue;
         }
 
+        quint32 firstError = 0;
         if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
             if (isReparsePoint(attrs)) {
                 // Directory reparse point: unlink without following.
                 clearReadOnly(native);
                 if (!RemoveDirectoryW(lpcwstr(native))) {
-                    const DWORD err = GetLastError();
+                    firstError = GetLastError();
                     Logger::warn(QStringLiteral("[deletePermanent] RemoveDirectory(reparse) failed: %1 err=%2 (0x%3)")
-                                     .arg(native).arg(err).arg(err, 0, 16));
-                    ok = false;
+                                     .arg(native).arg(firstError).arg(firstError, 0, 16));
                 }
-            } else if (!removeDirectoryRecursive(native, true, freedBytes)) {
+            } else if (!removeDirectoryRecursive(native, true, &freed, &firstError)) {
                 Logger::warn(QStringLiteral("[deletePermanent] removeDirectoryRecursive failed: %1")
                                  .arg(native));
-                ok = false;
             }
         } else {
             // Regular file or file symlink.
@@ -419,18 +619,52 @@ bool deletePermanent(const QStringList& paths, std::atomic<qint64>* freedBytes)
             // Measured before the delete: afterwards there is nothing left to ask.
             const qint64 bytes = QFileInfo(native).size();
             if (!DeleteFileW(lpcwstr(native))) {
-                const DWORD err = GetLastError();
+                firstError = GetLastError();
                 Logger::warn(QStringLiteral("[deletePermanent] DeleteFile failed: %1 attrs=0x%2 err=%3 (0x%4)")
-                                 .arg(native).arg(attrs, 0, 16).arg(err).arg(err, 0, 16));
-                ok = false;
-            } else if (freedBytes && bytes > 0) {
-                freedBytes->fetch_add(bytes, std::memory_order_relaxed);
+                                 .arg(native).arg(attrs, 0, 16).arg(firstError).arg(firstError, 0, 16));
+            } else if (bytes > 0) {
+                freed.fetch_add(bytes, std::memory_order_relaxed);
             }
         }
+
+        r.freedBytes = freed.load();
+        if (freedBytes && r.freedBytes > 0)
+            freedBytes->fetch_add(r.freedBytes, std::memory_order_relaxed);
+
+        // Ask the disk what is left instead of trusting the return value: a
+        // recursive delete reports false when a single file vanished under it
+        // even though the folder did go, and reporting that as a failure would
+        // leave a row in the tree for something that no longer exists.
+        r.gone = !attrsExist(native);
+        if (!r.gone) {
+            r.winError = firstError;
+            r.reason = firstError ? classifyWinError(firstError) : DeleteReason::Unknown;
+            // Some of it went. That is the case the caller has to correct the
+            // shown size for instead of deleting the row.
+            r.partial = r.freedBytes > 0;
+        }
+        results.push_back(r);
     }
-    return ok;
+    return results;
+}
+
+bool deletePermanent(const QStringList& paths, std::atomic<qint64>* freedBytes)
+{
+    // The batch answer, kept for the callers that only ask "did it all work":
+    // a path that was already gone still counts as not-ok here, exactly as the
+    // single-shot version always reported it.
+    const QVector<DeleteResult> results = deletePermanentDetailed(paths, freedBytes);
+    for (const DeleteResult& r : results) {
+        if (!r.gone)
+            return false;
+    }
+    return true;
 }
 #else
+QVector<DeleteResult> deletePermanentDetailed(const QStringList&, std::atomic<qint64>*)
+{
+    return {};
+}
 bool deletePermanent(const QStringList&, std::atomic<qint64>*) { return false; }
 #endif
 
@@ -438,16 +672,28 @@ bool deletePermanent(const QStringList&, std::atomic<qint64>*) { return false; }
 // cleanDirectoryContents — delete contents, keep the directory itself
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
-std::pair<int, int> cleanDirectoryContents(const QString& dirPath)
+std::pair<int, int> cleanDirectoryContents(const QString& dirPath,
+                                           DeleteReason* why,
+                                           QString* sample)
 {
+    if (why)
+        *why = DeleteReason::None;
+    if (sample)
+        sample->clear();
+
     const QString native = QDir::toNativeSeparators(dirPath);
     const QString pattern = makeSearchPattern(native);
 
     WIN32_FIND_DATAW fd;
     HANDLE hFind = FindFirstFileW(lpcwstr(pattern), &fd);
     if (hFind == INVALID_HANDLE_VALUE) {
+        const DWORD err = GetLastError();
         Logger::warn(QStringLiteral("[cleanDir] FindFirstFile failed: %1 err=%2")
-                         .arg(native).arg(GetLastError()));
+                         .arg(native).arg(err));
+        if (why)
+            *why = classifyWinError(err);
+        if (sample)
+            *sample = native;
         return {0, 0};
     }
 
@@ -460,47 +706,70 @@ std::pair<int, int> cleanDirectoryContents(const QString& dirPath)
 
         const QString child = joinChild(native, name);
         bool childOk = true;
+        quint32 childError = 0;
 
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
             if (isReparsePoint(fd.dwFileAttributes)) {
                 clearReadOnly(child);
-                if (!RemoveDirectoryW(lpcwstr(child)))
+                if (!RemoveDirectoryW(lpcwstr(child))) {
+                    childError = GetLastError();
                     childOk = false;
+                }
             } else {
                 // Recurse into subdirectory: delete its contents AND the
                 // subdirectory itself (subdirectories are safe to remove,
                 // unlike the top-level system directory we're cleaning).
-                childOk = removeDirectoryRecursive(child, true);
+                childOk = removeDirectoryRecursive(child, true, nullptr, &childError);
             }
         } else {
             clearReadOnly(child);
             if (!DeleteFileW(lpcwstr(child))) {
-                const DWORD err = GetLastError();
+                childError = GetLastError();
                 Logger::warn(QStringLiteral("[cleanDir] DeleteFile failed: %1 err=%2")
-                                .arg(child).arg(err));
+                                .arg(child).arg(childError));
                 childOk = false;
             }
         }
 
-        if (childOk)
+        if (childOk) {
             ++deleted;
-        else
+        } else {
             ++skipped;
+            // Keep the FIRST reason and one example of it: a Temp folder with
+            // four hundred files open in the same program is one sentence, not
+            // four hundred.
+            if (why && *why == DeleteReason::None) {
+                *why = childError ? classifyWinError(childError)
+                                  : DeleteReason::Unknown;
+                if (sample)
+                    *sample = child;
+            }
+        }
     } while (FindNextFileW(hFind, &fd));
 
     FindClose(hFind);
     return {deleted, skipped};
 }
 #else
-std::pair<int, int> cleanDirectoryContents(const QString&) { return {0, 0}; }
+std::pair<int, int> cleanDirectoryContents(const QString&, DeleteReason* why, QString* sample)
+{
+    if (why)
+        *why = DeleteReason::None;
+    if (sample)
+        sample->clear();
+    return {0, 0};
+}
 #endif
 
 // ---------------------------------------------------------------------------
 // cleanDirectoryContentsToRecycleBin — move contents to Recycle Bin, keep dir
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
-std::pair<int, int> cleanDirectoryContentsToRecycleBin(const QString& dirPath)
+std::pair<int, int> cleanDirectoryContentsToRecycleBin(const QString& dirPath,
+                                                        int* shellCode)
 {
+    if (shellCode)
+        *shellCode = 0;
     QStringList children;
     QDir dir(dirPath);
     const auto entries = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
@@ -511,13 +780,18 @@ std::pair<int, int> cleanDirectoryContentsToRecycleBin(const QString& dirPath)
     // sendToRecycleBin uses SHFileOperationW(FO_DELETE|FOF_ALLOWUNDO), which
     // recursively moves directories into the Recycle Bin. The directory itself
     // is kept because we only pass its top-level children.
-    const bool ok = sendToRecycleBin(children);
+    const bool ok = sendToRecycleBin(children, shellCode);
     const int n = static_cast<int>(children.size());
     return ok ? std::make_pair(n, 0)
               : std::make_pair(0, n);
 }
 #else
-std::pair<int, int> cleanDirectoryContentsToRecycleBin(const QString&) { return {0, 0}; }
+std::pair<int, int> cleanDirectoryContentsToRecycleBin(const QString&, int* shellCode)
+{
+    if (shellCode)
+        *shellCode = 0;
+    return {0, 0};
+}
 #endif
 
 // ---------------------------------------------------------------------------

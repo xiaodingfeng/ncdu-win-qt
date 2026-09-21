@@ -20,6 +20,7 @@
 #include <QFutureWatcher>
 #include <QNetworkAccessManager>
 #include <QPointer>
+#include <functional>
 #include <memory>
 #include <vector>
 #include <tuple>
@@ -31,6 +32,7 @@
 #include "CleanupScanner.h"
 #include "CleanupWorker.h"
 #include "DuplicateScanner.h"
+#include "WinApi.h"
 
 // Forward declarations - implementations are created by other tasks.
 class TreemapWidget;
@@ -203,6 +205,18 @@ private:
     QPointer<AiAnalysisDialog> m_aiDialog;
     QString m_aiModel;   // last model used for analysis (reused for follow-ups)
 
+    // Pre-flight state (see guardThen). One guarded operation at a time: two
+    // probes in flight would attach one answer to the other one's action.
+    QFutureWatcher<QVector<WinApi::LockingProcess>>* m_guardWatcher = nullptr;
+    std::function<void()> m_guardAction;
+    QStringList m_guardPaths;
+    // Image paths of the programs a close round got rid of: the only way to tell
+    // "a program is holding it" apart from "a program restarts itself", which is
+    // the one case where closing them again cannot possibly help.
+    QStringList m_guardClosedImages;
+    bool m_guardOffered = false;
+    bool m_guardFatal = true;
+
     // ---- Helpers ----
     void buildUI();
     void buildMenu();
@@ -258,15 +272,39 @@ private:
                           std::vector<std::shared_ptr<FileNode>>& rejected) const;
     void formatNames(const std::vector<std::shared_ptr<FileNode>>& nodes,
                      QString& names, QString& more) const;
+    // Asks, then hands over to doRecycle once the pre-flight has cleared the way.
     void recycleSelected();
+    void doRecycle(const std::vector<std::shared_ptr<FileNode>>& nodes);
     void deletePermanentSelected();
+    // The guarded entry point, kept as such so the Recycle Bin's fallback is
+    // checked over as well; the work itself is in doDeletePermanent.
     void deletePermanentAsync(const std::vector<std::shared_ptr<FileNode>>& nodes);
+    void doDeletePermanent(const std::vector<std::shared_ptr<FileNode>>& nodes);
     void afterDelete(const std::vector<std::shared_ptr<FileNode>>& nodes);
     void recomputeSizes(std::shared_ptr<FileNode> node);
     std::shared_ptr<FileNode> findNodeByPath(const QString& path) const;
     bool pruneMissingFromNode(const std::shared_ptr<FileNode>& node);
-    void syncTreeAfterCleanup(
-        const std::vector<CleanupWorker::ItemRef>& successItems);
+    // Bring the tree back in line with the disk for what an operation touched:
+    // drop the rows that are gone, re-measure the ones that are not. The node
+    // form is the one to reach for — the caller already holds them, and there is
+    // then nothing that can fail to resolve.
+    void resyncNodesFromDisk(const std::vector<std::shared_ptr<FileNode>>& nodes);
+    void resyncPathsFromDisk(const QStringList& paths);
+    void syncTreeAfterCleanup(const std::vector<CleanupWorker::ItemRef>& items);
+
+    // The pre-flight every destructive operation runs before it touches the disk
+    // (see OpGuard). Fatal refuses to touch anything when the programs holding
+    // the paths cannot be closed; advisory names them and carries on.
+    void guardThen(const QStringList& paths, bool fatal, std::function<void()> action);
+    void runGuardProbe();
+    void onGuardProbed();
+    void finishGuard(bool proceed);
+
+    // The move itself, and the cleanup run itself: both start only after the
+    // pre-flight above has had its say.
+    void startSafeMove(const std::shared_ptr<FileNode>& node, const QString& targetDir);
+    void startCleanup(const std::vector<std::tuple<QString, QString, QString>>& items,
+                      CleanupWorker::DeleteMode mode);
 
     // Cleanup
     void startCleanupScan(const QString& scanPath);
