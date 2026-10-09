@@ -31,6 +31,7 @@ int main(int argc, char* argv[])
 
     // Load persisted language preference (or auto-detect from system locale).
     I18n::load();
+    applyDefaultUiFont();
 
     // Load persisted theme preference and resolve "system" against the OS
     // color scheme before applying the stylesheet, so the first paint uses

@@ -18,6 +18,9 @@
 #include <QSettings>
 #include <QGuiApplication>
 #include <QStyleHints>
+#include <QFont>
+#include <QFontDatabase>
+#include <QStringList>
 #include <QDir>
 #include <QPainter>
 #include <QPixmap>
@@ -264,8 +267,28 @@ inline QPalette makePalette(const ThemeColors& colors) {
     return p;
 }
 
-// Default UI font family.
-inline const char* const DEFAULT_FAMILY = "Segoe UI";
+// Pick one installed family instead of relying on a comma-separated QSS
+// fallback list. Qt style sheets treat font-family as a single family name,
+// which can otherwise leave CJK glyph selection to an unsuitable fallback.
+inline QString defaultUiFontFamily() {
+    const QStringList preferred = I18n::currentLanguage() == QStringLiteral("zh")
+        ? QStringList{QStringLiteral("Microsoft YaHei UI"),
+                      QStringLiteral("Microsoft YaHei"),
+                      QStringLiteral("DengXian")}
+        : QStringList{QStringLiteral("Segoe UI")};
+
+    const QFontDatabase database;
+    const QStringList installed = database.families();
+    for (const QString& family : preferred) {
+        if (installed.contains(family, Qt::CaseInsensitive))
+            return family;
+    }
+    return QFontDatabase::systemFont(QFontDatabase::GeneralFont).family();
+}
+
+inline void applyDefaultUiFont() {
+    QGuiApplication::setFont(QFont(defaultUiFontFamily()));
+}
 
 // --------------------------------------------------------------------------- //
 // File-type classification helpers
@@ -460,7 +483,7 @@ inline QIcon getDetailIcon() {
 inline QString loadQSS() {
     QString s = QString::fromLatin1(R"(
 * {
-    font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    font-family: "@UI_FONT";
     font-size: 13px;
     color: @TEXT;
     outline: none;
@@ -885,6 +908,8 @@ QLabel#about-title {
     color: @TEXT;
 }
 )");
+
+    s.replace(QStringLiteral("@UI_FONT"), defaultUiFontFamily());
 
     // Inject the active palette. Each token maps to one palette entry.
     // IMPORTANT: Longer tokens MUST be replaced before shorter ones that are

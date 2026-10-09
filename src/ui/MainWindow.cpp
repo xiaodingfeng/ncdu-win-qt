@@ -3589,6 +3589,8 @@ void MainWindow::switchLanguage(const QString& lang)
     if (lang == I18n::currentLanguage())
         return;
     I18n::setLanguage(lang);
+    applyDefaultUiFont();
+    qApp->setStyleSheet(loadQSS());
     retranslateUI();
 }
 

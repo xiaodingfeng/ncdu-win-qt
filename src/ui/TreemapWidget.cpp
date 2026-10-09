@@ -286,15 +286,18 @@ void TreemapWidget::paintEvent(QPaintEvent* /*e*/)
 
     if (m_cells.empty()) {
         p.setPen(QColor(QString::fromLatin1(C::TEXT_MUTED())));
-        QFont emptyFont(QString::fromLatin1(DEFAULT_FAMILY), 11);
+        QFont emptyFont = font();
+        emptyFont.setPointSize(11);
         p.setFont(emptyFont);
         p.drawText(rect(), Qt::AlignCenter, I18n::tr("treemap.empty"));
         return;
     }
 
-    QFont labelFont(QString::fromLatin1(DEFAULT_FAMILY), 9);
+    QFont labelFont = font();
+    labelFont.setPointSize(9);
     labelFont.setWeight(QFont::DemiBold);
-    QFont smallFont(QString::fromLatin1(DEFAULT_FAMILY), 8);
+    QFont smallFont = font();
+    smallFont.setPointSize(8);
 
     for (int idx = 0; idx < static_cast<int>(m_cells.size()); ++idx) {
         const TreemapCell& cell = m_cells[idx];
