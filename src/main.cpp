@@ -14,6 +14,47 @@
 
 int main(int argc, char* argv[])
 {
+    // Enable Qt high-DPI attributes BEFORE creating the QApplication
+    // (this is the recommended way in Qt 5.6+ to get correct scaling).
+    QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+    QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
+
+#ifdef _WIN32
+    // Try to set Windows DPI awareness to Per-Monitor v2 (if available).
+    // This helps avoid blurry scaling and makes per-monitor DPI changes work.
+    // Use runtime checks so code still builds on older SDKs.
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32) {
+        // SetProcessDpiAwarenessContext is available on Windows 10 Creators Update and later.
+        typedef BOOL(WINAPI *SetProcessDpiAwarenessContext_t)(HANDLE);
+        SetProcessDpiAwarenessContext_t setDpiAwarenessCtx = (SetProcessDpiAwarenessContext_t)
+            GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+        if (setDpiAwarenessCtx) {
+            // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4
+            setDpiAwarenessCtx((HANDLE)-4);
+        } else {
+            // Fallback: try Shcore.dll SetProcessDpiAwareness (Windows 8.1+)
+            HMODULE shcore = LoadLibraryA("Shcore.dll");
+            if (shcore) {
+                typedef HRESULT(WINAPI *SetProcessDpiAwareness_t)(int);
+                SetProcessDpiAwareness_t setProcessDpiAwareness =
+                    (SetProcessDpiAwareness_t)GetProcAddress(shcore, "SetProcessDpiAwareness");
+                if (setProcessDpiAwareness) {
+                    // PROCESS_PER_MONITOR_DPI_AWARE = 2
+                    setProcessDpiAwareness(2);
+                }
+                FreeLibrary(shcore);
+            } else {
+                // Last fallback for very old Windows: SetProcessDPIAware()
+#pragma warning(push)
+#pragma warning(disable: 4996)
+                SetProcessDPIAware();
+#pragma warning(pop)
+            }
+        }
+    }
+#endif
+
     // QApplication must exist before Logger::init() (it uses
     // QCoreApplication::applicationDirPath()).
     QApplication::setHighDpiScaleFactorRoundingPolicy(
