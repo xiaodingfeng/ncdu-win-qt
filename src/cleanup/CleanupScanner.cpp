@@ -1,13 +1,11 @@
 #include "CleanupScanner.h"
 
-#include "MemoryMonitor.h"
 #include "WinApi.h"
 
 #include <QDir>
 #include <QFileInfo>
 #include <QSet>
 #include <algorithm>
-#include <map>
 #include <stack>
 
 // ---------------------------------------------------------------------------
@@ -800,31 +798,48 @@ void CleanupScanner::scanTargetsFromTree(std::vector<CleanupTarget>& targets)
     if (!m_rootNode)
         return;
 
-    // Build a path -> FileNode map by walking the tree iteratively.
-    // (Already iterative; added memory-pressure guard so we stop walking
-    // if RAM gets low — partial target sizing is preferable to a crash.)
-    std::map<QString, std::shared_ptr<FileNode>> nodeMap;
-    std::vector<std::shared_ptr<FileNode>> stack;
-    stack.push_back(m_rootNode);
-    while (!stack.empty()) {
-        if (MemoryMonitor::isLowMemory())
-            break;
-        auto node = stack.back();
-        stack.pop_back();
-        nodeMap[normalizePath(node->path)] = node;
-        for (const auto& child : node->children) {
-            if (child)
-                stack.push_back(child);
+    // Resolve each target by descending from the scan root. Building a
+    // path -> FileNode map instead duplicated every node's full path string
+    // (hundreds of MB on drives with millions of files) to look up a handful
+    // of target paths.
+    QString rootNorm = normalizePath(m_rootNode->path);
+    if (rootNorm.endsWith('/') && rootNorm.size() > 3)
+        rootNorm.chop(1);
+    const QString rootPrefix = rootNorm.endsWith('/') ? rootNorm : rootNorm + '/';
+
+    auto findNode = [this, &rootNorm, &rootPrefix](const QString& normTarget)
+        -> std::shared_ptr<FileNode> {
+        if (normTarget == rootNorm)
+            return m_rootNode;
+        if (!normTarget.startsWith(rootPrefix))
+            return nullptr;
+
+        const QStringList parts =
+            normTarget.mid(rootPrefix.size()).split('/', Qt::SkipEmptyParts);
+        std::shared_ptr<FileNode> cur = m_rootNode;
+        for (const QString& part : parts) {
+            if (!cur->isDir())
+                return nullptr;
+            std::shared_ptr<FileNode> next;
+            for (const auto& child : cur->children) {
+                if (child && child->name.compare(part, Qt::CaseInsensitive) == 0) {
+                    next = child;
+                    break;
+                }
+            }
+            if (!next)
+                return nullptr;
+            cur = next;
         }
-    }
+        return cur;
+    };
 
     for (auto& target : targets) {
         if (target.size > 0 && target.fileCount > 0)
             continue;
-        auto it = nodeMap.find(normalizePath(target.path));
-        if (it == nodeMap.end())
+        auto node = findNode(normalizePath(target.path));
+        if (!node)
             continue;
-        auto node = it->second;
         target.size = node->size;
         target.fileCount = node->isDir() ? node->fileCount : 1;
     }

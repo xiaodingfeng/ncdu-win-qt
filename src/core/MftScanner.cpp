@@ -781,15 +781,61 @@ std::shared_ptr<FileNode> MftScanner::buildTree(std::vector<MftEntry>& entries, 
     }
 
     QString driveLetter = getDriveLetter(scanPath);
+    const QString drivePrefix = driveLetter + "/";
+
+    // Build paths top-down in one pass. Each node previously walked up to the
+    // drive root and binary-searched every ancestor before joining the string
+    // again — O(N × depth × log N) on drives with millions of files.
+    // A node is a path root when its parent record is missing, when its parent
+    // is the drive root (record 5, not part of any subtree we walk down), or
+    // when it IS the drive root.
+    const auto joinPath = [](const QString& parent, const QString& name) {
+        return parent.endsWith('/') ? parent + name : parent + '/' + name;
+    };
+
+    std::vector<std::shared_ptr<FileNode>> pathStack;
+    std::shared_ptr<FileNode> driveRootNode;
+    if (auto rootIt = nodeMap.find(5); rootIt != nodeMap.end())
+        driveRootNode = rootIt->second;
 
     for (auto& pair : nodeMap) {
-        uint64_t fileRef = pair.first;
-        auto node = pair.second;
+        auto& node = pair.second;
+        const auto parentPtr = node->parent.lock();
+        const bool isDriveRoot = (pair.first == 5);
+        const bool seedAsRoot = isDriveRoot || !parentPtr ||
+                                parentPtr.get() == driveRootNode.get();
 
-        uint64_t currentRef = fileRef;
+        if (!seedAsRoot)
+            continue;
+
+        // Matches the old upward walk: missing-parent subtrees hang directly
+        // off the drive letter, and the drive-root record itself is "C:/".
+        node->path = isDriveRoot ? normalizePath(drivePrefix)
+                                 : normalizePath(drivePrefix + node->name);
+        pathStack.push_back(node);
+    }
+    while (!pathStack.empty()) {
+        auto node = pathStack.back();
+        pathStack.pop_back();
+        for (auto& child : node->children) {
+            if (!child || !child->path.isEmpty())
+                continue;  // already assigned (also guards reference cycles)
+            child->path = joinPath(node->path, child->name);
+            pathStack.push_back(child);
+        }
+    }
+
+    // Fallback for entries whose parent chain never reaches a seeded root
+    // (reference cycle): walk upwards like before, bounded by a depth guard.
+    for (auto& pair : nodeMap) {
+        auto& node = pair.second;
+        if (!node->path.isEmpty())
+            continue;
+
+        uint64_t currentRef = pair.first;
         std::vector<QString> parts;
 
-        while (currentRef != 5) {
+        for (int guard = 0; currentRef != 5 && guard < 512; ++guard) {
             const MftEntry* entryPtr = findEntry(currentRef);
             if (!entryPtr)
                 break;
@@ -804,7 +850,7 @@ std::shared_ptr<FileNode> MftScanner::buildTree(std::vector<MftEntry>& entries, 
 
         std::reverse(parts.begin(), parts.end());
 
-        QString fullPath = driveLetter + "/";
+        QString fullPath = drivePrefix;
         for (const QString& part : parts) {
             fullPath += part + '/';
         }

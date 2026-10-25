@@ -6,10 +6,46 @@
 #include <QFile>
 #include <QCryptographicHash>
 #include <QFileInfo>
+#include <QFutureSynchronizer>
+#include <QThread>
+#include <QThreadPool>
+#include <QtConcurrent>
 
+#include <algorithm>
+#include <functional>
 #include <unordered_map>
 #include <vector>
-#include <algorithm>
+
+namespace {
+
+// Files hashed per parallel batch. Small chunks keep progress reporting
+// responsive and let a cancelled scan stop within a few files.
+constexpr int PARTIAL_HASH_CHUNK = 256;
+constexpr int FULL_HASH_CHUNK = 32;
+
+// Hash `files` concurrently on `pool`, writing each result into its own slot of
+// `out` (distinct elements, so no locking is needed).
+void hashInParallel(QThreadPool& pool,
+                    const std::vector<std::shared_ptr<FileNode>>& files,
+                    const std::function<QByteArray(const QString&)>& hashFn,
+                    const std::atomic<bool>& cancel,
+                    std::vector<QByteArray>& out)
+{
+    out.assign(files.size(), QByteArray());
+
+    QFutureSynchronizer<void> sync;
+    for (size_t i = 0; i < files.size(); ++i) {
+        if (cancel.load())
+            break;
+        sync.addFuture(QtConcurrent::run(&pool, [&files, &out, &hashFn, &cancel, i]() {
+            if (!cancel.load())
+                out[i] = hashFn(files[i]->path);
+        }));
+    }
+    sync.waitForFinished();
+}
+
+}  // namespace
 
 // --------------------------------------------------------------------------- //
 // Construction / cancellation
@@ -95,7 +131,10 @@ QByteArray DuplicateScanner::hashPartial(const QString& path)
     QByteArray head = f.read(PARTIAL_HASH_BYTES);
     if (head.isEmpty())
         return QByteArray();
-    QCryptographicHash h(QCryptographicHash::Sha256);
+    // MD5 is only a pre-filter: a collision costs an extra full-file SHA-256
+    // read in stage 3, it can never produce a false duplicate. MD5 is several
+    // times faster than SHA-256 here, and this path runs on far more files.
+    QCryptographicHash h(QCryptographicHash::Md5);
     h.addData(head);
     return h.result();
 }
@@ -145,6 +184,14 @@ void DuplicateScanner::run()
     // ── Stage 2: partial-hash grouping ───────────────────────────────────
     emit progress(2, 0, stage2Total);
 
+    // A dedicated pool keeps this scan independent of other QtConcurrent work
+    // (searches, cleanup enumeration). Capped because each worker holds an open
+    // file handle, and full-hash workers also hold a 4 MB buffer.
+    QThreadPool hashPool;
+    hashPool.setMaxThreadCount(std::max(2, std::min(8, QThread::idealThreadCount())));
+    const auto hashPartialFn = [this](const QString& p) { return hashPartial(p); };
+    const auto hashFullFn = [this](const QString& p) { return hashFull(p); };
+
     // survivors[i] = files in sizeGroups[i] that share the same partial hash.
     std::vector<std::vector<std::shared_ptr<FileNode>>> partialGroups;
     int stage2Done = 0;
@@ -154,18 +201,24 @@ void DuplicateScanner::run()
             return;
 
         std::unordered_map<QByteArray, std::vector<std::shared_ptr<FileNode>>> buckets;
-        for (auto& node : group) {
+        for (size_t off = 0; off < group.size(); off += PARTIAL_HASH_CHUNK) {
             if (m_cancel.load())
                 return;
-            QByteArray ph = hashPartial(node->path);
-            if (!ph.isEmpty())
-                buckets[ph].push_back(node);
-            ++stage2Done;
-            if ((stage2Done & 0x3F) == 0) {  // every 64 files
-                emit progress(2, stage2Done, stage2Total);
-                if (MemoryMonitor::isLowMemory())
-                    return;
+
+            const size_t end = std::min(group.size(), off + PARTIAL_HASH_CHUNK);
+            std::vector<std::shared_ptr<FileNode>> chunk(group.begin() + off,
+                                                        group.begin() + end);
+            std::vector<QByteArray> hashes;
+            hashInParallel(hashPool, chunk, hashPartialFn, m_cancel, hashes);
+
+            for (size_t i = 0; i < chunk.size(); ++i) {
+                if (!hashes[i].isEmpty())
+                    buckets[hashes[i]].push_back(chunk[i]);
             }
+            stage2Done += static_cast<int>(chunk.size());
+            emit progress(2, stage2Done, stage2Total);
+            if (MemoryMonitor::isLowMemory())
+                return;
         }
         for (auto& [hash, vec] : buckets) {
             if (vec.size() >= 2)
@@ -190,18 +243,24 @@ void DuplicateScanner::run()
             return;
 
         std::unordered_map<QByteArray, std::vector<std::shared_ptr<FileNode>>> buckets;
-        for (auto& node : group) {
+        for (size_t off = 0; off < group.size(); off += FULL_HASH_CHUNK) {
             if (m_cancel.load())
                 return;
-            QByteArray fh = hashFull(node->path);
-            if (!fh.isEmpty())
-                buckets[fh].push_back(node);
-            ++stage3Done;
-            if ((stage3Done & 0x0F) == 0) {  // every 16 files (full reads are heavy)
-                emit progress(3, stage3Done, stage3Total);
-                if (MemoryMonitor::isLowMemory())
-                    return;
+
+            const size_t end = std::min(group.size(), off + FULL_HASH_CHUNK);
+            std::vector<std::shared_ptr<FileNode>> chunk(group.begin() + off,
+                                                        group.begin() + end);
+            std::vector<QByteArray> hashes;
+            hashInParallel(hashPool, chunk, hashFullFn, m_cancel, hashes);
+
+            for (size_t i = 0; i < chunk.size(); ++i) {
+                if (!hashes[i].isEmpty())
+                    buckets[hashes[i]].push_back(chunk[i]);
             }
+            stage3Done += static_cast<int>(chunk.size());
+            emit progress(3, stage3Done, stage3Total);
+            if (MemoryMonitor::isLowMemory())
+                return;
         }
 
         for (auto& [hash, vec] : buckets) {

@@ -118,6 +118,7 @@
   "update.installing": "正在安装，请稍候…",
   "update.download_failed": "下载失败：{error}",
   "update.launch_failed": "无法启动安装程序，请稍后重试或手动下载。",
+  "list.truncated": "仅显示前 {shown} 项（共 {total} 项），可进入子目录查看其余内容。",
   "ctx.open_folder": "打开文件夹",
   "ctx.open_file": "打开文件",
   "ctx.reveal": "在资源管理器中显示",

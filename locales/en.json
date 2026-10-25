@@ -118,6 +118,7 @@
   "update.installing": "Installing, please wait…",
   "update.download_failed": "Download failed: {error}",
   "update.launch_failed": "Could not start the installer. Please retry or download manually.",
+  "list.truncated": "Showing the first {shown} of {total} items. Open a subfolder to see the rest.",
   "ctx.open_folder": "Open folder",
   "ctx.open_file": "Open file",
   "ctx.reveal": "Reveal in Explorer",

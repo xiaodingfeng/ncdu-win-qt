@@ -770,6 +770,11 @@ const QStringList LARGE_MFT_FOLDER_NAMES = {
     "program files (x86)",     // C:\Program Files (x86)
     "programdata",             // C:\ProgramData
 };
+
+// Maximum rows rendered for one directory listing. Directories with 100k+
+// entries would otherwise create as many QTreeWidgetItems in a single pass and
+// freeze the UI; deeper levels and search still reach every file.
+constexpr int MAX_LIST_ROWS = 2000;
 }
 
 bool shouldUseMftScanner(const QString& path)
@@ -1225,6 +1230,16 @@ void MainWindow::populateList(std::shared_ptr<FileNode> node)
     // Sort using the current column + order.
     children = sortChildren(children);
 
+    // Render at most MAX_LIST_ROWS rows; see the constant above.
+    const int totalChildren = static_cast<int>(children.size());
+    const bool truncated = totalChildren > MAX_LIST_ROWS;
+    if (truncated)
+        children.resize(MAX_LIST_ROWS);
+
+    // Batch the inserts — each addTopLevelItem() otherwise triggers its own
+    // layout pass.
+    m_tree->setUpdatesEnabled(false);
+
     // ".." parent entry for ncdu feel.
     auto parent = node->parent.lock();
     if (parent) {
@@ -1283,6 +1298,22 @@ void MainWindow::populateList(std::shared_ptr<FileNode> node)
 
         m_tree->addTopLevelItem(item);
     }
+
+    if (truncated) {
+        auto* moreItem = new QTreeWidgetItem(QStringList{
+            I18n::tr("list.truncated",
+                     QMap<QString, QString>{{"shown", withCommas(MAX_LIST_ROWS)},
+                                            {"total", withCommas(totalChildren)}})});
+        moreItem->setFlags(Qt::ItemIsEnabled);
+        moreItem->setFirstColumnSpanned(true);
+        moreItem->setForeground(0, QColor(QString::fromLatin1(C::TEXT_MUTED())));
+        QFont f = moreItem->font(0);
+        f.setItalic(true);
+        moreItem->setFont(0, f);
+        m_tree->addTopLevelItem(moreItem);
+    }
+
+    m_tree->setUpdatesEnabled(true);
 
     m_tree->header()->setSectionsClickable(true);
     reflectSortIndicator();
