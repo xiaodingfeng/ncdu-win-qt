@@ -27,6 +27,9 @@ dependencies bundled, and supports English / 简体中文 out of the box.
   first-4KB hash → full hash) identifies duplicate files with minimal
   I/O and memory. Safely skips system binaries and user data; the first
   file in each group is kept by default.
+- **Performance** — MFT path building is now linear-time, so deep directory
+  trees no longer slow scans down; duplicate hashing runs in parallel across
+  threads; huge folder lists render at most 2,000 rows for smoother scrolling.
 - **AI analysis** — hand a file, folder or pending cleanup item to the AI to
   explain what it is, whether it is safe to remove and what the risk is, then
   keep asking follow-up questions. Works with any OpenAI-style endpoint; the
@@ -52,6 +55,10 @@ dependencies bundled, and supports English / 简体中文 out of the box.
   - Common junk: temp files, browser caches, pip/npm caches
   - Large files (>50MB) with safety-level classification
   - Duplicate files with grouped selection
+- **Default scan settings** — the Categories, Large files and Duplicates tabs
+  each carry a "Default scan" checkbox: when ticked, the top Scan button
+  includes that tab automatically, otherwise it is skipped. Choices are saved,
+  and skipped tabs can still be scanned on demand via "Rescan".
 - **Safety-first deletion** — five-level safety system (S/A/B/C/D) ensures
   you won't accidentally delete important files. System state and user
   data are never auto-selected.
@@ -107,6 +114,9 @@ dependencies bundled, and supports English / 简体中文 out of the box.
   formatted as ms / s / min-s / h-min.
 - **Auto-scan on startup** — instantly shows your home directory usage
   on first launch.
+- **Feedback entry** — the Help menu now includes "Feedback…", where you can
+  enter a title, details, contact and severity; version and system details are
+  attached automatically on submit.
 - **English and Chinese** — built-in localization with persistent language
   preference.
 - **Clean, modern UI** — soft colors, rounded corners, and clear visual
@@ -137,7 +147,7 @@ dependencies bundled, and supports English / 简体中文 out of the box.
 ### Option A — Download the release
 
 1. Go to the [Releases](../../releases) page.
-2. Download `NcduWin_Setup.exe`.
+2. Download `NcduWin_1.1.0_Setup.exe`.
 3. Run the installer and follow the prompts. No runtime required.
 
 ### Option B — Build from source
@@ -197,9 +207,14 @@ ncdu-win-qt/
 │   │   ├── AppPathSyncDialog.h/cpp  # Known-folder relocation dialog
 │   │   ├── BreadcrumbBar.h/cpp
 │   │   ├── DialogI18n.h        # Shared confirm / info dialogs
+│   │   ├── FeedbackDialog.h/cpp    # Feedback form
+│   │   ├── FilterHeaderView.h/cpp  # Multi-select header filter
 │   │   ├── InstalledApps.h     # Installed-application discovery
 │   │   ├── LegendBar.h/cpp
+│   │   ├── LockerDialog.h/cpp      # Locking-process handling dialog
 │   │   ├── MainWindow.h/cpp
+│   │   ├── MoveSelect.h            # Move target selection
+│   │   ├── OpGuard.h/cpp           # Pre-operation checks
 │   │   ├── SizeBarDelegate.h/cpp
 │   │   ├── Style.h
 │   │   ├── SystemOptPanel.h/cpp    # System optimization panel
@@ -247,7 +262,7 @@ ncdu-win-qt/
 ├── CMakeSettings.json
 ├── LICENSE
 ├── README.md
-└── README_ZH.md
+└── README_EN.md
 ```
 
 ---
