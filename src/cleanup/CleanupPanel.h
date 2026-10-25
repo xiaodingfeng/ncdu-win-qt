@@ -7,6 +7,7 @@
 #include <QProgressBar>
 #include <QLabel>
 #include <QComboBox>
+#include <QCheckBox>
 #include <QTabWidget>
 #include <vector>
 #include <memory>
@@ -59,6 +60,13 @@ public:
     void retranslate();
     void refreshTheme();
 
+    // "Default scan" states, mirrored by the checkboxes in each tab's header
+    // row. Persisted in the registry; unchecked sections are skipped when the
+    // main Scan button triggers the cleanup scan.
+    bool scanCategoriesEnabled() const;
+    bool scanLargeFilesEnabled() const;
+    bool scanDuplicatesEnabled() const;
+
 signals:
     void cleanRequested(const std::vector<std::tuple<QString, QString, QString>>& items);
     void rescanRequested();
@@ -95,6 +103,9 @@ private:
     QPushButton* m_lfSelBtn = nullptr;
     QPushButton* m_dupSelBtn = nullptr;
     QPushButton* m_dupSmartBtn = nullptr;
+    QCheckBox* m_catScanChk = nullptr;  // "default scan" per tab
+    QCheckBox* m_lfScanChk = nullptr;
+    QCheckBox* m_dupScanChk = nullptr;
     QComboBox* m_lfTypeFilter = nullptr;
     QComboBox* m_dupTypeFilter = nullptr;
     QLabel* m_lfTypeLabel = nullptr;

@@ -21,6 +21,8 @@ class CleanupScanner : public QThread {
 public:
     CleanupScanner(const QString& scanPath,
                    std::shared_ptr<FileNode> rootNode,
+                   bool scanCategories = true,
+                   bool scanLargeFiles = true,
                    QObject* parent = nullptr);
     void cancel();
 
@@ -48,6 +50,11 @@ private:
     QString m_scanPath;
     std::shared_ptr<FileNode> m_rootNode;
     std::atomic<bool> m_cancel{false};
+    // Which phases to run. Both can be off when the user unchecked the
+    // corresponding "default scan" boxes; the duplicate scan is decided by
+    // the caller (MainWindow) since it is a separate thread.
+    bool m_scanCategories = true;
+    bool m_scanLargeFiles = true;
 
     // Phase 1: discover all cleanable targets under the scan path.
     void discoverTargets(std::vector<CleanupTarget>& out);

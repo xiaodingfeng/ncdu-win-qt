@@ -17,6 +17,7 @@
 #include <QTreeWidget>
 #include <QMenu>
 #include <QPoint>
+#include <QSettings>
 
 #include <algorithm>
 #include <stack>
@@ -29,6 +30,29 @@
 // File-local helpers
 // --------------------------------------------------------------------------- //
 namespace {
+
+// "Default scan" checkbox state. Stored as 0/1 numbers (not bools) in the same
+// registry location the rest of the app's settings use, following the pattern
+// in SystemOptPanel. A missing key means "first run" and defaults to checked.
+constexpr const char* kRegRoot = "HKEY_CURRENT_USER\\Software\\NcduWin";
+constexpr const char* kScanCatKey = "cleanupScanCategories";
+constexpr const char* kScanLfKey = "cleanupScanLargeFiles";
+constexpr const char* kScanDupKey = "cleanupScanDuplicates";
+
+bool loadScanFlag(const char* key)
+{
+    QSettings reg(QString::fromLatin1(kRegRoot), QSettings::NativeFormat);
+    return reg.contains(QLatin1String(key))
+               ? reg.value(QLatin1String(key)).toInt() != 0
+               : true;
+}
+
+void saveScanFlag(const char* key, bool on)
+{
+    QSettings reg(QString::fromLatin1(kRegRoot), QSettings::NativeFormat);
+    reg.setValue(QLatin1String(key), on ? 1 : 0);
+    reg.sync();
+}
 
 // Danger level colors.
 //   S: green   - safe auto-clean
@@ -207,6 +231,21 @@ void CleanupPanel::buildUI()
     lay->setContentsMargins(4, 4, 4, 4);
     lay->setSpacing(6);
 
+    // Build a "default scan" checkbox wired to its registry key: the initial
+    // state is restored on startup and every user toggle is persisted.
+    auto makeScanChk = [this](QWidget* parent, const char* key) {
+        auto* chk = new QCheckBox(I18n::tr("cleanup.default_scan"), parent);
+        chk->setToolTip(I18n::tr("cleanup.default_scan_hint"));
+        chk->setChecked(loadScanFlag(key));
+        chk->setCursor(Qt::PointingHandCursor);
+        // Compact variant of the global QCheckBox style: the default 7px/14px
+        // padding makes it wider and taller than the buttons sharing its row.
+        chk->setStyleSheet(QStringLiteral(
+            "QCheckBox { padding: 3px 10px; border-radius: 6px; }"));
+        connect(chk, &QCheckBox::toggled, this, [key](bool on) { saveScanFlag(key, on); });
+        return chk;
+    };
+
     // ── Progress bar (hidden by default) ─────────────────────────
     m_scanProgress = new QProgressBar;
     m_scanProgress->setRange(0, 0);
@@ -259,10 +298,11 @@ void CleanupPanel::buildUI()
         m_catTree->header()->setStretchLastSection(false);
 
         auto* catBar = new QFrame;
-        catBar->setFixedHeight(28);
         auto* catHdr = new QHBoxLayout(catBar);
         catHdr->setContentsMargins(0, 1, 0, 1);
         catHdr->setSpacing(8);
+        m_catScanChk = makeScanChk(catBar, kScanCatKey);
+        catHdr->addWidget(m_catScanChk);
         catHdr->addStretch(1);
         catHdr->addWidget(m_catSelBtn);
         catLay->addWidget(catBar);
@@ -308,10 +348,11 @@ void CleanupPanel::buildUI()
 
         m_lfTypeLabel = new QLabel(I18n::tr("cleanup.filter_type"));
         auto* lfBar = new QFrame;
-        lfBar->setFixedHeight(28);
         auto* lfHdr = new QHBoxLayout(lfBar);
         lfHdr->setContentsMargins(0, 1, 0, 1);
         lfHdr->setSpacing(8);
+        m_lfScanChk = makeScanChk(lfBar, kScanLfKey);
+        lfHdr->addWidget(m_lfScanChk);
         lfHdr->addStretch(1);
         lfHdr->addWidget(m_lfTypeLabel);
         lfHdr->addWidget(m_lfTypeFilter);
@@ -376,10 +417,11 @@ void CleanupPanel::buildUI()
 
         m_dupTypeLabel = new QLabel(I18n::tr("cleanup.filter_type"));
         auto* dupBar = new QFrame;
-        dupBar->setFixedHeight(28);
         auto* dupHdr = new QHBoxLayout(dupBar);
         dupHdr->setContentsMargins(0, 1, 0, 1);
         dupHdr->setSpacing(8);
+        m_dupScanChk = makeScanChk(dupBar, kScanDupKey);
+        dupHdr->addWidget(m_dupScanChk);
         dupHdr->addStretch(1);
         dupHdr->addWidget(m_dupTypeLabel);
         dupHdr->addWidget(m_dupTypeFilter);
@@ -2137,6 +2179,14 @@ void CleanupPanel::retranslate()
     m_rescanBtn->setText(I18n::tr("cleanup.rescan"));
     m_aiBtn->setText(I18n::tr("cleanup.ai_analyze_selected"));
 
+    // "Default scan" checkboxes keep their checked state; only the labels change.
+    for (auto* chk : {m_catScanChk, m_lfScanChk, m_dupScanChk}) {
+        if (!chk)
+            continue;
+        chk->setText(I18n::tr("cleanup.default_scan"));
+        chk->setToolTip(I18n::tr("cleanup.default_scan_hint"));
+    }
+
     // Re-translate select-all buttons (preserve checked state).
     m_catSelBtn->setText(m_catSelBtn->isChecked()
                              ? I18n::tr("cleanup.deselect_all")
@@ -2216,4 +2266,21 @@ void CleanupPanel::retranslate()
     updateSummary(m_freeBytes, m_totalBytes);
     updateSelectedLabel();
     retranslateDupStatus();
+}
+
+// "Default scan" accessors. A missing checkbox (UI not built yet) reports true
+// so a scan is never silently skipped.
+bool CleanupPanel::scanCategoriesEnabled() const
+{
+    return m_catScanChk ? m_catScanChk->isChecked() : true;
+}
+
+bool CleanupPanel::scanLargeFilesEnabled() const
+{
+    return m_lfScanChk ? m_lfScanChk->isChecked() : true;
+}
+
+bool CleanupPanel::scanDuplicatesEnabled() const
+{
+    return m_dupScanChk ? m_dupScanChk->isChecked() : true;
 }

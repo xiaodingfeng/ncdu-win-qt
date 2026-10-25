@@ -2,4 +2,5 @@
 #define APP_NAME     "@APP_NAME@"
 #define APP_VERSION  "@APP_VERSION@"
 #define HOMEPAGE     "@APP_HOMEPAGE@"
+#define FEEDBACK_URL "@APP_FEEDBACK_URL@"
 #define SOURCE_URL   "@APP_SOURCE_URL@"

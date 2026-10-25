@@ -139,6 +139,9 @@ private:
     QString m_diskFreeText;
     QString m_lastScanPath;
     bool m_scanLowMemory = false;   // set when a scanner emits a low-memory warning
+    // Whether the duplicate scan should run once the cleanup scan finishes.
+    // Set by startCleanupScan() from the Duplicates tab's "default scan" state.
+    bool m_dupScanAfterCleanup = false;
     // Wall-clock time the last scan actually took, measured from the moment the
     // scanner thread was started to the moment its tree arrived. Shown next to
     // the scan summary in the status bar; -1 while no scan has completed.
@@ -253,6 +256,7 @@ private:
     void showThemeCustomize();
     void checkForUpdate(bool silent = false);
     void openHomepage();
+    void showFeedback();
     void showSkippedMsg();
 
     // Auto-update toast.
@@ -307,7 +311,7 @@ private:
                       CleanupWorker::DeleteMode mode);
 
     // Cleanup
-    void startCleanupScan(const QString& scanPath);
+    void startCleanupScan(const QString& scanPath, bool forceAll = false);
 
     // AI helpers
     QString buildDirPrompt(const std::shared_ptr<FileNode>& node) const;

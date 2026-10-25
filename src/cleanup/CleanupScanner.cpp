@@ -95,10 +95,14 @@ bool CleanupScanner::isExcludedByExtension(const QString& fileName)
 
 CleanupScanner::CleanupScanner(const QString& scanPath,
                                std::shared_ptr<FileNode> rootNode,
+                               bool scanCategories,
+                               bool scanLargeFiles,
                                QObject* parent)
     : QThread(parent)
     , m_scanPath(QFileInfo(scanPath).absoluteFilePath())
     , m_rootNode(std::move(rootNode))
+    , m_scanCategories(scanCategories)
+    , m_scanLargeFiles(scanLargeFiles)
 {
 }
 
@@ -881,51 +885,57 @@ void CleanupScanner::scanLargeFiles(std::vector<LargeFile>& out)
 
 void CleanupScanner::run()
 {
-    // Phase 1: discover targets
+    // Phase 1 + 2: cleanup targets (skipped when the user unchecked the
+    // Categories tab's "default scan" box).
     std::vector<CleanupTarget> targets;
-    discoverTargets(targets);
-    if (m_cancel.load())
-        return;
-
-    // Phase 2: populate sizes from the tree
-    if (m_rootNode) {
-        scanTargetsFromTree(targets);
-    }
-
     qint64 totalSize = 0;
     int totalCount = 0;
-    for (auto& t : targets) {
+    if (m_scanCategories) {
+        // Phase 1: discover targets
+        discoverTargets(targets);
         if (m_cancel.load())
             return;
-        // Compute size from the filesystem for targets not populated from the
-        // FileNode tree (e.g. recycle bin at drive root, browser caches outside
-        // the scan root, or when no tree is available at all).
-        if (t.size == 0 && t.fileCount == 0 && pathExistsAndAccessible(t.path)) {
-            if (t.isDir) {
-                t.size = computePathSize(t.path);
-                t.fileCount = countFiles(t.path);
-            } else {
-                t.size = QFileInfo(t.path).size();
-                t.fileCount = 1;
-            }
+
+        // Phase 2: populate sizes from the tree
+        if (m_rootNode) {
+            scanTargetsFromTree(targets);
         }
-        totalSize += t.size;
-        totalCount += t.fileCount;
-        emit targetScanned(t);
+
+        for (auto& t : targets) {
+            if (m_cancel.load())
+                return;
+            // Compute size from the filesystem for targets not populated from the
+            // FileNode tree (e.g. recycle bin at drive root, browser caches outside
+            // the scan root, or when no tree is available at all).
+            if (t.size == 0 && t.fileCount == 0 && pathExistsAndAccessible(t.path)) {
+                if (t.isDir) {
+                    t.size = computePathSize(t.path);
+                    t.fileCount = countFiles(t.path);
+                } else {
+                    t.size = QFileInfo(t.path).size();
+                    t.fileCount = 1;
+                }
+            }
+            totalSize += t.size;
+            totalCount += t.fileCount;
+            emit targetScanned(t);
+        }
     }
 
-    // Phase 3: find large files
+    // Phase 3: large files (skipped when the Large Files tab's box is off).
     std::vector<LargeFile> largeFiles;
-    scanLargeFiles(largeFiles);
-    if (m_cancel.load())
-        return;
-
     qint64 largeTotal = 0;
-    for (const auto& lf : largeFiles) {
+    if (m_scanLargeFiles) {
+        scanLargeFiles(largeFiles);
         if (m_cancel.load())
             return;
-        largeTotal += lf.size;
-        emit largeFileFound(lf);
+
+        for (const auto& lf : largeFiles) {
+            if (m_cancel.load())
+                return;
+            largeTotal += lf.size;
+            emit largeFileFound(lf);
+        }
     }
 
     emit finished(targets, largeFiles, totalSize, totalCount, largeTotal);

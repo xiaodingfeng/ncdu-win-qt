@@ -102,6 +102,7 @@
 #include "AiService.h"
 #include "AiSettingsDialog.h"
 #include "AiAnalysisDialog.h"
+#include "FeedbackDialog.h"
 
 Q_DECLARE_METATYPE(std::shared_ptr<FileNode>)
 Q_DECLARE_METATYPE(CleanupTarget)
@@ -615,6 +616,9 @@ void MainWindow::buildMenu()
 
     m_actions["help.homepage"] = helpMenu->addAction(I18n::tr("menu.help.documentation"));
     connect(m_actions["help.homepage"], &QAction::triggered, this, QOverload<>::of(&MainWindow::openHomepage));
+
+    m_actions["help.feedback"] = helpMenu->addAction(I18n::tr("menu.help.feedback"));
+    connect(m_actions["help.feedback"], &QAction::triggered, this, &MainWindow::showFeedback);
 
     helpMenu->addSeparator();
 
@@ -2848,6 +2852,12 @@ void MainWindow::openHomepage()
     QDesktopServices::openUrl(QUrl(HOMEPAGE));
 }
 
+void MainWindow::showFeedback()
+{
+    FeedbackDialog dlg(this);
+    dlg.exec();
+}
+
 void MainWindow::checkForUpdate(bool silent)
 {
     if (!silent)
@@ -3222,7 +3232,7 @@ void MainWindow::onUpdateDownloadFinished()
 // --------------------------------------------------------------------------- //
 // Cleanup (S/A/B/C/D system + large files)
 // --------------------------------------------------------------------------- //
-void MainWindow::startCleanupScan(const QString& scanPath)
+void MainWindow::startCleanupScan(const QString& scanPath, bool forceAll)
 {
     if (m_cleanupScanner) {
         m_cleanupScanner->cancel();
@@ -3245,7 +3255,20 @@ void MainWindow::startCleanupScan(const QString& scanPath)
     m_largeFiles.clear();
     m_duplicateGroups.clear();
 
-    m_cleanupScanner = new CleanupScanner(scanPath, m_root, this);
+    // Which sections to scan: the "default scan" boxes in each cleanup tab,
+    // unless the caller (Rescan) asked for everything regardless.
+    const bool doCat = forceAll || m_cleanupPanel->scanCategoriesEnabled();
+    const bool doLf = forceAll || m_cleanupPanel->scanLargeFilesEnabled();
+    m_dupScanAfterCleanup = forceAll || m_cleanupPanel->scanDuplicatesEnabled();
+
+    // Nothing for the cleanup thread to do: finish immediately so the panel is
+    // cleared and the duplicate scan (if enabled) still starts.
+    if (!doCat && !doLf) {
+        onCleanupScanDone({}, {}, 0, 0, 0);
+        return;
+    }
+
+    m_cleanupScanner = new CleanupScanner(scanPath, m_root, doCat, doLf, this);
     // Auto-delete the cleanup scanner once its run() returns (same pattern
     // as the main scanner — prevents leak on every rescan).
     connect(m_cleanupScanner, &QThread::finished,
@@ -3277,6 +3300,8 @@ void MainWindow::onCleanupScanDone(std::vector<CleanupTarget> targets,
                                    qint64 /*largeTotal*/)
 {
     m_cleanupScanner = nullptr;
+    const bool runDupScan = m_dupScanAfterCleanup;
+    m_dupScanAfterCleanup = false;
     m_cleanupTargets = std::move(targets);
     m_largeFiles = std::move(largeFiles);
 
@@ -3288,7 +3313,7 @@ void MainWindow::onCleanupScanDone(std::vector<CleanupTarget> targets,
     // Start the duplicate-file scan after the cleanup scan finishes so the
     // two don't compete for disk I/O. The dup scan reuses the same FileNode
     // tree (m_root) built by the main scan.
-    if (m_root && !m_lastScanPath.isEmpty()) {
+    if (runDupScan && m_root && !m_lastScanPath.isEmpty()) {
         m_dupScanner = new DuplicateScanner(m_lastScanPath, m_root, this);
         connect(m_dupScanner, &QThread::finished,
                 m_dupScanner, &QObject::deleteLater);
@@ -3578,7 +3603,7 @@ void MainWindow::onCleanupFinished(int totalDeleted, int totalSkipped, qint64 to
 void MainWindow::onCleanupRescan()
 {
     if (m_root)
-        startCleanupScan(m_root->path);
+        startCleanupScan(m_root->path, /*forceAll=*/true);
 }
 
 // --------------------------------------------------------------------------- //

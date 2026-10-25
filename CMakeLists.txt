@@ -9,6 +9,7 @@ set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT N
 set(APP_NAME        "NcduWin")
 set(APP_VERSION     "1.0.9")
 set(APP_HOMEPAGE    "https://ncduwin.fengzhengx.cn/")
+set(APP_FEEDBACK_URL "https://notify.fengzhengx.cn/api/feedback")
 set(APP_SOURCE_URL  "https://github.com/xiaodingfeng/ncdu-win-qt")
 
 set(CMAKE_CXX_STANDARD 17)
@@ -77,6 +78,7 @@ set(SOURCES
     src/ui/FilterHeaderView.cpp
     src/ui/LockerDialog.cpp
     src/ui/OpGuard.cpp
+    src/ui/FeedbackDialog.cpp
     src/cleanup/CleanupScanner.cpp
     src/cleanup/CleanupWorker.cpp
     src/cleanup/CleanupPanel.cpp
