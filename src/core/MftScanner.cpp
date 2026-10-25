@@ -629,17 +629,13 @@ bool MftScanner::getFileSizes(HANDLE hVolume, const NTFS_VOLUME_DATA_BUFFER& vol
                     if (attr->RecordLength == 0) break;
 
                     if (attr->AttributeType == ATTRIBUTE_TYPE_DATA && attr->NameLength == 0) {
-                        qint64 fileSize = 0;
-                        QString residency;
-                        if (attr->NonResidentFlag == 0) {
-                            fileSize = attr->Resident.ValueLength;
-                            residency = "resident";
-                        } else {
-                            fileSize = attr->NonResident.DataLength;
-                            residency = QString("non-resident (DataLength=%1, AllocatedLength=%2)")
-                                            .arg(attr->NonResident.DataLength)
-                                            .arg(attr->NonResident.AllocatedLength);
-                        }
+                        // Build the (diagnostic only) residency string lazily:
+                        // formatting one per record cost two QString::arg calls
+                        // for every file on the volume.
+                        const bool resident = (attr->NonResidentFlag == 0);
+                        const qint64 fileSize = resident
+                                                    ? static_cast<qint64>(attr->Resident.ValueLength)
+                                                    : static_cast<qint64>(attr->NonResident.DataLength);
                         // Only set if not already known — base record is processed
                         // first (lower record number) and is the authoritative
                         // source. For extension records, this populates files
@@ -654,6 +650,12 @@ bool MftScanner::getFileSizes(HANDLE hVolume, const NTFS_VOLUME_DATA_BUFFER& vol
                             diagNonZero++;
 
                         if (diagSizeSamples < 10 && fileSize > 0) {
+                            const QString residency =
+                                resident
+                                    ? QStringLiteral("resident")
+                                    : QString("non-resident (DataLength=%1, AllocatedLength=%2)")
+                                          .arg(attr->NonResident.DataLength)
+                                          .arg(attr->NonResident.AllocatedLength);
                             logMsg(QString("  sample: fileRef=%1 size=%2 (%3%4)")
                                        .arg(fileRefNum).arg(fileSize).arg(residency)
                                        .arg(isExtensionRecord ? QStringLiteral(" [from extension]") : QString()));
@@ -950,7 +952,14 @@ bool MftScanner::shouldSkip(const QString& name) const
 {
     if (m_skipSet.empty())
         return false;
-    return m_skipSet.count(name.toLower()) > 0;
+    // Case-insensitive match without lowercasing: this runs once per MFT
+    // record, and a temporary QString per record costs hundreds of ms on a
+    // full drive.
+    for (const QString& s : m_skipSet) {
+        if (s.compare(name, Qt::CaseInsensitive) == 0)
+            return true;
+    }
+    return false;
 }
 
 bool MftScanner::isReparsePoint(DWORD fileAttributes) const

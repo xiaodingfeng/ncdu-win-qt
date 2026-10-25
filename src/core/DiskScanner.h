@@ -45,9 +45,14 @@ private:
     std::atomic<bool> m_cancel{false};
     std::set<QString> m_skipSet;
     int m_maxWorkers;
+    // Timestamp (ms) of the last "scanning <dir>" progress emit. Shared by all
+    // worker threads so the status bar is updated at most ~10 times/second
+    // instead of once per directory.
+    std::atomic<qint64> m_lastProgressMs{0};
 
     std::shared_ptr<FileNode> scanRoot(const QString& path);
     std::shared_ptr<FileNode> scanDirRecursive(const QString& path);
+    void emitDirProgress(const QString& path);
     std::shared_ptr<FileNode> makeDirNode(const QString& path, bool top);
     std::shared_ptr<FileNode> makeSkippedDirNode(const QString& name, const QString& path);
     bool shouldSkip(const QString& name) const;

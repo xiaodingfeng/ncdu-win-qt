@@ -3,6 +3,7 @@
 #include "MemoryMonitor.h"
 
 #include <QDir>
+#include <QDateTime>
 #include <QFileInfo>
 #include <QThreadPool>
 #include <QtConcurrent>
@@ -135,8 +136,27 @@ bool DiskScanner::shouldSkip(const QString& name) const
 {
     if (m_skipSet.empty())
         return false;
-    // Case-insensitive: Windows filesystem is case-insensitive.
-    return m_skipSet.count(name.toLower()) > 0;
+    // Case-insensitive: Windows filesystem is case-insensitive. Compare in
+    // place instead of lowercasing — this is called for every directory found.
+    for (const QString& s : m_skipSet) {
+        if (s.compare(name, Qt::CaseInsensitive) == 0)
+            return true;
+    }
+    return false;
+}
+
+void DiskScanner::emitDirProgress(const QString& path)
+{
+    // The status bar shows a single line, so emitting once per directory only
+    // queues tens of thousands of cross-thread events (and QMap allocations)
+    // that the UI then throws away. Coalesce to ~10 updates/second.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    qint64 last = m_lastProgressMs.load(std::memory_order_relaxed);
+    if (now - last < 100)
+        return;
+    if (!m_lastProgressMs.compare_exchange_strong(last, now, std::memory_order_relaxed))
+        return;  // another worker emitted in the meantime
+    emit progress("disk.progress.scanning", {{"path", path}});
 }
 
 bool DiskScanner::isReparsePoint(DWORD fileAttributes, const QString& /*path*/) const
@@ -208,13 +228,24 @@ void DiskScanner::computeDirSizeFast(const QString& path, qint64& size, int& fil
 
 std::shared_ptr<FileNode> DiskScanner::makeDirNode(const QString& path, bool top)
 {
-    QString name = QFileInfo(path).fileName();
+    QString name;
     NodeType nt = NodeType::Directory;
 
     // Detect Windows drive root like "C:/" or "C:\".
     if (top && path.length() >= 2 && path.length() <= 3 && path[1] == QLatin1Char(':')) {
         name = path.left(2);  // e.g. "C:"
         nt = NodeType::Drive;
+    } else {
+        // Take the last segment directly. QFileInfo construction per directory
+        // showed up in profiles; this runs for every directory in the tree.
+        QString trimmed = path;
+        while (trimmed.length() > 3
+               && (trimmed.endsWith(QLatin1Char('/')) || trimmed.endsWith(QLatin1Char('\\'))))
+            trimmed.chop(1);
+        const int slash = trimmed.lastIndexOf(QLatin1Char('/'));
+        const int backSlash = trimmed.lastIndexOf(QLatin1Char('\\'));
+        const int sep = std::max(slash, backSlash);
+        name = trimmed.mid(sep + 1);
     }
     if (name.isEmpty())
         name = path;
@@ -274,14 +305,14 @@ std::shared_ptr<FileNode> DiskScanner::scanDirRecursive(const QString& path)
         WorkItem item = std::move(pending.top());
         pending.pop();
 
-        auto node = makeDirNode(item.path, false);
+        // depth 0 is the root itself: reuse the node made above instead of
+        // building a second one and immediately throwing the first away.
+        auto node = (item.depth == 0) ? root : makeDirNode(item.path, false);
         node->parent = item.parent;
         if (item.parent)
             item.parent->children.push_back(node);
-        if (item.depth == 0)
-            root = node;
 
-        emit progress("disk.progress.scanning", {{"path", item.path}});
+        emitDirProgress(item.path);
 
         const QString search = makeSearchPattern(item.path);
         WIN32_FIND_DATAW fd;
@@ -517,7 +548,11 @@ std::shared_ptr<FileNode> DiskScanner::scanRoot(const QString& path)
 
     // 3. Regular directories in parallel via QtConcurrent (thread-pooled).
     if (!dirs.isEmpty() && !m_cancel) {
-        QThreadPool::globalInstance()->setMaxThreadCount(m_maxWorkers);
+        // Dedicated pool instead of the global one: retuning the global pool
+        // would also throttle every other QtConcurrent user in the process
+        // (searches, duplicate-file hashing).
+        QThreadPool pool;
+        pool.setMaxThreadCount(m_maxWorkers);
 
         QList<QString> dirPaths;
         for (const auto& d : dirs)
@@ -525,7 +560,7 @@ std::shared_ptr<FileNode> DiskScanner::scanRoot(const QString& path)
 
         QList<std::shared_ptr<FileNode>> results =
             QtConcurrent::blockingMapped<QList<std::shared_ptr<FileNode>>>(
-                dirPaths,
+                &pool, dirPaths,
                 [this](const QString& p) -> std::shared_ptr<FileNode> {
                     return scanDirRecursive(p);
                 });

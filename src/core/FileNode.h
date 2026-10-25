@@ -100,7 +100,9 @@ inline void FileNode::sortBySizeDesc()
                      const std::shared_ptr<FileNode>& b) {
                       if (a->size != b->size)
                           return a->size > b->size;  // larger first
-                      return a->name.toLower() < b->name.toLower();
+                      // compare() avoids two temporary lowercased QStrings per
+                      // comparison — this runs millions of times on big drives.
+                      return a->name.compare(b->name, Qt::CaseInsensitive) < 0;
                   });
         for (auto& c : n->children) {
             if (c && c->isDir())

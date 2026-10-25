@@ -41,7 +41,6 @@ private:
         uint64_t parentRefNum = 0;
         QString name;
         DWORD attributes = 0;
-        qint64 size = 0;
         bool isDir = false;
         bool isSymlink = false;
         bool isHidden = false;
