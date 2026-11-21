@@ -1,0 +1,19 @@
+{
+  "name": "NcduWin",
+  "homepage": "https://ncduwin.fengzhengx.cn/",
+  "sourceUrl": "https://github.com/xiaodingfeng/ncdu-win-qt",
+  "downloadPage": "https://ncduwin.fengzhengx.cn/",
+  "downloadUrlTemplate": "{homepage}downloads/{name}_{version}_x64-setup.exe",
+  "versionCheckUrl": "{homepage}version",
+  "feedbackUrl": "https://notify.fengzhengx.cn/api/feedback",
+  "feedbackApiKey": "ncduwin",
+  "version": "2.0.0",
+  "versionInfo": "",
+  "copyright": "",
+  "ai": {
+    "baseUrl": "",
+    "model": "auto",
+    "baseUrlEndpoint": "{homepage}aiBaseUrl",
+    "apiKeyEndpoint": "{homepage}aiApiKey"
+  }
+}
