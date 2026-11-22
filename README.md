@@ -1,12 +1,17 @@
 # NcduWin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
-[![Qt6](https://img.shields.io/badge/GUI-Qt6-green.svg)](https://www.qt.io)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org)
+[![Tauri](https://img.shields.io/badge/GUI-Tauri%202-24C8DB.svg)](https://tauri.app)
 [![Platform: Windows](https://img.shields.io/badge/platform-windows-lightgrey.svg)](#支持的平台)
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](#)
 
 **[English](README_EN.md)** | **[中文](README.md)**
+
+> **分支说明**
+>
+> - `master`（默认分支）：**最新版本**，已由 C++/Qt 重构为 **Rust + Tauri 2**，当前版本 2.0.0，推荐下载使用本分支。
+> - [`qt`](../../tree/qt)：旧版本，**C++17 + Qt 6** 实现，版本 1.1.0，仅作历史存档，不再新增功能。
 
 > 一款现代、浅色主题的 Windows 磁盘使用分析器，灵感来自 Linux 的 [`ncdu`](https://dev.yorhel.nl/ncdu)。
 

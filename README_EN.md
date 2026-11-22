@@ -1,12 +1,17 @@
 # NcduWin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
-[![Qt6](https://img.shields.io/badge/GUI-Qt6-green.svg)](https://www.qt.io)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org)
+[![Tauri](https://img.shields.io/badge/GUI-Tauri%202-24C8DB.svg)](https://tauri.app)
 [![Platform: Windows](https://img.shields.io/badge/platform-windows-lightgrey.svg)](#supported-platforms)
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](#)
 
 **[English](README_EN.md)** | **[中文](README.md)**
+
+> **Branch notice**
+>
+> - `master` (default branch): the **latest release**, rebuilt from C++/Qt into **Rust + Tauri 2**, currently 2.0.0 — this is the branch to download and use.
+> - [`qt`](../../tree/qt): the legacy **C++17 + Qt 6** implementation, version 1.1.0, kept for archival only and no longer developed.
 
 > A modern, light-themed disk usage analyzer for Windows, inspired by Linux [`ncdu`](https://dev.yorhel.nl/ncdu).
 
