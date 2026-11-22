@@ -2,62 +2,55 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org)
-[![Tauri](https://img.shields.io/badge/GUI-Tauri%202-24C8DB.svg)](https://tauri.app)
-[![Platform: Windows](https://img.shields.io/badge/platform-windows-lightgrey.svg)](#支持的平台)
+[![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB.svg)](https://tauri.app)
+[![React](https://img.shields.io/badge/React-19-61DAFB.svg)](https://react.dev)
+[![Platform: Windows](https://img.shields.io/badge/platform-windows-lightgrey.svg)](#运行环境)
 [![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](#)
 
 **[English](README_EN.md)** | **[中文](README.md)**
 
 > **分支说明**
 >
-> - `master`（默认分支）：**最新版本**，已由 C++/Qt 重构为 **Rust + Tauri 2**，当前版本 2.0.0，推荐下载使用本分支。
+> - `master`（默认分支）：**最新版本**，由 C++/Qt 全面重构为 **Rust + Tauri 2**，当前版本 2.0.0，推荐下载使用本分支。
 > - [`qt`](../../tree/qt)：旧版本，**C++17 + Qt 6** 实现，版本 1.1.0，仅作历史存档，不再新增功能。
 
 > 一款现代、浅色主题的 Windows 磁盘使用分析器，灵感来自 Linux 的 [`ncdu`](https://dev.yorhel.nl/ncdu)。
 
-NcduWin 是一个原生桌面应用，它扫描您的磁盘并使用 ncdu 风格的文件列表 **和** 矩形树图来可视化文件夹大小。它使用 **C++17 和 Qt 6** 构建，以安装包形式分发（所有依赖已打包），开箱即支持英语和简体中文。
+NcduWin 是一个原生 Windows 桌面应用：Rust 负责扫描、清理、迁移等系统级操作，Tauri 2 承载界面，前端使用 React 19 + TypeScript + Vite 构建。它以安装包或便携包分发，开箱即支持简体中文与英语。
 
 ---
 
 ## ✨ 功能特性
 
-- **极速扫描** — 直接读取 NTFS 磁盘索引表（MFT）枚举文件，扫描速度比传统目录遍历方式快数倍；多线程处理让大容量硬盘依然保持流畅响应。
-- **重复文件查找** — 采用三级漏斗算法（大小分组 → 前 4KB 哈希 → 全文件哈希），以极低的 I/O 与内存开销精准识别重复文件。自动跳过系统二进制文件与用户数据，每组默认保留首个文件。
-- **性能优化** — MFT 路径构建改为线性时间，目录层级再深也不会拖慢扫描；重复文件哈希改为多线程并行；超大目录列表最多渲染 2000 行，浏览更流畅。
-- **AI 智能分析** — 选中文件、目录或待清理项，交给 AI 说明它的用途、是否可以安全清理以及清理风险，并可连续追问；兼容 OpenAI 风格接口，接口地址、API Key 与模型均可在「AI → AI 设置」中配置。
-- **主题切换** — 支持深色 / 浅色主题切换，并可自定义主题色，打造个性化视觉体验。
-- **跳过重型目录** — 可选择性跳过 `node_modules`、`.git` 等大型文件夹的深度扫描，同时仍显示其大小。
-- **完整系统访问** — 自动请求管理员权限，支持扫描 `C:\Windows` 和其他用户目录等受保护的系统文件夹。
-- **双重视图** — 左侧 ncdu 风格文件列表，右侧交互式树图，直观分析空间占用。
-- **智能排序** — 点击任意列按名称、大小、百分比、文件数量或类型排序。
-- **软件识别** — 自动识别常见软件安装目录（Adobe、JetBrains、Microsoft Office、Steam 等）和开发项目。
-- **面包屑导航** — 快速跳转到任意父目录。
-- **悬停提示** — 鼠标悬停时显示完整文件路径和软件识别信息。
-- **安全删除选项** — 右键发送到回收站（可撤销）或永久删除。
-- **一键磁盘清理** — 专门的清理标签页检测并移除：
-  - 常见垃圾：临时文件、浏览器缓存、pip/npm 缓存
-  - 大文件（>50MB），带安全等级分类
-  - 重复文件，支持分组选择清理
-- **默认扫描配置** — 「清理」页的类别清理、大文件、重复文件各自带有「默认扫描」复选框：勾选后点击顶部扫描会自动包含该项，取消勾选则跳过；设置自动保存，未勾选的项可随时用「重新扫描」单独触发。
-- **安全优先删除** — 五级安全系统（S/A/B/C/D）确保不会误删重要文件，系统状态与用户数据永不自动选中。
-- **系统配置优化** — 独立的「系统优化」标签页，一站式修复常见系统与网络问题：
-  - Windows 更新守护：一键开关自动更新，关闭后不再自动下载安装，需要时随时恢复
-  - 网络急救修复：重置 IP / DNS / IPv6 / Winsock / 防火墙并续约 DHCP，全程显示进度
+- **极速扫描** — 直接读取 NTFS 主文件表（MFT）枚举文件，并保留传统目录遍历作为回退通道；多线程并行处理，大容量磁盘也能快速完成，扫描过程可随时取消。
+- **内存保护** — 扫描时监控可用内存，内存不足会提前停止并明确提示结果可能不完整，避免拖垮系统。
+- **跳过重型目录** — 自动跳过 `WinSxS`、`node_modules` 等巨型目录的深度扫描，目录大小仍然展示。
+- **双重视图** — 左侧 ncdu 风格文件列表，右侧交互式矩形树图，配合文件类型图例、面包屑与搜索框，快速定位空间占用。
+- **一键清理** — 「清理」标签页一次性扫描三类内容：
+  - 常见垃圾：临时文件、浏览器缓存、pip/npm 等构建缓存
+  - 大文件：≥50MB 的可疑大文件（归档包 ≥100MB 单独标记）
+  - 重复文件：≥1MB 的文件按「大小分组 → 前 4KB 哈希 → 全文件哈希」三级漏斗查找
+- **五级安全等级** — S/A/B/C/D 分级标注，系统状态与用户个人数据永不被自动勾选。
+- **清理方式可控** — 「默认扫描」勾选决定顶部扫描是否包含该类；未勾选的可随时「重新扫描」；支持全选、取消全选与智能选择。
+- **安全删除** — 删除前必须二次确认，可选「移入回收站」或「永久删除」；仅在权限不足时提示以管理员身份重试。
+- **AI 智能分析** — 选中文件、目录或清理项交给 AI 说明用途与清理风险，也可打开「AI 问答」连续追问；兼容 OpenAI 风格接口，Base URL、模型与密钥在「AI → AI 设置」中配置。
+- **AI 密钥安全存储** — API Key 保存在 Windows 凭据管理器（服务名 `NcduWin`），不以明文落盘。
+- **主题与语言** — 支持跟随系统 / 浅色 / 深色主题，并可自定义配色；中英双语随时切换，窗口标题同步变化。
+- **系统配置优化** — 独立「系统优化」标签页：
+  - Windows 自动更新：一键开关；开启状态下若被其他软件关闭，会自动检测并修复服务、策略、计划任务、BITS、hosts、WSUS 等被改动的位置
+  - 断网急救箱：重置 IP / DNS / IPv6 / Winsock / 防火墙并续约 DHCP，全过程显示进度
   - 刷新 DNS 缓存、重置应用商店缓存
-- **保存位置迁移** — 把占用 C 盘的目录整体搬到其他磁盘，原位置保留目录联接（junction），软件无需重新配置即可照常使用：
+  - 所有命令均在后台静默执行，不弹终端窗口
+- **保存位置迁移** — 把占用 C 盘的目录整体搬到其他磁盘，原位置保留目录联接（junction），软件无需重新配置：
   - 系统文件夹：下载 / 文档 / 桌面 / 图片 / 视频 / 音乐 / 3D 对象 / 联系人 / 收藏夹 / 链接 / 保存的游戏 / 搜索，共 12 个 Windows 库文件夹
-  - 软件数据目录：自动扫描 AppData / LocalAppData / LocalLow 及文档下的用户数据，支持勾选批量迁移
-- **迁移安全机制** — 复制 → 校验 → 建立目录联接 → 删除旧目录的分步流程，任一步失败可一键还原；目标目录会写入"请勿删除、移动或重命名"提示标记，避免误删导致数据不同步。
-- **占用程序处理** — 搬移前先检查目录被哪些程序占用，逐个列出「程序 + PID」并询问是否关闭：可关闭的先礼后兵（请求退出 → 超时强制结束），系统关键程序（资源管理器、登录进程、安全软件等）绝不自动关闭，只提示手动处理。搬移未完成时同样给出这份清单并支持重试续做；选择跳过则保持目录原样、取消勾选，稍后可重新搬移。搬移失败时会明确指出「是哪个程序、为什么关不掉、该手动退出还是重启后立即重试」，不留一句笼统的"被占用"。
-- **搬回前先确认没有程序在用原位置** — 搬回要把原位置清空后重写，若此时程序仍在运行，运行中的软件会写进一个正在被清空的目录，回来的副本也无法校验。所以点「恢复」后先查一遍占用：有关得掉的程序就问一次是否关闭，关掉后重新确认再搬；关不掉（或关掉又自己起来）就不动手，原位置和另一块盘的数据都保持原样，并直接说明是谁在占用、该手动退出还是重启后立即重试。宁可不动，也不留下「半搬回」的残局。
-- **残留自动清理** — 搬回时若目标位置的副本删不掉（里面的文件正被程序占用），不会当作"已完成"收场：再次列出占用者并询问是否关闭后重试；仍删不掉就记在案，该行出现「清理残留」按钮，点一下即可随时重来。此后重新搬移也不会再撞上"存在相同目录名目录"的死胡同，而是直接引导先清理。
-- **状态筛选** — 软件数据目录列表的「状态」列自带筛选入口，可一次勾选多个状态（例如只看「未完成」和「待搬移」），面板不会勾一次就关；被筛掉的目录只是隐藏，勾选状态原样保留。「已勾选 / 合计」只统计看得见的行，搬移也只针对看得见的行，不会把隐藏的目录一起搬走。
-- **扫描耗时统计** — 状态栏显示每次扫描的实际耗时，格式化显示为毫秒 / 秒 / 分秒 / 时分。
-- **启动自动扫描** — 首次启动立即显示用户主目录的空间使用情况。
-- **反馈入口** — 帮助菜单内置「反馈…」，可填写标题、内容、联系方式与级别，提交时自动附带软件版本与系统环境信息。
-- **中英双语** — 内置本地化支持，语言选择自动保存。
-- **清新现代界面** — 柔和配色、圆角设计、清晰的视觉层次。
-- **安装包分发** — 一键安装，自动创建桌面和开始菜单快捷方式，自带卸载程序。
+  - 软件数据目录：扫描 AppData / LocalAppData / LocalLow 及文档下的用户数据，支持批量勾选迁移
+- **迁移安全机制** — 复制 → 校验（大小与文件数）→ 建立目录联接 → 删除旧目录的分步流程，配合迁移日志实现中断续做与一键还原；目标目录写入「请勿删除、移动或重命名」标记。
+- **占用程序处理** — 搬移前检查目录占用并列出「程序 + PID」，可关闭的先请求退出、超时再强制结束；系统关键进程绝不自动关闭；失败时说明是谁占用、该怎么处理。
+- **残留清理与状态筛选** — 搬回时删不掉的副本会记录并出现「清理残留」入口；「状态」列支持多选筛选，已勾选状态与统计只针对可见行。
+- **改回默认位置** — 每个系统文件夹都有「改回默认」按钮，已处于默认位置时自动禁用，可把文件一并搬回。
+- **自动更新提示** — 启动后后台静默检查新版本，有更新时在右下角弹出提示；安装版可下载并安装，便携版仅提示下载地址。
+- **便携版与安装版** — NSIS 安装包默认安装到当前用户，安装时静默移除旧版 Qt 应用；便携版解压即用，不写入卸载信息。
+- **稳定性** — 完整操作日志、全局异常兜底与崩溃错误页，异常情况记录日志而不是直接退出。
 
 ---
 
@@ -65,15 +58,15 @@ NcduWin 是一个原生桌面应用，它扫描您的磁盘并使用 ncdu 风格
 
 | 文件列表 + 树图 | 清理面板 |
 |---|---|
-| ![File list + treemap](docs/screenshots/treeMap.png) | ![Cleanup panel](docs/screenshots/cleanup.png) |
+| ![文件列表 + 树图](docs/screenshots/treeMap.png) | ![清理面板](docs/screenshots/cleanup.png) |
 
 | AI 分析 | 系统优化 |
 |---|---|
-| ![AI analysis](docs/screenshots/ai.png) | ![System optimization](docs/screenshots/system.png) |
+| ![AI 分析](docs/screenshots/ai.png) | ![系统优化](docs/screenshots/system.png) |
 
 | 系统文件夹位置迁移 | 用户数据目录位置迁移 |
 |---|---|
-| ![System folder relocation](docs/screenshots/systemMenu.png) | ![User data folder relocation](docs/screenshots/userMenu.png) |
+| ![系统文件夹迁移](docs/screenshots/systemMenu.png) | ![用户数据目录迁移](docs/screenshots/userMenu.png) |
 
 ---
 
@@ -82,118 +75,82 @@ NcduWin 是一个原生桌面应用，它扫描您的磁盘并使用 ncdu 风格
 ### 选项 A — 下载发布版本
 
 1. 前往 [Releases](../../releases) 页面。
-2. 下载 `NcduWin_1.1.0_Setup.exe`。
-3. 运行安装程序，按提示完成安装。无需任何运行时环境。
+2. 下载安装包 `NcduWin_2.0.0_x64-setup.exe`，或便携包 `NcduWin_2.0.0_x64-portable.zip`。
+3. 安装包按提示完成安装；便携包解压到任意目录后直接运行 `NcduWin.exe`，无需安装。
+
+### 运行环境
+
+- Windows 10（1803 及以上）或 Windows 11，64 位。
+- Microsoft Edge WebView2 运行时（Windows 11 与新版 Windows 10 已自带，缺失时可用安装包的在线引导安装）。
 
 ### 选项 B — 从源码构建
 
 **环境要求：**
-- Windows 10/11
-- [Qt 6.x](https://www.qt.io/download)（msvc2019_64 或 msvc2022_64）
-- [CMake](https://cmake.org/download/) 3.16+
-- Visual Studio 2022（或 Build Tools）含 MSVC
+
+- Windows 10/11 64 位
+- [Node.js](https://nodejs.org/) 20.19+ 或 22.12+（Vite 7 要求）
+- [Rust](https://www.rust-lang.org/tools/install) stable，MSVC 工具链（最低 1.77.2）
+- [Visual Studio 2022](https://visualstudio.microsoft.com/) 或 Build Tools，勾选「使用 C++ 的桌面开发」与 Windows SDK
 
 ```bash
 git clone https://github.com/xiaodingfeng/ncdu-win-qt.git
 cd ncdu-win-qt
-scripts\build.bat
+npm install
+npm run tauri dev      # 开发模式（前端热更新 + Rust 后端）
+npm run tauri build    # 生成安装包与可执行文件
 ```
 
-构建脚本产出 `dist\NcduWin_1.1.0_Setup.exe` 安装包（含所有 Qt 依赖）。
+也可以直接双击根目录的 `package.bat` 一键打包（自动安装依赖、构建前端、编译 Rust、生成安装包与便携包），产物位于：
 
-### 选项 C — 在 Visual Studio 中打开
+- 安装包：`src-tauri/target/release/bundle/nsis/NcduWin_2.0.0_x64-setup.exe`
+- 便携包：`src-tauri/target/release/bundle/portable/NcduWin_2.0.0_x64-portable.zip`
 
-1. 启动 **Visual Studio 2022**。
-2. **文件 → 打开 → 文件夹**，选择项目根目录。
-3. 工具栏 **解决方案配置** 下拉选择 **VS 2022 (Debug)**。
-4. **启动项** 下拉将显示 `NcduWin.exe` — 选中它。
-5. 按 **F5** 编译并运行。
+### 版本与发布配置
 
-> 项目会自动检测 `C:\Qt\6.x\` 下的 Qt 6 安装。
-> Debug 和 Release 构建均会自动部署对应版本的 Qt DLL。
+`src-tauri/app-config.json` 是唯一的发布配置入口，包含版本号、产品名、主页、下载地址模板、更新检查地址与 AI 接口地址。执行 `package.bat` 时会自动把版本号同步到 `src-tauri/tauri.conf.json`、`package.json` 与 `src-tauri/Cargo.toml`，保证全链路版本一致。
 
 ---
 
-## 📁 项目布局
+## 📁 项目结构
 
 ```
 ncdu-win-qt/
-├── src/                    # C++ 源码
-│   ├── main.cpp            # 入口
-│   ├── version.h.in        # 版本模板（由 CMake 处理）
-│   ├── core/               # 核心数据与工具
-│   │   ├── DiskScanner.h/cpp
-│   │   ├── FileNode.h
-│   │   ├── FormatHelpers.h/cpp
-│   │   ├── I18n.h/cpp
-│   │   ├── Identify.h/cpp
-│   │   ├── KnownFolderPath.h   # 系统文件夹路径解析（含 OneDrive 重定向）
-│   │   ├── KnownFolderTable.h  # 12 个系统文件夹唯一定义表
-│   │   ├── Logger.h/cpp
-│   │   ├── MemoryMonitor.h
-│   │   ├── MftScanner.h/cpp    # NTFS MFT 直读（快速通道）
-│   │   ├── MoveDstResolver.h   # 批量迁移的目标路径推导
-│   │   ├── SafeMoveWorker.h/cpp  # 可取消、带校验的安全搬移线程
-│   │   ├── ScanRoots.h         # 用户数据扫描根目录
-│   │   └── WinApi.h/cpp
-│   ├── ui/                 # UI 组件
-│   │   ├── AppDataMovePanel.h/cpp   # 软件数据目录迁移面板
-│   │   ├── AppPathSyncDialog.h/cpp  # 系统文件夹位置迁移对话框
-│   │   ├── BreadcrumbBar.h/cpp
-│   │   ├── DialogI18n.h        # 统一确认 / 提示弹框
-│   │   ├── FeedbackDialog.h/cpp    # 反馈表单
-│   │   ├── FilterHeaderView.h/cpp  # 表头多选筛选
-│   │   ├── InstalledApps.h     # 已安装程序发现
-│   │   ├── LegendBar.h/cpp
-│   │   ├── LockerDialog.h/cpp      # 占用程序处理对话框
-│   │   ├── MainWindow.h/cpp
-│   │   ├── MoveSelect.h            # 迁移目标选择
-│   │   ├── OpGuard.h/cpp           # 操作前置检查
-│   │   ├── SizeBarDelegate.h/cpp
-│   │   ├── Style.h
-│   │   ├── SystemOptPanel.h/cpp    # 系统配置优化面板
-│   │   ├── ToggleSwitch.h/cpp
-│   │   └── TreemapWidget.h/cpp
-│   ├── ai/                 # AI 分析
-│   │   ├── AiAnalysisDialog.h/cpp  # 分析结果窗口
-│   │   ├── AiService.h/cpp         # 请求与流式响应
-│   │   └── AiSettingsDialog.h/cpp  # 模型与密钥设置
-│   └── cleanup/            # 清理功能
-│       ├── CleanupPanel.h/cpp
-│       ├── CleanupScanner.h/cpp
-│       ├── CleanupTarget.h
-│       ├── CleanupWorker.h/cpp
-│       └── DuplicateScanner.h/cpp  # 重复文件检测
-├── locales/                # i18n JSON 文件
-│   ├── en.json
-│   └── zh.json
+├── index.html              # 前端入口页面
+├── package.json            # 前端依赖与 npm 脚本
+├── tsconfig.json
+├── vite.config.ts
+├── package.bat             # 一键打包入口（双击运行）
 ├── scripts/
-│   ├── build.bat           # 构建脚本 (CMake + MSVC + windeployqt + ISCC)
-│   ├── check_i18n.py       # 语言包审计（对称性 / 覆盖率 / 死键）
-│   ├── installer.iss       # Inno Setup 安装包脚本
-│   └── version.iss.in      # 安装包版本模板
-├── tests/
-│   ├── test_scanner.cpp    # C++ 单元测试 (Qt Test)
-│   └── compare_scanners.cpp  # 扫描器对比基准测试
-├── probe_lab/              # 回归靶场（9 个探针 / 368 项断言）
-│   ├── CMakeLists.txt
-│   └── run1/ … run9/       # 搬移安全 / 标记文件名 / 系统文件夹 / 语言刷新 / 占用识别 / 残留清理 / 状态筛选
-├── resources/              # 随程序嵌入的资源
-│   └── dont_delete_folder.ico  # 迁移目标"请勿删除"标记图标
+│   ├── build-release.ps1   # 构建 + 安装包 + 便携包
+│   └── 使用说明.txt         # 便携包内附说明（打包时自动同步版本号）
+├── src/                    # React 前端
+│   ├── App.tsx
+│   ├── main.tsx
+│   ├── styles.css
+│   ├── theme.ts            # 主题调色板
+│   ├── components/         # 界面组件（扫描页 / 清理 / 树图 / 各类弹框）
+│   ├── context/            # 设置、语言、应用配置上下文
+│   ├── i18n/locales/       # zh.json / en.json
+│   ├── lib/                # 后端命令封装（扫描 / 清理 / 迁移 / AI / 系统优化等）
+│   └── types/
+├── src-tauri/              # Rust 后端
+│   ├── src/
+│   │   ├── main.rs / lib.rs
+│   │   ├── scan.rs / mft.rs        # 扫描与 NTFS MFT 直读
+│   │   ├── cleanup.rs              # 清理分类、大文件、重复文件
+│   │   ├── appsync.rs / appmove.rs # 保存位置迁移与搬移
+│   │   ├── sysopt.rs               # 系统配置优化
+│   │   ├── ai.rs                   # AI 请求与流式响应
+│   │   ├── ops.rs / locker.rs / elevate.rs
+│   │   └── settings.rs / config.rs / legacy.rs / misc.rs
+│   ├── tauri.conf.json
+│   ├── app-config.json             # 发布配置（版本 / 下载 / 更新 / AI 地址）
+│   ├── installer-hooks.nsh         # NSIS 安装钩子（清理旧版 Qt 应用）
+│   ├── capabilities/               # Tauri 权限配置
+│   ├── icons/                      # 应用图标
+│   └── resources/                  # 迁移目标「请勿删除」标记图标
 ├── docs/                   # 官网与截图
-│   ├── index.html
-│   └── screenshots/
-│       ├── treeMap.png
-│       ├── cleanup.png
-│       ├── ai.png
-│       ├── system.png
-│       ├── systemMenu.png
-│       └── userMenu.png
-├── app.ico
-├── app.manifest
-├── CMakeLists.txt
-├── CMakePresets.json
-├── CMakeSettings.json
+├── app.ico                 # 图标源文件
 ├── LICENSE
 ├── README.md
 └── README_EN.md
@@ -207,41 +164,44 @@ ncdu-win-qt/
 |---|---|
 | `Ctrl+O` | 打开文件夹… |
 | `F5` | 重新扫描当前目录 |
-| `Ctrl+Q` | 退出 |
-| `Backspace` | 跳转到父文件夹 |
-| `Enter` / `Return` | 打开选中的文件夹 |
+| `Backspace` | 返回上级目录 |
+| `Enter` | 打开选中的文件夹 |
 | `Delete` | 将选中项移至回收站 |
 | `Shift+Delete` | 永久删除选中项 |
 | `Ctrl+F` | 聚焦搜索框 |
-| `Esc` | 清除搜索 / 返回上层 |
+| `Esc` | 清除搜索 / 清除选择 |
 
 ---
 
-## 🌍 添加翻译
+## 🔐 数据与隐私
 
-1. 复制 `locales/en.json` 到 `locales/<code>.json`（例如 `ja.json`、`fr.json`）。
-2. 翻译所有值。
-3. 在 `src/core/I18n.cpp` 中注册语言：
-   ```cpp
-   {"en", "English"},
-   {"zh", "简体中文"},
-   {"ja", "日本語"},
-   ```
-4. 新语言将自动出现在 **语言** 菜单中。
+| 内容 | 位置 |
+|---|---|
+| 设置文件 | `%APPDATA%\cn.fengzhengx.ncduwin\settings.json` |
+| 日志文件 | `%LOCALAPPDATA%\cn.fengzhengx.ncduwin\logs\ncduwin.log`（单文件 2MB，保留最近 5 个） |
+| 迁移日志 | `%APPDATA%\cn.fengzhengx.ncduwin\move-journal.json` |
+| AI API Key | Windows 凭据管理器，服务名 `NcduWin` |
+
+删除上述目录即可完全清除本软件产生的本地数据。
 
 ---
 
 ## 🧪 开发
 
-### 命令行构建
+### 常用命令
+
 ```bash
-scripts\build.bat
-build\Release\test_scanner.exe   # 运行单元测试
+npm run dev          # 仅启动前端（Vite，端口 1420）
+npm run tauri dev    # 启动完整应用（含 Rust 后端）
+npm run build        # 前端类型检查 + 构建到 dist/
+npm run tauri build  # 构建安装包
 ```
 
-### Visual Studio 构建
-打开项目文件夹，工具栏选择 **VS 2022 (Debug)** 预设即可。
-Debug 和 Release 构建均支持，Qt DLL 自动部署。
+### 添加翻译
+
+1. 复制 `src/i18n/locales/zh.json` 为 `src/i18n/locales/<code>.json` 并翻译全部值。
+2. 在 `src/context/I18nContext.tsx` 中引入该语言包。
+3. 在 `src/types/settings.ts` 的语言类型与 `src/components/MenuBar.tsx` 的语言选项中补充该语言。
 
 ---
 

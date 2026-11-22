@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-# This script lives in tauri\scripts; the Tauri project root is its parent.
+# This script lives in scripts\; the Tauri project root is its parent.
 $scriptsDir = $PSScriptRoot
 $tauriDir = Split-Path -Parent $scriptsDir
 $confPath = Join-Path $tauriDir 'src-tauri\tauri.conf.json'
