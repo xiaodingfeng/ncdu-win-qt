@@ -8,6 +8,11 @@
 
 **[English](README_EN.md)** | **[中文](README.md)**
 
+> **Branch notice**
+>
+> - [`master`](../../tree/master) (default branch): the **latest release**, rebuilt from C++/Qt into **Rust + Tauri 2**, currently 2.0.0 — this is the branch to download and use.
+> - `qt` (this branch): the legacy **C++17 + Qt 6** implementation, version 1.1.0, kept for archival only and no longer developed.
+
 > A modern, light-themed disk usage analyzer for Windows, inspired by Linux [`ncdu`](https://dev.yorhel.nl/ncdu).
 
 NcduWin is a native desktop application that scans your disk and visualizes
