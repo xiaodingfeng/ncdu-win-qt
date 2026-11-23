@@ -846,6 +846,52 @@ button {
   background: var(--border-light);
 }
 
+/* Fade wrapper around dialogs, context menus and dropdowns (Fade.tsx). It must
+   stay unstyled so fixed overlays keep their viewport anchor. */
+.fade-layer {
+  opacity: 0;
+  transition: opacity 0.14s ease;
+  will-change: opacity;
+}
+
+.fade-layer.is-visible {
+  opacity: 1;
+}
+
+.fade-layer:not(.is-visible) {
+  pointer-events: none;
+}
+
+/* The fade wrapper forms a stacking context (opacity/will-change), which would
+   trap fixed overlays below sticky table headers (z-index: 1). Give every layer
+   holding a popup a separate stacking level. `position: fixed` keeps the empty
+   wrapper out of its parent layout, so adding a nested dialog no longer steals
+   height from the list behind it. */
+.fade-layer:has(> .modal-overlay),
+.fade-layer:has(> .context-menu),
+.fade-layer:has(> .ui-popup),
+.fade-layer:has(> .busy-overlay),
+.fade-layer:has(> .update-toast) {
+  position: fixed;
+}
+
+.fade-layer:has(> .modal-overlay) {
+  z-index: 50;
+}
+
+.fade-layer:has(> .context-menu) {
+  z-index: 61;
+}
+
+.fade-layer:has(> .ui-popup),
+.fade-layer:has(> .update-toast) {
+  z-index: 70;
+}
+
+.fade-layer:has(> .busy-overlay) {
+  z-index: 80;
+}
+
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -853,8 +899,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(15, 23, 42, 0.38);
-  backdrop-filter: blur(2px);
+  background: rgba(15, 23, 42, 0.42);
 }
 
 .modal {
@@ -865,18 +910,6 @@ button {
   background: var(--surface);
   border-radius: 12px;
   box-shadow: 0 24px 64px rgba(15, 23, 42, 0.28);
-  animation: modal-in 0.16s ease-out;
-}
-
-@keyframes modal-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px) scale(0.99);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
 }
 
 .modal-header {
@@ -938,7 +971,6 @@ button {
   align-items: center;
   justify-content: center;
   background: rgba(15, 23, 42, 0.32);
-  backdrop-filter: blur(1px);
 }
 
 .busy-card {
@@ -2552,15 +2584,6 @@ button {
   text-overflow: ellipsis;
 }
 
-.theme-token input[type="color"] {
-  width: 28px;
-  height: 20px;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: transparent;
-}
-
 .theme-token-value {
   font-size: 10px;
   color: var(--text-muted);
@@ -2639,6 +2662,12 @@ button {
   overflow: hidden;
   min-width: 420px;
   min-height: 260px;
+}
+
+/* Only during the maximize/restore toggle: manual drag-resize must not be
+   smoothed or it would lag behind the pointer. */
+.modal.animating {
+  transition: width 0.2s ease, height 0.2s ease;
 }
 
 .modal.modal-fill .modal-body {
@@ -2757,4 +2786,184 @@ button {
   display: flex;
   justify-content: center;
   padding: 10px;
+}
+
+/* ---------------- Unified UI kit: custom select / color field ---------------- */
+
+.select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.select:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.select-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.select-chevron {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+
+.select.open .select-chevron {
+  transform: rotate(180deg);
+}
+
+.ui-popup {
+  position: fixed;
+  z-index: 70;
+  max-height: 320px;
+  overflow: auto;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+}
+
+.select-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.select-option {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text);
+  text-align: left;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.select-option:hover {
+  background: var(--surface-alt);
+}
+
+.select-option.active {
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.select-option.multi {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.select-check {
+  width: 12px;
+  flex: none;
+  color: var(--primary);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.color-swatch {
+  width: 28px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.ui-popup.color-popup {
+  overflow: visible;
+  padding: 0;
+}
+
+.color-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 204px;
+  padding: 8px;
+}
+
+.color-area {
+  position: relative;
+  height: 116px;
+  border-radius: 6px;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.color-area-knob {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.4);
+  pointer-events: none;
+}
+
+.color-hue {
+  position: relative;
+  height: 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  touch-action: none;
+  background: linear-gradient(
+    to right,
+    #ff0000,
+    #ffff00,
+    #00ff00,
+    #00ffff,
+    #0000ff,
+    #ff00ff,
+    #ff0000
+  );
+}
+
+.color-hue-knob {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.4);
+  pointer-events: none;
+}
+
+.color-hex {
+  width: 100%;
+  height: 26px;
+  font-size: 12px;
+}
+
+.color-presets {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 4px;
+}
+
+.color-preset {
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
 }

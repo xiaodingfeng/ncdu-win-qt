@@ -601,7 +601,9 @@ fn run_robocopy(source: &Path, destination: &Path) -> Result<(), String> {
     let status = Command::new(robocopy())
         .arg(&source)
         .arg(&destination)
-        .args(["/E", "/COPY:DT", "/XJ", "/R:1", "/W:1", "/NFL", "/NDL", "/NJH", "/NJS"])
+        .args([
+            "/E", "/COPY:DT", "/XJ", "/R:1", "/W:1", "/MT:16", "/NFL", "/NDL", "/NJH", "/NJS",
+        ])
         .creation_flags(CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT)
         .status()
         .map_err(|err| format!("cannot start robocopy: {err}"))?;
@@ -610,6 +612,17 @@ fn run_robocopy(source: &Path, destination: &Path) -> Result<(), String> {
         return Err(format!("robocopy failed with exit code {code}"));
     }
     Ok(())
+}
+
+/// Drops a source tree that has already been copied. Sending it to the Recycle
+/// Bin is a single rename per item, which is far faster than deleting every
+/// file (and keeps the Qt build's recoverable behaviour).
+fn discard_tree(path: &Path) -> bool {
+    let text = path.to_string_lossy().into_owned();
+    if crate::ops::move_to_recycle_bin(&[text]).is_ok() {
+        return true;
+    }
+    fs::remove_dir_all(path).is_ok()
 }
 
 fn create_junction(link: &Path, target: &Path) -> Result<(), String> {
@@ -736,7 +749,7 @@ fn move_one(source: &Path, target_root: &Path, journal: &mut Journal) -> Result<
     save_journal(journal);
 
     // Best effort: lingering locks leave a residue folder the panel can clean.
-    if fs::remove_dir_all(&backup).is_err() {
+    if !discard_tree(&backup) {
         return Ok("app_move.done_residue".to_string());
     }
     journal.entries.retain(|entry| normalize(&entry.source) != normalize(&source.to_string_lossy()));
@@ -846,7 +859,9 @@ fn move_path_one(source: &Path, target_root: &Path) -> Result<(), String> {
             ));
         }
         locker::write_dont_delete_marker(&target.to_string_lossy());
-        fs::remove_dir_all(source).map_err(|err| format!("move.err.remove_failed|{err}"))?;
+        if !discard_tree(source) {
+            return Err("move.err.remove_failed".to_string());
+        }
     } else {
         fs::copy(source, &target).map_err(|err| format!("move.err.copy_failed|{err}"))?;
         let copied = fs::metadata(&target)
@@ -981,7 +996,7 @@ fn restore_core(source: &Path) -> Result<String, String> {
     }
     crate::locker::remove_dont_delete_marker(&real_source.to_string_lossy());
     // Best effort: the restored copy is already in place.
-    let _ = fs::remove_dir_all(&target_path);
+    let _ = discard_tree(&target_path);
     Ok("app_move.state_normal".to_string())
 }
 

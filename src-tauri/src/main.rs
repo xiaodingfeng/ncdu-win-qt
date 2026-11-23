@@ -6,5 +6,9 @@ fn main() {
     if ncduwin_lib::is_helper_invocation() {
         std::process::exit(ncduwin_lib::run_helper());
     }
+    // The staged updater is a temporary copy of this executable.
+    if let Some(code) = ncduwin_lib::apply_update_if_requested() {
+        std::process::exit(code);
+    }
     ncduwin_lib::run()
 }

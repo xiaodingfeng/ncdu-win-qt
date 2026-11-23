@@ -1,16 +1,20 @@
-use std::ffi::OsStr;
 use std::io::Write;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
+use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
 
 use crate::config;
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const APPLY_UPDATE_FLAG: &str = "--apply-update";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,8 +46,74 @@ struct UpdateError {
     message: String,
 }
 
-fn wide(value: &OsStr) -> Vec<u16> {
-    value.encode_wide().chain(std::iter::once(0)).collect()
+/// Blocks until `pid` exits (or the timeout elapses); used by the staged
+/// updater, which must wait for the running app to release its files.
+fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
+    if pid == 0 {
+        return true;
+    }
+    unsafe {
+        let handle = OpenProcess(SYNCHRONIZE, 0, pid);
+        if handle.is_null() {
+            return true;
+        }
+        let waited = WaitForSingleObject(handle, timeout.as_millis() as u32);
+        CloseHandle(handle);
+        waited == WAIT_OBJECT_0
+    }
+}
+
+/// Runs inside the temporary copy of this executable: waits for the app to
+/// quit, installs the downloaded package silently into the directory the app
+/// runs from, then starts the new version again.
+pub(crate) fn apply_update_from_args() -> Option<i32> {
+    let args: Vec<String> = std::env::args().collect();
+    let index = args.iter().position(|arg| arg == APPLY_UPDATE_FLAG)?;
+    let installer = args.get(index + 1)?.clone();
+    let install_dir = args.get(index + 2)?.clone();
+    let app_exe = args.get(index + 3)?.clone();
+    let parent = args
+        .get(index + 4)
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    wait_for_exit(parent, Duration::from_secs(120));
+
+    // `/D=` must stay last and unquoted; NSIS reads the rest of the command
+    // line as the install directory, which keeps the update in place.
+    let installed = Command::new(&installer)
+        .arg("/S")
+        .raw_arg(format!("/D={install_dir}"))
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    let _ = std::fs::remove_file(&installer);
+    if installed {
+        let _ = Command::new(&app_exe).spawn();
+    }
+    Some(if installed { 0 } else { 1 })
+}
+
+/// Stages a copy of this executable in %TEMP% (the installed files are about to
+/// be replaced) and hands the installer to it.
+fn launch_staged_update(installer: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+    let install_dir = exe
+        .parent()
+        .ok_or_else(|| "cannot locate the install directory".to_string())?;
+    let staged = std::env::temp_dir().join(format!("ncduwin-update-{}.exe", std::process::id()));
+    std::fs::copy(&exe, &staged).map_err(|err| format!("cannot stage the updater: {err}"))?;
+    Command::new(&staged)
+        .arg(APPLY_UPDATE_FLAG)
+        .arg(installer)
+        .arg(install_dir)
+        .arg(&exe)
+        .arg(std::process::id().to_string())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|err| format!("cannot start the updater: {err}"))?;
+    Ok(())
 }
 
 fn valid_version(version: &str) -> bool {
@@ -111,27 +181,9 @@ pub fn download_update(app: AppHandle, version: String) -> Result<(), String> {
             })
             .await?;
 
-            let file = wide(temp.as_os_str());
-            let verb = wide(OsStr::new("runas"));
-            let params = wide(OsStr::new(
-                "/SILENT /NOCANCEL /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /NORESTART",
-            ));
-            let handle = unsafe {
-                ShellExecuteW(
-                    std::ptr::null_mut(),
-                    verb.as_ptr(),
-                    file.as_ptr(),
-                    params.as_ptr(),
-                    std::ptr::null(),
-                    SW_SHOWNORMAL,
-                )
-            };
-            if handle as isize <= 32 {
-                return Err("launch failed".to_string());
-            }
-            // Give the installer a moment to take over before exiting so the
-            // executable lock is released.
-            tokio::time::sleep(Duration::from_millis(800)).await;
+            // Silent in-place update: the staged helper waits for this process
+            // to exit, installs into the current directory and restarts it.
+            launch_staged_update(&temp)?;
             app.exit(0);
             Ok(())
         }

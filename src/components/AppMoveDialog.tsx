@@ -3,7 +3,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useI18n } from "../context/I18nContext";
 import Modal from "./Modal";
+import Fade from "./Fade";
 import LockerDialog from "./LockerDialog";
+import Select from "./ui/Select";
 import { IconCaret } from "./icons";
 import { formatSize } from "../lib/format";
 import {
@@ -560,8 +562,6 @@ export default function AppMoveDialog({ open: visible, onClose, embedded = false
     return t("app_move.state_copying");
   };
 
-  if (!visible) return null;
-
   const th = (key: SortKey, label: string) => (
     <button
       className={`appmove-th ${sort.key === key ? "active" : ""}`}
@@ -608,7 +608,8 @@ export default function AppMoveDialog({ open: visible, onClose, embedded = false
   const content = (
     <>
       <div className="appmove">
-        <p className="dialog-text">{t("app_move.tip")}</p>
+        {/* 嵌入到「保存位置迁移」的 TAB 里时，说明文字由外层统一显示 */}
+        {!embedded && <p className="dialog-text">{t("app_move.tip")}</p>}
         <p className="appmove-warn">{t("app_move.warn")}</p>
 
         <div className="appmove-toolbar">
@@ -631,17 +632,18 @@ export default function AppMoveDialog({ open: visible, onClose, embedded = false
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
-          <select
-            className="select small"
+          <Select
+            className="small"
             value={filter}
-            onChange={(event) => setFilter(event.target.value as Filter)}
             title={t("app_move.filter_tip")}
-          >
-            <option value="all">{t("app_move.filter_all")} ({counts.all})</option>
-            <option value="normal">{t("app_move.state_idle")} ({counts.normal})</option>
-            <option value="moved">{t("app_move.state_moved")} ({counts.moved})</option>
-            <option value="residue">{t("app_move.clean_residue")} ({counts.residue})</option>
-          </select>
+            options={[
+              { value: "all", label: `${t("app_move.filter_all")} (${counts.all})` },
+              { value: "normal", label: `${t("app_move.state_idle")} (${counts.normal})` },
+              { value: "moved", label: `${t("app_move.state_moved")} (${counts.moved})` },
+              { value: "residue", label: `${t("app_move.clean_residue")} (${counts.residue})` },
+            ]}
+            onChange={(value) => setFilter(value as Filter)}
+          />
           <button className="btn small" onClick={() => selectVisible(true)} disabled={busy !== null}>
             {t("cleanup.select_all")}
           </button>
@@ -755,50 +757,54 @@ export default function AppMoveDialog({ open: visible, onClose, embedded = false
         )}
       </div>
 
-      {lockPrompt && (
-        <LockerDialog
-          title={t("app_move.title")}
-          intro={lockPrompt.intro}
-          procs={lockPrompt.procs}
-          busy={busy !== null}
-          allowSkip={lockPrompt.allowSkip}
-          closeText={t("op_guard.btn_close")}
-          skipText={t("app_move.btn_skip_dir")}
-          onCancel={() => setLockPrompt(null)}
-          onCloseAndContinue={() => void closeAndContinue()}
-          onSkip={() => {
-            setLockPrompt(null);
-            setError(t("app_move.fail_locked_skip"));
-          }}
-        />
-      )}
+      <Fade show={Boolean(lockPrompt)}>
+        {lockPrompt && (
+          <LockerDialog
+            title={t("app_move.title")}
+            intro={lockPrompt.intro}
+            procs={lockPrompt.procs}
+            busy={busy !== null}
+            allowSkip={lockPrompt.allowSkip}
+            closeText={t("op_guard.btn_close")}
+            skipText={t("app_move.btn_skip_dir")}
+            onCancel={() => setLockPrompt(null)}
+            onCloseAndContinue={() => void closeAndContinue()}
+            onSkip={() => {
+              setLockPrompt(null);
+              setError(t("app_move.fail_locked_skip"));
+            }}
+          />
+        )}
+      </Fade>
 
-      {confirm && (
-        <Modal
-          title={t("app_move.title")}
-          width={600}
-          onClose={() => setConfirm(null)}
-          footer={
-            <>
-              <button className="btn" onClick={() => setConfirm(null)}>
-                {t("button.cancel")}
-              </button>
-              <button
-                className="btn primary"
-                onClick={() => {
-                  const action = confirm.run;
-                  setConfirm(null);
-                  action();
-                }}
-              >
-                {t("button.yes")}
-              </button>
-            </>
-          }
-        >
-          <p className="dialog-text pre">{confirm.body}</p>
-        </Modal>
-      )}
+      <Fade show={Boolean(confirm)}>
+        {confirm && (
+          <Modal
+            title={t("app_move.title")}
+            width={600}
+            onClose={() => setConfirm(null)}
+            footer={
+              <>
+                <button className="btn" onClick={() => setConfirm(null)}>
+                  {t("button.cancel")}
+                </button>
+                <button
+                  className="btn primary"
+                  onClick={() => {
+                    const action = confirm.run;
+                    setConfirm(null);
+                    action();
+                  }}
+                >
+                  {t("button.yes")}
+                </button>
+              </>
+            }
+          >
+            <p className="dialog-text pre">{confirm.body}</p>
+          </Modal>
+        )}
+      </Fade>
     </>
   );
 
@@ -812,17 +818,19 @@ export default function AppMoveDialog({ open: visible, onClose, embedded = false
   }
 
   return (
-    <Modal
-      title={t("app_move.title")}
-      width={1000}
-      resizable
-      className="modal-fill"
-      onClose={() => {
-        if (!busy) onClose();
-      }}
-      footer={footer}
-    >
-      {content}
-    </Modal>
+    <Fade show={visible}>
+      <Modal
+        title={t("app_move.title")}
+        width={1000}
+        resizable
+        className="modal-fill"
+        onClose={() => {
+          if (!busy) onClose();
+        }}
+        footer={footer}
+      >
+        {content}
+      </Modal>
+    </Fade>
   );
 }

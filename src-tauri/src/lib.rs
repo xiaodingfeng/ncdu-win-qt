@@ -74,6 +74,12 @@ pub fn run_helper() -> i32 {
     elevate::run_helper_from_args()
 }
 
+/// Handles `--apply-update ...`: the staged silent updater, which runs before
+/// Tauri starts.
+pub fn apply_update_if_requested() -> Option<i32> {
+    misc::apply_update_from_args()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_hook();

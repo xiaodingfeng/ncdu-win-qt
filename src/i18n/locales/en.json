@@ -574,6 +574,7 @@
   "cleanup.col_type": "Type",
   "cleanup.filter_type": "Type:",
   "cleanup.filter_all_types": "All Types",
+  "cleanup.filter_empty": "No files match the selected type filter",
   "cleanup.dup_group_label": "{count} duplicate files",
   "cleanup.dup_phase_size": "Grouping duplicates by size…",
   "cleanup.dup_phase_partial": "Hashing duplicate file headers…",

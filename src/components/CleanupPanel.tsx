@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { useI18n } from "../context/I18nContext";
 import { useSettings } from "../context/SettingsContext";
 import Modal from "./Modal";
+import Fade from "./Fade";
+import MultiSelect from "./ui/MultiSelect";
 import ContextMenu, { type MenuItem } from "./ContextMenu";
 import BusyOverlay from "./BusyOverlay";
 import { IconCaret } from "./icons";
@@ -137,8 +139,8 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
   const [detailsItems, setDetailsItems] = useState<{ name: string; path: string; size: number; isDir: boolean }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [lfFilter, setLfFilter] = useState("all");
-  const [dupFilter, setDupFilter] = useState("all");
+  const [lfFilters, setLfFilters] = useState<string[]>([]);
+  const [dupFilters, setDupFilters] = useState<string[]>([]);
   const [lfSort, setLfSort] = useState<SortState>({ key: "size", asc: false });
   const [dupSort, setDupSort] = useState<SortState>({ key: "size", asc: false });
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
@@ -212,6 +214,8 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
     setGroups([]);
     setSelected(new Set());
     setDupDone(null);
+    setLfFilters([]);
+    setDupFilters([]);
   };
 
   /** Auto scan after the main folder scan, honouring each module's checkbox. */
@@ -392,7 +396,12 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
 
   const visibleLargeFiles = useMemo(() => {
     const list = [...largeFiles].sort((a, b) => b.size - a.size);
-    const filtered = lfFilter === "all" ? list : list.filter((file) => extensionOf(file.name) === lfFilter);
+    // 旧扫描的类型可能已不存在，先过滤掉，避免筛选后列表莫名变空。
+    const selected = lfFilters.filter((type) => lfTypes.includes(type));
+    const filtered =
+      selected.length === 0
+        ? list
+        : list.filter((file) => selected.includes(extensionOf(file.name)));
     const order = (a: LargeFile, b: LargeFile) => {
       switch (lfSort.key) {
         case "name":
@@ -405,7 +414,7 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
     };
     filtered.sort((a, b) => (lfSort.asc ? order(a, b) : -order(a, b)));
     return filtered;
-  }, [largeFiles, lfFilter, lfSort]);
+  }, [largeFiles, lfFilters, lfTypes, lfSort]);
 
   const dupTypes = useMemo(() => {
     const set = new Set<string>();
@@ -419,13 +428,14 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
   }, [groups]);
 
   const visibleGroups = useMemo(() => {
+    const selected = dupFilters.filter((type) => dupTypes.includes(type));
     const base =
-      dupFilter === "all"
+      selected.length === 0
         ? groups
         : groups
             .map((group) => ({
               ...group,
-              files: group.files.filter((file) => extensionOf(file.name) === dupFilter),
+              files: group.files.filter((file) => selected.includes(extensionOf(file.name))),
             }))
             .filter((group) => group.files.length >= 2);
     const order = (a: DuplicateGroup, b: DuplicateGroup) => {
@@ -445,7 +455,7 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
       }
     };
     return [...base].sort((a, b) => (dupSort.asc ? order(a, b) : -order(a, b)));
-  }, [groups, dupFilter, dupSort]);
+  }, [groups, dupFilters, dupTypes, dupSort]);
 
   const toggleSort = (
     setter: (update: (previous: SortState) => SortState) => void,
@@ -727,23 +737,21 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
           </>
         )}
         {(tab === "large" || tab === "duplicates") && (
-          <select
-            className="select small"
-            value={tab === "large" ? lfFilter : dupFilter}
-            onChange={(event) =>
-              tab === "large"
-                ? setLfFilter(event.target.value)
-                : setDupFilter(event.target.value)
-            }
+          <MultiSelect
+            className="small"
             title={t("cleanup.filter_type")}
-          >
-            <option value="all">{t("cleanup.filter_all_types")}</option>
-            {(tab === "large" ? lfTypes : dupTypes).map((type) => (
-              <option key={type} value={type}>
-                {type.toUpperCase()}
-              </option>
-            ))}
-          </select>
+            allLabel={t("cleanup.filter_all_types")}
+            values={
+              tab === "large"
+                ? lfFilters.filter((type) => lfTypes.includes(type))
+                : dupFilters.filter((type) => dupTypes.includes(type))
+            }
+            options={(tab === "large" ? lfTypes : dupTypes).map((type) => ({
+              value: type,
+              label: type.toUpperCase(),
+            }))}
+            onChange={(values) => (tab === "large" ? setLfFilters(values) : setDupFilters(values))}
+          />
         )}
         <button
           className="btn small"
@@ -848,7 +856,9 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
               <div className="cleanup-empty">
                 {scanning
                   ? t("disk.progress.scanning", { path: root ?? rootRef.current ?? "" })
-                  : t("cleanup.empty_large")}
+                  : largeFiles.length > 0
+                    ? t("cleanup.filter_empty")
+                    : t("cleanup.empty_large")}
               </div>
             )}
             {visibleLargeFiles.map((file) => (
@@ -926,6 +936,9 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
                   ? t("cleanup.dup_scan_done", { groups: dupDone.groups, files: dupDone.files })
                   : t("cleanup.dup_scan_empty")}
               </div>
+            )}
+            {!dupScanning && dupDone && dupDone.groups > 0 && visibleGroups.length === 0 && (
+              <div className="cleanup-empty">{t("cleanup.filter_empty")}</div>
             )}
             {visibleGroups.slice(0, dupLimit).map((group, groupIndex) => (
               <div className="dup-group" key={`${group.size}-${groupIndex}-${group.files[0]?.path ?? ""}`}>
@@ -1024,150 +1037,158 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
         </div>
       )}
 
-      {menu && (
-        <ContextMenu
-          x={menu.x}
-          y={menu.y}
-          items={menu.items}
-          onClose={() => setMenu(null)}
-        />
-      )}
+      <Fade show={Boolean(menu)}>
+        {menu && (
+          <ContextMenu
+            x={menu.x}
+            y={menu.y}
+            items={menu.items}
+            onClose={() => setMenu(null)}
+          />
+        )}
+      </Fade>
 
-      {confirm && (
-        <Modal
-          title={t("cleanup.clean_title")}
-          width={560}
-          onClose={() => !cleaning && setConfirm(null)}
-          footer={
-            <>
-              <button className="btn" disabled={cleaning} onClick={() => setConfirm(null)}>
-                {t("button.cancel")}
-              </button>
-              {!confirm.items.some((item) => item.key === "cleanup.b_recycle") && (
-                <button className="btn" disabled={cleaning} onClick={() => void runClean(false)}>
-                  {t("cleanup.clean_recycle")}
+      <Fade show={Boolean(confirm)}>
+        {confirm && (
+          <Modal
+            title={t("cleanup.clean_title")}
+            width={560}
+            onClose={() => !cleaning && setConfirm(null)}
+            footer={
+              <>
+                <button className="btn" disabled={cleaning} onClick={() => setConfirm(null)}>
+                  {t("button.cancel")}
                 </button>
-              )}
-              <button className="btn danger" disabled={cleaning} onClick={() => void runClean(true)}>
-                {confirm.items.some((item) => item.key === "cleanup.b_recycle")
-                  ? t("cleanup.clean_empty_recycle")
-                  : t("cleanup.clean_permanent")}
-              </button>
-            </>
-          }
-        >
-          <p className="dialog-text">
-            {t("cleanup.clean_body", {
-              size: formatSize(confirm.size),
-              names: confirm.names.slice(0, 6).join("\n"),
-              more:
-                confirm.names.length > 6
-                  ? t("dialog.recycle.more", { n: confirm.names.length - 6 })
-                  : "",
-            })}
-          </p>
-          <p className="dialog-text muted">{t("cleanup.clean_hint")}</p>
-        </Modal>
-      )}
-
-      {details && (
-        <Modal
-          title={t("cleanup.details_title")}
-          width={620}
-          onClose={() => setDetailsState(null)}
-          footer={
-            <>
-              <button className="btn" onClick={() => void revealPath(details.path)}>
-                {t("ctx.reveal")}
-              </button>
-              <button className="btn" onClick={() => setDetailsState(null)}>
-                {t("button.close")}
-              </button>
-            </>
-          }
-        >
-          <div className="details-head">
-            <strong>{t(details.key)}</strong>
-            <span className="muted">
-              {formatSize(details.size)} · {formatCount(details.fileCount)}
-            </span>
-          </div>
-          <p className="dialog-text">{details.path}</p>
-          <p className="dialog-text">{t(details.remark)}</p>
-          {details.key === "cleanup.b_recycle" ? (
-            <p className="dialog-text">{t("cleanup.details_recycle_msg")}</p>
-          ) : (
-            <>
-              <p className="details-subtitle">{t("cleanup.details_contents")}</p>
-              <div className="details-list">
-                {detailsItems.map((item) => (
-                  <div className="details-row" key={item.path} title={item.path}>
-                    <span className="name">{item.name}</span>
-                    <span className="mono">{formatSize(item.size)}</span>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </Modal>
-      )}
-
-      {(failed || cleanResult) && (
-        <Modal
-          title={failed ? t("cleanup.failed_title") : t("cleanup.clean_title")}
-          width={560}
-          onClose={() => {
-            setFailed(null);
-            setCleanResult(null);
-          }}
-          footer={
-            <>
-              {cleanResult?.needsElevation && (
-                <button className="btn" onClick={() => void retryElevated()}>
-                  {t("cleanup.retry_elevated")}
+                {!confirm.items.some((item) => item.key === "cleanup.b_recycle") && (
+                  <button className="btn" disabled={cleaning} onClick={() => void runClean(false)}>
+                    {t("cleanup.clean_recycle")}
+                  </button>
+                )}
+                <button className="btn danger" disabled={cleaning} onClick={() => void runClean(true)}>
+                  {confirm.items.some((item) => item.key === "cleanup.b_recycle")
+                    ? t("cleanup.clean_empty_recycle")
+                    : t("cleanup.clean_permanent")}
                 </button>
-              )}
-              <button
-                className="btn primary"
-                onClick={() => {
-                  setFailed(null);
-                  setCleanResult(null);
-                }}
-              >
-                {t("button.ok")}
-              </button>
-            </>
-          }
-        >
-          {failed && (
-            <>
-              <p className="dialog-text">{t("cleanup.failed_body", { items: failed.slice(0, 10).join("\n") })}</p>
-              {failed.length > 10 && (
-                <p className="dialog-text">{t("cleanup.failed_more", { n: failed.length - 10 })}</p>
-              )}
-              {cleanResult?.needsElevation && (
-                <p className="dialog-text muted">{t("cleanup.needs_admin")}</p>
-              )}
-            </>
-          )}
-          {cleanResult && (
-            <>
-              <p className="dialog-text">
-                {t("cleanup.clean_done", {
-                  freed: formatSize(cleanResult.totalFreed),
-                  deleted: cleanResult.totalDeleted,
-                  skipped: cleanResult.totalSkipped,
-                })}
-              </p>
-              {cleanResult.totalSkipped > 0 && (
+              </>
+            }
+          >
+            <p className="dialog-text">
+              {t("cleanup.clean_body", {
+                size: formatSize(confirm.size),
+                names: confirm.names.slice(0, 6).join("\n"),
+                more:
+                  confirm.names.length > 6
+                    ? t("dialog.recycle.more", { n: confirm.names.length - 6 })
+                    : "",
+              })}
+            </p>
+            <p className="dialog-text muted">{t("cleanup.clean_hint")}</p>
+          </Modal>
+        )}
+      </Fade>
+
+      <Fade show={Boolean(details)}>
+        {details && (
+          <Modal
+            title={t("cleanup.details_title")}
+            width={620}
+            onClose={() => setDetailsState(null)}
+            footer={
+              <>
+                <button className="btn" onClick={() => void revealPath(details.path)}>
+                  {t("ctx.reveal")}
+                </button>
+                <button className="btn" onClick={() => setDetailsState(null)}>
+                  {t("button.close")}
+                </button>
+              </>
+            }
+          >
+            <div className="details-head">
+              <strong>{t(details.key)}</strong>
+              <span className="muted">
+                {formatSize(details.size)} · {formatCount(details.fileCount)}
+              </span>
+            </div>
+            <p className="dialog-text">{details.path}</p>
+            <p className="dialog-text">{t(details.remark)}</p>
+            {details.key === "cleanup.b_recycle" ? (
+              <p className="dialog-text">{t("cleanup.details_recycle_msg")}</p>
+            ) : (
+              <>
+                <p className="details-subtitle">{t("cleanup.details_contents")}</p>
+                <div className="details-list">
+                  {detailsItems.map((item) => (
+                    <div className="details-row" key={item.path} title={item.path}>
+                      <span className="name">{item.name}</span>
+                      <span className="mono">{formatSize(item.size)}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </Modal>
+        )}
+      </Fade>
+
+      <Fade show={Boolean(failed || cleanResult)}>
+        {(failed || cleanResult) && (
+          <Modal
+            title={failed ? t("cleanup.failed_title") : t("cleanup.clean_title")}
+            width={560}
+            onClose={() => {
+              setFailed(null);
+              setCleanResult(null);
+            }}
+            footer={
+              <>
+                {cleanResult?.needsElevation && (
+                  <button className="btn" onClick={() => void retryElevated()}>
+                    {t("cleanup.retry_elevated")}
+                  </button>
+                )}
+                <button
+                  className="btn primary"
+                  onClick={() => {
+                    setFailed(null);
+                    setCleanResult(null);
+                  }}
+                >
+                  {t("button.ok")}
+                </button>
+              </>
+            }
+          >
+            {failed && (
+              <>
+                <p className="dialog-text">{t("cleanup.failed_body", { items: failed.slice(0, 10).join("\n") })}</p>
+                {failed.length > 10 && (
+                  <p className="dialog-text">{t("cleanup.failed_more", { n: failed.length - 10 })}</p>
+                )}
+                {cleanResult?.needsElevation && (
+                  <p className="dialog-text muted">{t("cleanup.needs_admin")}</p>
+                )}
+              </>
+            )}
+            {cleanResult && (
+              <>
                 <p className="dialog-text">
-                  {t("cleanup.kept_status", { n: cleanResult.totalSkipped })}
+                  {t("cleanup.clean_done", {
+                    freed: formatSize(cleanResult.totalFreed),
+                    deleted: cleanResult.totalDeleted,
+                    skipped: cleanResult.totalSkipped,
+                  })}
                 </p>
-              )}
-            </>
-          )}
-        </Modal>
-      )}
+                {cleanResult.totalSkipped > 0 && (
+                  <p className="dialog-text">
+                    {t("cleanup.kept_status", { n: cleanResult.totalSkipped })}
+                  </p>
+                )}
+              </>
+            )}
+          </Modal>
+        )}
+      </Fade>
 
       <BusyOverlay
         open={cleaning}

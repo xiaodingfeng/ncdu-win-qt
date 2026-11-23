@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useI18n } from "../context/I18nContext";
 import { useAppConfig } from "../context/AppConfigContext";
+import Fade from "./Fade";
 import { checkUpdate, downloadUpdate, isPortable, subscribeUpdate } from "../lib/misc";
 import { logClient } from "../lib/log";
 import { openPath } from "../lib/ops";
@@ -66,7 +67,7 @@ export default function UpdateToast() {
     };
   }, [active, t]);
 
-  if (!visible || !result) return null;
+  if (!result) return null;
 
   const startDownload = () => {
     setError(null);
@@ -79,59 +80,61 @@ export default function UpdateToast() {
   };
 
   return (
-    <div className="update-toast" role="alert">
-      <div className="update-toast-head">
-        <strong>{t("update.new_title")}</strong>
-        {percent === null && (
-          <button
-            className="update-toast-close"
-            aria-label={t("button.close")}
-            onClick={() => setVisible(false)}
-          >
-            ×
-          </button>
+    <Fade show={visible}>
+      <div className="update-toast" role="alert">
+        <div className="update-toast-head">
+          <strong>{t("update.new_title")}</strong>
+          {percent === null && (
+            <button
+              className="update-toast-close"
+              aria-label={t("button.close")}
+              onClick={() => setVisible(false)}
+            >
+              ×
+            </button>
+          )}
+        </div>
+        {percent !== null ? (
+          <div className="update-progress">
+            <span>{percent >= 100 ? t("update.installing") : t("update.downloading", { percent })}</span>
+            <div className="progress-track">
+              <span style={{ width: `${percent}%` }} />
+            </div>
+          </div>
+        ) : (
+          <>
+            <p>
+              {error ??
+                (portable
+                  ? t("update.toast_portable_body", {
+                      version: result.remote,
+                      local: result.local,
+                    })
+                  : t("update.toast_body", { version: result.remote, local: result.local }))}
+            </p>
+            <div className="update-toast-actions">
+              <button className="btn" onClick={() => setVisible(false)}>
+                {t("button.close")}
+              </button>
+              {portable ? (
+                <button
+                  className="btn primary"
+                  onClick={() => {
+                    setVisible(false);
+                    void openPath(config.downloadPage);
+                  }}
+                >
+                  {t("update.go_download")}
+                </button>
+              ) : (
+                <button className="btn primary" onClick={startDownload}>
+                  {t("update.download_install")}
+                </button>
+              )}
+            </div>
+          </>
         )}
       </div>
-      {percent !== null ? (
-        <div className="update-progress">
-          <span>{percent >= 100 ? t("update.installing") : t("update.downloading", { percent })}</span>
-          <div className="progress-track">
-            <span style={{ width: `${percent}%` }} />
-          </div>
-        </div>
-      ) : (
-        <>
-          <p>
-            {error ??
-              (portable
-                ? t("update.toast_portable_body", {
-                    version: result.remote,
-                    local: result.local,
-                  })
-                : t("update.toast_body", { version: result.remote, local: result.local }))}
-          </p>
-          <div className="update-toast-actions">
-            <button className="btn" onClick={() => setVisible(false)}>
-              {t("button.close")}
-            </button>
-            {portable ? (
-              <button
-                className="btn primary"
-                onClick={() => {
-                  setVisible(false);
-                  void openPath(config.downloadPage);
-                }}
-              >
-                {t("update.go_download")}
-              </button>
-            ) : (
-              <button className="btn primary" onClick={startDownload}>
-                {t("update.download_install")}
-              </button>
-            )}
-          </div>
-        </>
-      )}
-    </div>
+    </Fade>
   );
 }

@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useI18n } from "../context/I18nContext";
 import Modal from "./Modal";
+import Fade from "./Fade";
+import Select from "./ui/Select";
 import { aiFetchDefaults, aiFetchModels, aiGetConfig, aiSaveConfig } from "../lib/ai";
 import type { AiConfigInfo } from "../types/ai";
 
@@ -98,87 +100,79 @@ export default function AiSettingsDialog({ open, onClose, onSaved }: Props) {
     }
   };
 
-  if (!open) return null;
-
   return (
-    <Modal
-      title={t("ai.settings.title")}
-      width={620}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" disabled={busy !== null} onClick={() => void restoreDefaults()}>
-            {busy === "defaults" ? t("ai.settings.fetching") : t("ai.settings.restore_defaults")}
-          </button>
-          <div className="toolbar-spacer" />
-          <button className="btn" onClick={onClose} disabled={busy !== null}>
-            {t("button.cancel")}
-          </button>
-          <button className="btn primary" disabled={busy !== null} onClick={() => void save()}>
-            {busy === "save" ? t("ai.settings.fetching") : t("ai.settings.save")}
-          </button>
-        </>
-      }
-    >
-      <div className="ai-settings">
-        <label className="field">
-          <span>{t("ai.settings.base_url")}</span>
-          <input
-            className="input"
-            value={baseUrl}
-            placeholder="https://api.example.com/v1"
-            onChange={(event) => setBaseUrl(event.target.value)}
-          />
-        </label>
-        <label className="field">
-          <span>{t("ai.settings.api_key")}</span>
-          <input
-            className="input"
-            type="password"
-            value={apiKey}
-            placeholder={hasKey ? "••••••••" : ""}
-            onChange={(event) => setApiKey(event.target.value)}
-          />
-        </label>
-        <label className="field">
-          <span>{t("ai.settings.model")}</span>
-          <div className="ai-model-row">
+    <Fade show={open}>
+      <Modal
+        title={t("ai.settings.title")}
+        width={620}
+        onClose={onClose}
+        footer={
+          <>
+            <button className="btn" disabled={busy !== null} onClick={() => void restoreDefaults()}>
+              {busy === "defaults" ? t("ai.settings.fetching") : t("ai.settings.restore_defaults")}
+            </button>
+            <div className="toolbar-spacer" />
+            <button className="btn" onClick={onClose} disabled={busy !== null}>
+              {t("button.cancel")}
+            </button>
+            <button className="btn primary" disabled={busy !== null} onClick={() => void save()}>
+              {busy === "save" ? t("ai.settings.fetching") : t("ai.settings.save")}
+            </button>
+          </>
+        }
+      >
+        <div className="ai-settings">
+          <label className="field">
+            <span>{t("ai.settings.base_url")}</span>
             <input
               className="input"
-              value={model}
-              placeholder="auto"
-              onChange={(event) => setModel(event.target.value)}
+              value={baseUrl}
+              placeholder="https://api.example.com/v1"
+              onChange={(event) => setBaseUrl(event.target.value)}
             />
-            <select
-              className="select ai-model-select"
-              value={models.includes(model) ? model : ""}
-              disabled={busy !== null || models.length === 0}
-              onChange={(event) => {
-                if (event.target.value) setModel(event.target.value);
-              }}
-            >
-              {models.length === 0 ? (
-                <option value="">{t("ai.settings.pick_model")}</option>
-              ) : (
-                <>
-                  <option value="">{t("ai.settings.pick_model")}</option>
-                  {models.map((id) => (
-                    <option key={id} value={id}>
-                      {id}
-                    </option>
-                  ))}
-                </>
-              )}
-            </select>
-            <button className="btn small" disabled={busy !== null} onClick={() => void fetchModels()}>
-              {busy === "models" ? t("ai.settings.fetching") : t("ai.settings.fetch_models")}
-            </button>
-          </div>
-        </label>
-        <p className="muted small">{t("ai.settings.model_hint")}</p>
-        {message && <div className="ai-settings-message">{message}</div>}
-        {error && <div className="ai-error">{error}</div>}
-      </div>
-    </Modal>
+          </label>
+          <label className="field">
+            <span>{t("ai.settings.api_key")}</span>
+            <input
+              className="input"
+              type="password"
+              value={apiKey}
+              placeholder={hasKey ? "••••••••" : ""}
+              onChange={(event) => setApiKey(event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>{t("ai.settings.model")}</span>
+            <div className="ai-model-row">
+              <input
+                className="input"
+                value={model}
+                placeholder="auto"
+                onChange={(event) => setModel(event.target.value)}
+              />
+              <Select
+                className="ai-model-select"
+                value={models.includes(model) ? model : ""}
+                disabled={busy !== null || models.length === 0}
+                placeholder={t("ai.settings.pick_model")}
+                options={[
+                  { value: "", label: t("ai.settings.pick_model") },
+                  ...models.map((id) => ({ value: id, label: id })),
+                ]}
+                onChange={(value) => {
+                  if (value) setModel(value);
+                }}
+              />
+              <button className="btn small" disabled={busy !== null} onClick={() => void fetchModels()}>
+                {busy === "models" ? t("ai.settings.fetching") : t("ai.settings.fetch_models")}
+              </button>
+            </div>
+          </label>
+          <p className="muted small">{t("ai.settings.model_hint")}</p>
+          {message && <div className="ai-settings-message">{message}</div>}
+          {error && <div className="ai-error">{error}</div>}
+        </div>
+      </Modal>
+    </Fade>
   );
 }

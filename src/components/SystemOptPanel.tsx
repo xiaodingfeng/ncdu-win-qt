@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useI18n } from "../context/I18nContext";
 import Modal from "./Modal";
+import Fade from "./Fade";
 import { IconBolt, IconNetwork, IconStore, IconSync, IconUpdate } from "./icons";
 import {
   flushDns,
@@ -258,32 +259,34 @@ export default function SystemOptPanel({ onOpenSync }: Props) {
         </section>
       </div>
 
-      {confirm && (
-        <Modal
-          title={confirm.title}
-          width={520}
-          onClose={() => setConfirm(null)}
-          footer={
-            <>
-              <button className="btn" onClick={() => setConfirm(null)}>
-                {t("button.cancel")}
-              </button>
-              <button
-                className="btn primary"
-                onClick={() => {
-                  const action = confirm.run;
-                  setConfirm(null);
-                  action();
-                }}
-              >
-                {t("button.yes")}
-              </button>
-            </>
-          }
-        >
-          <p className="dialog-text">{confirm.body}</p>
-        </Modal>
-      )}
+      <Fade show={Boolean(confirm)}>
+        {confirm && (
+          <Modal
+            title={confirm.title}
+            width={520}
+            onClose={() => setConfirm(null)}
+            footer={
+              <>
+                <button className="btn" onClick={() => setConfirm(null)}>
+                  {t("button.cancel")}
+                </button>
+                <button
+                  className="btn primary"
+                  onClick={() => {
+                    const action = confirm.run;
+                    setConfirm(null);
+                    action();
+                  }}
+                >
+                  {t("button.yes")}
+                </button>
+              </>
+            }
+          >
+            <p className="dialog-text">{confirm.body}</p>
+          </Modal>
+        )}
+      </Fade>
     </div>
   );
 }

@@ -14,6 +14,7 @@ import Breadcrumb from "../components/Breadcrumb";
 import ContextMenu, { type MenuItem } from "../components/ContextMenu";
 import LockerDialog from "../components/LockerDialog";
 import Modal from "../components/Modal";
+import Fade from "../components/Fade";
 import BusyOverlay from "../components/BusyOverlay";
 import PropertiesDialog from "../components/PropertiesDialog";
 import {
@@ -874,45 +875,53 @@ export default function ScanPage() {
         <span className="status-disk">{diskText}</span>
       </footer>
 
-      {menu && (
-        <ContextMenu
-          x={menu.x}
-          y={menu.y}
-          items={menuItems(menu.entry)}
-          onClose={() => setMenu(null)}
-        />
-      )}
+      <Fade show={Boolean(menu)}>
+        {menu && (
+          <ContextMenu
+            x={menu.x}
+            y={menu.y}
+            items={menuItems(menu.entry)}
+            onClose={() => setMenu(null)}
+          />
+        )}
+      </Fade>
 
-      {treeMenu && (
-        <ContextMenu
-          x={treeMenu.x}
-          y={treeMenu.y}
-          items={menuItems(treeMenu.entry)}
-          onClose={() => setTreeMenu(null)}
-        />
-      )}
+      <Fade show={Boolean(treeMenu)}>
+        {treeMenu && (
+          <ContextMenu
+            x={treeMenu.x}
+            y={treeMenu.y}
+            items={menuItems(treeMenu.entry)}
+            onClose={() => setTreeMenu(null)}
+          />
+        )}
+      </Fade>
 
-      {properties && (
-        <PropertiesDialog
-          entry={properties}
-          parentSize={parentSize}
-          onClose={() => setProperties(null)}
-        />
-      )}
+      <Fade show={Boolean(properties)}>
+        {properties && (
+          <PropertiesDialog
+            entry={properties}
+            parentSize={parentSize}
+            onClose={() => setProperties(null)}
+          />
+        )}
+      </Fade>
 
       <PathSyncDialog open={pathSyncOpen} onClose={() => setPathSyncOpen(false)} />
 
-      {moveTarget && (
-        <MovePathDialog
-          open
-          sources={moveTarget}
-          onClose={() => setMoveTarget(null)}
-          onDone={() => {
-            setMoveTarget(null);
-            if (current) void navigate(current.path);
-          }}
-        />
-      )}
+      <Fade show={Boolean(moveTarget)}>
+        {moveTarget && (
+          <MovePathDialog
+            open
+            sources={moveTarget}
+            onClose={() => setMoveTarget(null)}
+            onDone={() => {
+              setMoveTarget(null);
+              if (current) void navigate(current.path);
+            }}
+          />
+        )}
+      </Fade>
 
       <AiDialog
         key={aiSession.key}
@@ -926,81 +935,87 @@ export default function ScanPage() {
         }}
       />
 
-      {confirm && (
-        <Modal
-          title={t(confirm.permanent ? "dialog.delete.title" : "dialog.recycle.title")}
-          width={520}
-          onClose={() => !busy && setConfirm(null)}
-          footer={
-            <>
-              <button className="btn" disabled={busy} onClick={() => setConfirm(null)}>
-                {t("button.cancel")}
-              </button>
+      <Fade show={Boolean(confirm)}>
+        {confirm && (
+          <Modal
+            title={t(confirm.permanent ? "dialog.delete.title" : "dialog.recycle.title")}
+            width={520}
+            onClose={() => !busy && setConfirm(null)}
+            footer={
+              <>
+                <button className="btn" disabled={busy} onClick={() => setConfirm(null)}>
+                  {t("button.cancel")}
+                </button>
+                <button
+                  className={`btn ${confirm.permanent ? "danger" : "primary"}`}
+                  disabled={busy}
+                  onClick={() => void performDelete(confirm.paths, confirm.permanent)}
+                >
+                  {busy
+                    ? t(
+                        confirm.permanent
+                          ? "dialog.delete.progress"
+                          : "dialog.recycle.progress",
+                        { n: confirm.paths.length },
+                      )
+                    : t(confirm.permanent ? "dialog.delete.title" : "dialog.recycle.title")}
+                </button>
+              </>
+            }
+          >
+            <p className="dialog-text">{confirmBody}</p>
+            {!confirm.permanent && (
               <button
-                className={`btn ${confirm.permanent ? "danger" : "primary"}`}
+                className="btn danger-outline"
                 disabled={busy}
-                onClick={() => void performDelete(confirm.paths, confirm.permanent)}
-              >
-                {busy
-                  ? t(
-                      confirm.permanent
-                        ? "dialog.delete.progress"
-                        : "dialog.recycle.progress",
-                      { n: confirm.paths.length },
-                    )
-                  : t(confirm.permanent ? "dialog.delete.title" : "dialog.recycle.title")}
-              </button>
-            </>
-          }
-        >
-          <p className="dialog-text">{confirmBody}</p>
-          {!confirm.permanent && (
-            <button
-              className="btn danger-outline"
-              disabled={busy}
-              onClick={() => void performDelete(confirm.paths, true)}
-            >
-              {t("dialog.delete.title")}
-            </button>
-          )}
-        </Modal>
-      )}
-
-      {fallback && (
-        <Modal
-          title={t("dialog.recycle.fallback_title")}
-          width={560}
-          onClose={() => !busy && setFallback(null)}
-          footer={
-            <>
-              <button className="btn" disabled={busy} onClick={() => setFallback(null)}>
-                {t("button.cancel")}
-              </button>
-              <button
-                className="btn danger"
-                disabled={busy}
-                onClick={() => void performDelete(fallback.paths, true)}
+                onClick={() => void performDelete(confirm.paths, true)}
               >
                 {t("dialog.delete.title")}
               </button>
-            </>
-          }
-        >
-          <p className="dialog-text">
-            {t("dialog.recycle.fallback_body", { lines: fallback.lines.join("\n") })}
-          </p>
-        </Modal>
-      )}
-      {lockPrompt && (
-        <LockerDialog
-          title={t("op_guard.title")}
-          intro={t("op_guard.intro")}
-          procs={lockPrompt.procs}
-          busy={busy}
-          onCancel={() => !busy && setLockPrompt(null)}
-          onCloseAndContinue={() => void retryLockedDelete()}
-        />
-      )}
+            )}
+          </Modal>
+        )}
+      </Fade>
+
+      <Fade show={Boolean(fallback)}>
+        {fallback && (
+          <Modal
+            title={t("dialog.recycle.fallback_title")}
+            width={560}
+            onClose={() => !busy && setFallback(null)}
+            footer={
+              <>
+                <button className="btn" disabled={busy} onClick={() => setFallback(null)}>
+                  {t("button.cancel")}
+                </button>
+                <button
+                  className="btn danger"
+                  disabled={busy}
+                  onClick={() => void performDelete(fallback.paths, true)}
+                >
+                  {t("dialog.delete.title")}
+                </button>
+              </>
+            }
+          >
+            <p className="dialog-text">
+              {t("dialog.recycle.fallback_body", { lines: fallback.lines.join("\n") })}
+            </p>
+          </Modal>
+        )}
+      </Fade>
+      <Fade show={Boolean(lockPrompt)}>
+        {lockPrompt && (
+          <LockerDialog
+            title={t("op_guard.title")}
+            intro={t("op_guard.intro")}
+            procs={lockPrompt.procs}
+            busy={busy}
+            onCancel={() => !busy && setLockPrompt(null)}
+            onCloseAndContinue={() => void retryLockedDelete()}
+          />
+        )}
+      </Fade>
 
       <BusyOverlay open={busy} label={busyText ?? ""} />
     </div>

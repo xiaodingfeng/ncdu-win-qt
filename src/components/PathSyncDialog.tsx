@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "../context/I18nContext";
 import Modal from "./Modal";
+import Fade from "./Fade";
 import LockerDialog from "./LockerDialog";
 import AppMoveDialog from "./AppMoveDialog";
 import { formatSize } from "../lib/format";
@@ -268,14 +269,12 @@ export default function PathSyncDialog({ open: visible, onClose }: Props) {
     }
   };
 
-  if (!visible) return null;
-
   const percent =
     migration && migration.total > 0
       ? Math.min(100, Math.round((migration.copied / migration.total) * 100))
       : null;
 
-  return (
+  const dialog = (
     <Modal
       title={t("app_sync.title")}
       width={900}
@@ -290,7 +289,10 @@ export default function PathSyncDialog({ open: visible, onClose }: Props) {
         </>
       }
     >
-      {tab === "paths" && <p className="dialog-text muted">{t("app_sync.desc")}</p>}
+      {/* 两个 TAB 共用同一行描述，保证切换时下方内容不跳动 */}
+      <p className="dialog-text muted pathsync-desc">
+        {tab === "paths" ? t("app_sync.desc") : t("app_move.tip")}
+      </p>
 
       <div className="tab-strip pathtab-strip">
         <button
@@ -420,87 +422,95 @@ export default function PathSyncDialog({ open: visible, onClose }: Props) {
         </div>
       )}
 
-      {choice && (
-        <Modal
-          title={t("app_sync.move_dlg_title")}
-          width={560}
-          onClose={() => setChoice(null)}
-          footer={
-            <>
-              <button className="btn" onClick={() => setChoice(null)}>
-                {t("button.cancel")}
-              </button>
-              <button
-                className="btn"
-                onClick={() => {
-                  const pending = choice;
-                  setChoice(null);
-                  if (pending) void applyChange(pending.folder, pending.newPath, false);
-                }}
-              >
-                {t("app_sync.move_dlg_no")}
-              </button>
-              <button
-                className="btn primary"
-                onClick={() => {
-                  const pending = choice;
-                  setChoice(null);
-                  if (pending) void applyChange(pending.folder, pending.newPath, true);
-                }}
-              >
-                {t("app_sync.move_dlg_yes")}
-              </button>
-            </>
-          }
-        >
-          <p className="dialog-text">{t("app_sync.move_dlg_question")}</p>
-          <p className="dialog-text">{t("app_sync.move_dlg_new", { new: choice.newPath })}</p>
-          <p className="dialog-text muted">
-            {t("app_sync.move_dlg_old", { old: choice.oldPath })}
-          </p>
-          <p className="dialog-text muted">{t("app_sync.move_dlg_hint")}</p>
-        </Modal>
-      )}
+      <Fade show={Boolean(choice)}>
+        {choice && (
+          <Modal
+            title={t("app_sync.move_dlg_title")}
+            width={560}
+            onClose={() => setChoice(null)}
+            footer={
+              <>
+                <button className="btn" onClick={() => setChoice(null)}>
+                  {t("button.cancel")}
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => {
+                    const pending = choice;
+                    setChoice(null);
+                    if (pending) void applyChange(pending.folder, pending.newPath, false);
+                  }}
+                >
+                  {t("app_sync.move_dlg_no")}
+                </button>
+                <button
+                  className="btn primary"
+                  onClick={() => {
+                    const pending = choice;
+                    setChoice(null);
+                    if (pending) void applyChange(pending.folder, pending.newPath, true);
+                  }}
+                >
+                  {t("app_sync.move_dlg_yes")}
+                </button>
+              </>
+            }
+          >
+            <p className="dialog-text">{t("app_sync.move_dlg_question")}</p>
+            <p className="dialog-text">{t("app_sync.move_dlg_new", { new: choice.newPath })}</p>
+            <p className="dialog-text muted">
+              {t("app_sync.move_dlg_old", { old: choice.oldPath })}
+            </p>
+            <p className="dialog-text muted">{t("app_sync.move_dlg_hint")}</p>
+          </Modal>
+        )}
+      </Fade>
 
-      {batch && (
-        <Modal
-          title={t("app_sync.title")}
-          width={600}
-          onClose={() => setBatch(null)}
-          footer={
-            <>
-              <button className="btn" onClick={() => setBatch(null)}>
-                {t("button.cancel")}
-              </button>
-              <button className="btn" onClick={() => void runBatch(batch.root, false)}>
-                {t("app_sync.move_dlg_no")}
-              </button>
-              <button className="btn primary" onClick={() => void runBatch(batch.root, true)}>
-                {t("app_sync.move_dlg_yes")}
-              </button>
-            </>
-          }
-        >
-          <p className="dialog-text pre">{t("app_sync.batch_move_ask")}</p>
-          <p className="dialog-text">{batch.root}</p>
-        </Modal>
-      )}
+      <Fade show={Boolean(batch)}>
+        {batch && (
+          <Modal
+            title={t("app_sync.title")}
+            width={600}
+            onClose={() => setBatch(null)}
+            footer={
+              <>
+                <button className="btn" onClick={() => setBatch(null)}>
+                  {t("button.cancel")}
+                </button>
+                <button className="btn" onClick={() => void runBatch(batch.root, false)}>
+                  {t("app_sync.move_dlg_no")}
+                </button>
+                <button className="btn primary" onClick={() => void runBatch(batch.root, true)}>
+                  {t("app_sync.move_dlg_yes")}
+                </button>
+              </>
+            }
+          >
+            <p className="dialog-text pre">{t("app_sync.batch_move_ask")}</p>
+            <p className="dialog-text">{batch.root}</p>
+          </Modal>
+        )}
+      </Fade>
 
-      {lockPrompt && (
-        <LockerDialog
-          title={t("app_sync.title")}
-          intro={lockPrompt.intro}
-          procs={lockPrompt.procs}
-          busy={busy}
-          allowSkip={false}
-          closeText={t("app_sync.btn_close_retry")}
-          onCancel={() => {
-            setLockPrompt(null);
-            setError(t(lockPrompt.round === 0 ? "app_sync.move_partial" : "app_sync.retry_give_up"));
-          }}
-          onCloseAndContinue={() => void closeAndRetry()}
-        />
-      )}
+      <Fade show={Boolean(lockPrompt)}>
+        {lockPrompt && (
+          <LockerDialog
+            title={t("app_sync.title")}
+            intro={lockPrompt.intro}
+            procs={lockPrompt.procs}
+            busy={busy}
+            allowSkip={false}
+            closeText={t("app_sync.btn_close_retry")}
+            onCancel={() => {
+              setLockPrompt(null);
+              setError(t(lockPrompt.round === 0 ? "app_sync.move_partial" : "app_sync.retry_give_up"));
+            }}
+            onCloseAndContinue={() => void closeAndRetry()}
+          />
+        )}
+      </Fade>
     </Modal>
   );
+
+  return <Fade show={visible}>{dialog}</Fade>;
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "../context/I18nContext";
 import Modal from "./Modal";
+import Fade from "./Fade";
 import { renderMarkdown } from "../lib/markdown";
 import { aiCancel, aiChat, aiGetConfig, subscribeAi } from "../lib/ai";
 import type { ChatMessage } from "../types/ai";
@@ -140,103 +141,103 @@ export default function AiDialog({
     void navigator.clipboard.writeText(text);
   };
 
-  if (!open) return null;
-
   return (
-    <Modal
-      title={subject ? `${t("ai.analysis.title")} — ${subject}` : t("ai.analysis.title")}
-      width={860}
-      onClose={() => {
-        if (streaming) void aiCancel();
-        onClose();
-      }}
-      footer={
-        <>
-          <button className="btn" onClick={copy} disabled={turns.length === 0 && !buffer}>
-            {t("ai.analysis.copy")}
-          </button>
-          <div className="toolbar-spacer" />
-          {streaming && (
-            <button className="btn" onClick={() => void aiCancel()}>
-              {t("button.cancel")}
-            </button>
-          )}
-          <button
-            className="btn primary"
-            onClick={() => {
-              if (streaming) void aiCancel();
-              onClose();
-            }}
-          >
-            {t("button.close")}
-          </button>
-        </>
-      }
-    >
-      <div className="ai-dialog">
-        {configured === false ? (
-          <div className="ai-empty">
-            <p className="dialog-text">{t("ai.analysis.not_configured")}</p>
-            <button className="btn primary" onClick={onConfigure}>
-              {t("ai.analysis.configure")}
-            </button>
-          </div>
-        ) : (
+    <Fade show={open}>
+      <Modal
+        title={subject ? `${t("ai.analysis.title")} — ${subject}` : t("ai.analysis.title")}
+        width={860}
+        onClose={() => {
+          if (streaming) void aiCancel();
+          onClose();
+        }}
+        footer={
           <>
-            <div className="ai-chat" ref={viewRef}>
-              {turns.length === 0 && !streaming && !buffer && (
-                <div className="ai-placeholder">{t("ai.analysis.input_placeholder")}</div>
-              )}
-              {turns.map((turn, index) => (
-                <div className={`ai-turn ${turn.role}`} key={`${turn.role}-${index}`}>
-                  <div className="ai-role">
-                    {turn.role === "user" ? t("ai.analysis.you") : t("ai.analysis.assistant")}
-                  </div>
-                  {turn.role === "assistant" ? (
-                    <div
-                      className="ai-content ai-markdown"
-                      dangerouslySetInnerHTML={{ __html: renderMarkdown(turn.content) }}
-                    />
-                  ) : (
-                    <div className="ai-content">{turn.content}</div>
-                  )}
-                </div>
-              ))}
-              {streaming && (
-                <div className="ai-turn assistant">
-                  <div className="ai-role">{t("ai.analysis.assistant")}</div>
-                  {buffer ? (
-                    <div
-                      className="ai-content ai-markdown"
-                      dangerouslySetInnerHTML={{ __html: renderMarkdown(buffer) }}
-                    />
-                  ) : (
-                    <div className="ai-content muted">{t("ai.analysis.analyzing")}</div>
-                  )}
-                </div>
-              )}
-              {error && <div className="ai-error">{t("ai.analysis.failed", { error })}</div>}
-            </div>
-            <div className="ai-input-row">
-              <input
-                className="input"
-                value={input}
-                placeholder={t("ai.analysis.input_placeholder")}
-                onChange={(event) => setInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    send();
-                  }
-                }}
-              />
-              <button className="btn primary" disabled={streaming || !input.trim()} onClick={send}>
-                {t("ai.analysis.send")}
+            <button className="btn" onClick={copy} disabled={turns.length === 0 && !buffer}>
+              {t("ai.analysis.copy")}
+            </button>
+            <div className="toolbar-spacer" />
+            {streaming && (
+              <button className="btn" onClick={() => void aiCancel()}>
+                {t("button.cancel")}
+              </button>
+            )}
+            <button
+              className="btn primary"
+              onClick={() => {
+                if (streaming) void aiCancel();
+                onClose();
+              }}
+            >
+              {t("button.close")}
+            </button>
+          </>
+        }
+      >
+        <div className="ai-dialog">
+          {configured === false ? (
+            <div className="ai-empty">
+              <p className="dialog-text">{t("ai.analysis.not_configured")}</p>
+              <button className="btn primary" onClick={onConfigure}>
+                {t("ai.analysis.configure")}
               </button>
             </div>
-          </>
-        )}
-      </div>
-    </Modal>
+          ) : (
+            <>
+              <div className="ai-chat" ref={viewRef}>
+                {turns.length === 0 && !streaming && !buffer && (
+                  <div className="ai-placeholder">{t("ai.analysis.input_placeholder")}</div>
+                )}
+                {turns.map((turn, index) => (
+                  <div className={`ai-turn ${turn.role}`} key={`${turn.role}-${index}`}>
+                    <div className="ai-role">
+                      {turn.role === "user" ? t("ai.analysis.you") : t("ai.analysis.assistant")}
+                    </div>
+                    {turn.role === "assistant" ? (
+                      <div
+                        className="ai-content ai-markdown"
+                        dangerouslySetInnerHTML={{ __html: renderMarkdown(turn.content) }}
+                      />
+                    ) : (
+                      <div className="ai-content">{turn.content}</div>
+                    )}
+                  </div>
+                ))}
+                {streaming && (
+                  <div className="ai-turn assistant">
+                    <div className="ai-role">{t("ai.analysis.assistant")}</div>
+                    {buffer ? (
+                      <div
+                        className="ai-content ai-markdown"
+                        dangerouslySetInnerHTML={{ __html: renderMarkdown(buffer) }}
+                      />
+                    ) : (
+                      <div className="ai-content muted">{t("ai.analysis.analyzing")}</div>
+                    )}
+                  </div>
+                )}
+                {error && <div className="ai-error">{t("ai.analysis.failed", { error })}</div>}
+              </div>
+              <div className="ai-input-row">
+                <input
+                  className="input"
+                  value={input}
+                  placeholder={t("ai.analysis.input_placeholder")}
+                  onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      send();
+                    }
+                  }}
+                />
+                <button className="btn primary" disabled={streaming || !input.trim()} onClick={send}>
+                  {t("ai.analysis.send")}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </Modal>
+    </Fade>
   );
 }

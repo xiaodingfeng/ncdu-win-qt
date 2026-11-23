@@ -574,6 +574,7 @@
   "cleanup.col_type": "类型",
   "cleanup.filter_type": "类型:",
   "cleanup.filter_all_types": "全部类型",
+  "cleanup.filter_empty": "当前类型筛选下没有匹配的文件",
   "cleanup.dup_group_label": "{count} 个重复文件",
   "cleanup.dup_phase_size": "按大小分组重复文件…",
   "cleanup.dup_phase_partial": "计算重复文件头部哈希…",

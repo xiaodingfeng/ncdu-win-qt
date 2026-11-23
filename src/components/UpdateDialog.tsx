@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useI18n } from "../context/I18nContext";
 import { useAppConfig } from "../context/AppConfigContext";
 import Modal from "./Modal";
+import Fade from "./Fade";
 import { checkUpdate, downloadUpdate, isPortable, subscribeUpdate } from "../lib/misc";
 import type { UpdateCheck } from "../types/misc";
 import { openPath } from "../lib/ops";
@@ -76,59 +77,59 @@ export default function UpdateDialog({ open, onClose }: Props) {
     }
   };
 
-  if (!open) return null;
-
   const title =
     result?.hasUpdate && !checking ? t("update.new_title") : t("update.checking");
 
   return (
-    <Modal
-      title={title}
-      width={560}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={percent !== null && !installing}>
-            {t("button.close")}
-          </button>
-          <div className="toolbar-spacer" />
-          {result?.hasUpdate && percent === null && !installing && !portable && (
-            <button className="btn primary" onClick={() => void startDownload()}>
-              {t("update.download_install")}
+    <Fade show={open}>
+      <Modal
+        title={title}
+        width={560}
+        onClose={onClose}
+        footer={
+          <>
+            <button className="btn" onClick={onClose} disabled={percent !== null && !installing}>
+              {t("button.close")}
             </button>
+            <div className="toolbar-spacer" />
+            {result?.hasUpdate && percent === null && !installing && !portable && (
+              <button className="btn primary" onClick={() => void startDownload()}>
+                {t("update.download_install")}
+              </button>
+            )}
+          </>
+        }
+      >
+        <div className="update-dialog">
+          {checking && <p className="dialog-text">{t("update.checking")}</p>}
+          {!checking && error && (
+            <>
+              <p className="dialog-text">{t("update.check_failed")}</p>
+              <p className="dialog-text">{t("update.check_failed_body", { error })}</p>
+            </>
           )}
-        </>
-      }
-    >
-      <div className="update-dialog">
-        {checking && <p className="dialog-text">{t("update.checking")}</p>}
-        {!checking && error && (
-          <>
-            <p className="dialog-text">{t("update.check_failed")}</p>
-            <p className="dialog-text">{t("update.check_failed_body", { error })}</p>
-          </>
-        )}
-        {!checking && !error && result && !result.hasUpdate && (
-          <p className="dialog-text">{t("update.current_body", { version: result.local, name: config.name })}</p>
-        )}
-        {!checking && result?.hasUpdate && (
-          <>
-            <p className="dialog-text">{t("update.new_body", { version: result.remote, local: result.local, name: config.name })}</p>
-            {portable && <p className="dialog-text muted">{t("update.portable_hint")}</p>}
-            <button className="about-link" onClick={() => void openPath(config.downloadPage)}>
-              {t("update.download_url", { url: config.downloadPage })}
-            </button>
-          </>
-        )}
-        {percent !== null && (
-          <div className="update-progress">
-            <span>{installing ? t("update.installing") : t("update.downloading", { percent })}</span>
-            <div className="progress-track">
-              <span style={{ width: `${percent}%` }} />
+          {!checking && !error && result && !result.hasUpdate && (
+            <p className="dialog-text">{t("update.current_body", { version: result.local, name: config.name })}</p>
+          )}
+          {!checking && result?.hasUpdate && (
+            <>
+              <p className="dialog-text">{t("update.new_body", { version: result.remote, local: result.local, name: config.name })}</p>
+              {portable && <p className="dialog-text muted">{t("update.portable_hint")}</p>}
+              <button className="about-link" onClick={() => void openPath(config.downloadPage)}>
+                {t("update.download_url", { url: config.downloadPage })}
+              </button>
+            </>
+          )}
+          {percent !== null && (
+            <div className="update-progress">
+              <span>{installing ? t("update.installing") : t("update.downloading", { percent })}</span>
+              <div className="progress-track">
+                <span style={{ width: `${percent}%` }} />
+              </div>
             </div>
-          </div>
-        )}
-      </div>
-    </Modal>
+          )}
+        </div>
+      </Modal>
+    </Fade>
   );
 }

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "../context/I18nContext";
 
 const iconBase = {
@@ -60,11 +60,29 @@ export default function Modal({
 }: ModalProps) {
   const { t } = useI18n();
   const [maximized, setMaximized] = useState(false);
+  const [animating, setAnimating] = useState(false);
+  const animationTimer = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (animationTimer.current !== null) window.clearTimeout(animationTimer.current);
+    },
+    [],
+  );
+
+  // Smooth only the maximize/restore toggle; dragging the native resize handle
+  // must stay 1:1 with the pointer.
+  const toggleMaximize = () => {
+    setAnimating(true);
+    setMaximized((value) => !value);
+    if (animationTimer.current !== null) window.clearTimeout(animationTimer.current);
+    animationTimer.current = window.setTimeout(() => setAnimating(false), 220);
+  };
 
   return (
     <div className="modal-overlay" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div
-        className={`modal ${resizable ? "resizable" : ""} ${maximized ? "maximized" : ""} ${className}`}
+        className={`modal ${resizable ? "resizable" : ""} ${maximized ? "maximized" : ""} ${animating ? "animating" : ""} ${className}`}
         style={
           maximized
             ? { width: "calc(100vw - 32px)", height: "calc(100vh - 48px)" }
@@ -82,7 +100,7 @@ export default function Modal({
             {resizable && (
               <button
                 className="icon-btn"
-                onClick={() => setMaximized((value) => !value)}
+                onClick={toggleMaximize}
                 title={t(maximized ? "modal.restore" : "modal.maximize")}
                 aria-label={t(maximized ? "modal.restore" : "modal.maximize")}
               >

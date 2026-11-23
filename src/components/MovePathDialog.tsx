@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "../context/I18nContext";
 import { useSettings } from "../context/SettingsContext";
 import Modal from "./Modal";
+import Fade from "./Fade";
 import LockerDialog from "./LockerDialog";
 import { movePath, subscribeAppMove } from "../lib/appmove";
 import { closeLockingProcesses, lockedProcesses } from "../lib/locker";
@@ -135,10 +136,8 @@ export default function MovePathDialog({ open: visible, sources, onClose, onDone
     await runMove();
   };
 
-  if (!visible) return null;
-
   return (
-    <>
+    <Fade show={visible}>
       <Modal
         title={t("move.title")}
         width={580}
@@ -226,22 +225,24 @@ export default function MovePathDialog({ open: visible, sources, onClose, onDone
         </div>
       </Modal>
 
-      {lockPrompt && (
-        <LockerDialog
-          title={t("move.title")}
-          intro={t("app_move.locked_intro", {
-            name: sources[0] ?? "",
-          })}
-          procs={lockPrompt}
-          allowSkip
-          onCancel={() => setLockPrompt(null)}
-          onCloseAndContinue={() => void continueAfterClose()}
-          onSkip={() => {
-            setLockPrompt(null);
-            void runMove();
-          }}
-        />
-      )}
-    </>
+      <Fade show={Boolean(lockPrompt)}>
+        {lockPrompt && (
+          <LockerDialog
+            title={t("move.title")}
+            intro={t("app_move.locked_intro", {
+              name: sources[0] ?? "",
+            })}
+            procs={lockPrompt}
+            allowSkip
+            onCancel={() => setLockPrompt(null)}
+            onCloseAndContinue={() => void continueAfterClose()}
+            onSkip={() => {
+              setLockPrompt(null);
+              void runMove();
+            }}
+          />
+        )}
+      </Fade>
+    </Fade>
   );
 }

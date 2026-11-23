@@ -5,13 +5,13 @@
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB.svg)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61DAFB.svg)](https://react.dev)
 [![Platform: Windows](https://img.shields.io/badge/platform-windows-lightgrey.svg)](#requirements)
-[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)](#)
 
 **[English](README_EN.md)** | **[中文](README.md)**
 
 > **Branch notice**
 >
-> - `master` (default branch): the **latest release**, fully rebuilt from C++/Qt into **Rust + Tauri 2**, currently 2.0.0 — this is the branch to download and use.
+> - `master` (default branch): the **latest release**, fully rebuilt from C++/Qt into **Rust + Tauri 2**, currently 2.0.1 — this is the branch to download and use.
 > - [`qt`](../../tree/qt): the legacy **C++17 + Qt 6** implementation, version 1.1.0, kept for archival only and no longer developed.
 
 > A modern, light-themed disk usage analyzer for Windows, inspired by Linux [`ncdu`](https://dev.yorhel.nl/ncdu).
@@ -75,7 +75,7 @@ NcduWin is a native Windows desktop application: Rust handles scanning, cleanup 
 ### Option A — Download the release
 
 1. Go to the [Releases](../../releases) page.
-2. Download `NcduWin_2.0.0_x64-setup.exe` or the portable `NcduWin_2.0.0_x64-portable.zip`.
+2. Download `NcduWin_2.0.1_x64-setup.exe` or the portable `NcduWin_2.0.1_x64-portable.zip`.
 3. Run the installer and follow the prompts, or unzip the portable package and run `NcduWin.exe` — no installation required.
 
 ### Requirements
@@ -102,8 +102,8 @@ npm run tauri build    # build installer and executable
 
 You can also double-click `package.bat` in the repository root to package everything in one step (installs dependencies, builds the frontend, compiles Rust, produces the installer and the portable zip). Outputs:
 
-- Installer: `src-tauri/target/release/bundle/nsis/NcduWin_2.0.0_x64-setup.exe`
-- Portable: `src-tauri/target/release/bundle/portable/NcduWin_2.0.0_x64-portable.zip`
+- Installer: `src-tauri/target/release/bundle/nsis/NcduWin_2.0.1_x64-setup.exe`
+- Portable: `src-tauri/target/release/bundle/portable/NcduWin_2.0.1_x64-portable.zip`
 
 ### Version and release configuration
 
@@ -145,7 +145,6 @@ ncdu-win-qt/
 │   │   └── settings.rs / config.rs / legacy.rs / misc.rs
 │   ├── tauri.conf.json
 │   ├── app-config.json             # Release config (version / download / update / AI)
-│   ├── installer-hooks.nsh         # NSIS pre-install hook (removes the legacy Qt app)
 │   ├── capabilities/               # Tauri permissions
 │   ├── icons/                      # Application icons
 │   └── resources/                  # "Do not delete" marker for move targets

@@ -5,13 +5,13 @@
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB.svg)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61DAFB.svg)](https://react.dev)
 [![Platform: Windows](https://img.shields.io/badge/platform-windows-lightgrey.svg)](#运行环境)
-[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)](#)
 
 **[English](README_EN.md)** | **[中文](README.md)**
 
 > **分支说明**
 >
-> - `master`（默认分支）：**最新版本**，由 C++/Qt 全面重构为 **Rust + Tauri 2**，当前版本 2.0.0，推荐下载使用本分支。
+> - `master`（默认分支）：**最新版本**，由 C++/Qt 全面重构为 **Rust + Tauri 2**，当前版本 2.0.1，推荐下载使用本分支。
 > - [`qt`](../../tree/qt)：旧版本，**C++17 + Qt 6** 实现，版本 1.1.0，仅作历史存档，不再新增功能。
 
 > 一款现代、浅色主题的 Windows 磁盘使用分析器，灵感来自 Linux 的 [`ncdu`](https://dev.yorhel.nl/ncdu)。
@@ -75,7 +75,7 @@ NcduWin 是一个原生 Windows 桌面应用：Rust 负责扫描、清理、迁�
 ### 选项 A — 下载发布版本
 
 1. 前往 [Releases](../../releases) 页面。
-2. 下载安装包 `NcduWin_2.0.0_x64-setup.exe`，或便携包 `NcduWin_2.0.0_x64-portable.zip`。
+2. 下载安装包 `NcduWin_2.0.1_x64-setup.exe`，或便携包 `NcduWin_2.0.1_x64-portable.zip`。
 3. 安装包按提示完成安装；便携包解压到任意目录后直接运行 `NcduWin.exe`，无需安装。
 
 ### 运行环境
@@ -102,8 +102,8 @@ npm run tauri build    # 生成安装包与可执行文件
 
 也可以直接双击根目录的 `package.bat` 一键打包（自动安装依赖、构建前端、编译 Rust、生成安装包与便携包），产物位于：
 
-- 安装包：`src-tauri/target/release/bundle/nsis/NcduWin_2.0.0_x64-setup.exe`
-- 便携包：`src-tauri/target/release/bundle/portable/NcduWin_2.0.0_x64-portable.zip`
+- 安装包：`src-tauri/target/release/bundle/nsis/NcduWin_2.0.1_x64-setup.exe`
+- 便携包：`src-tauri/target/release/bundle/portable/NcduWin_2.0.1_x64-portable.zip`
 
 ### 版本与发布配置
 
@@ -145,7 +145,6 @@ ncdu-win-qt/
 │   │   └── settings.rs / config.rs / legacy.rs / misc.rs
 │   ├── tauri.conf.json
 │   ├── app-config.json             # 发布配置（版本 / 下载 / 更新 / AI 地址）
-│   ├── installer-hooks.nsh         # NSIS 安装钩子（清理旧版 Qt 应用）
 │   ├── capabilities/               # Tauri 权限配置
 │   ├── icons/                      # 应用图标
 │   └── resources/                  # 迁移目标「请勿删除」标记图标

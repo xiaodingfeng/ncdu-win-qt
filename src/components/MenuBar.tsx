@@ -3,6 +3,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useI18n } from "../context/I18nContext";
 import { useSettings } from "../context/SettingsContext";
 import { useAppConfig } from "../context/AppConfigContext";
+import Fade from "./Fade";
+import Select from "./ui/Select";
 import { openPath } from "../lib/ops";
 
 const THEME_OPTIONS = ["system", "light", "dark", "custom"] as const;
@@ -105,29 +107,31 @@ export default function MenuBar({
           >
             {menu.label}
           </button>
-          {active === menu.id && (
-            <>
-              <div className="menubar-overlay" onMouseDown={() => setActive(null)} />
-              <div className="menu-dropdown">
-                {menu.items.map((item, index) =>
-                  item.separator ? (
-                    <div className="menu-separator" key={`sep-${index}`} />
-                  ) : (
-                    <button
-                      key={item.label}
-                      className="menu-entry"
-                      onClick={() => {
-                        setActive(null);
-                        item.action?.();
-                      }}
-                    >
-                      {item.label}
-                    </button>
-                  ),
-                )}
-              </div>
-            </>
-          )}
+          <Fade show={active === menu.id}>
+            {active === menu.id && (
+              <>
+                <div className="menubar-overlay" onMouseDown={() => setActive(null)} />
+                <div className="menu-dropdown">
+                  {menu.items.map((item, index) =>
+                    item.separator ? (
+                      <div className="menu-separator" key={`sep-${index}`} />
+                    ) : (
+                      <button
+                        key={item.label}
+                        className="menu-entry"
+                        onClick={() => {
+                          setActive(null);
+                          item.action?.();
+                        }}
+                      >
+                        {item.label}
+                      </button>
+                    ),
+                  )}
+                </div>
+              </>
+            )}
+          </Fade>
         </div>
       ))}
       {settings && (
@@ -142,41 +146,38 @@ export default function MenuBar({
               {t(`theme.${settings.theme}`)}
               <span className="menubar-caret">▾</span>
             </button>
-            {themeOpen && (
-              <>
-                <div className="menubar-overlay" onMouseDown={() => setThemeOpen(false)} />
-                <div className="menu-dropdown theme-dropdown">
-                  {THEME_OPTIONS.map((mode) => (
-                    <button
-                      key={mode}
-                      className={`menu-entry ${settings.theme === mode ? "active" : ""}`}
-                      onClick={() => {
-                        setThemeOpen(false);
-                        update({ theme: mode });
-                        if (mode === "custom") onThemeCustomize();
-                      }}
-                    >
-                      {t(`theme.${mode}`)}
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
+            <Fade show={themeOpen}>
+              {themeOpen && (
+                <>
+                  <div className="menubar-overlay" onMouseDown={() => setThemeOpen(false)} />
+                  <div className="menu-dropdown theme-dropdown">
+                    {THEME_OPTIONS.map((mode) => (
+                      <button
+                        key={mode}
+                        className={`menu-entry ${settings.theme === mode ? "active" : ""}`}
+                        onClick={() => {
+                          setThemeOpen(false);
+                          update({ theme: mode });
+                          if (mode === "custom") onThemeCustomize();
+                        }}
+                      >
+                        {t(`theme.${mode}`)}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </Fade>
           </div>
-          <select
-            className="select"
+          <Select
             value={settings.language}
-            aria-label={t("menu.language")}
-            onChange={(event) =>
-              update({ language: event.target.value as (typeof LANGUAGE_OPTIONS)[number] })
-            }
-          >
-            {LANGUAGE_OPTIONS.map((code) => (
-              <option key={code} value={code}>
-                {code === "zh" ? "简体中文" : "English"}
-              </option>
-            ))}
-          </select>
+            ariaLabel={t("menu.language")}
+            options={LANGUAGE_OPTIONS.map((code) => ({
+              value: code,
+              label: code === "zh" ? "简体中文" : "English",
+            }))}
+            onChange={(value) => update({ language: value as (typeof LANGUAGE_OPTIONS)[number] })}
+          />
         </div>
       )}
     </nav>
