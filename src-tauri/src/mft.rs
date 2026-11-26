@@ -11,8 +11,8 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, GENERIC_READ, HANDLE, ERROR_HANDLE_EOF,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, SetFilePointerEx, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, GetVolumeInformationW, ReadFile, SetFilePointerEx, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
@@ -23,6 +23,7 @@ const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const MAX_USN_RECORDS: u64 = 5_000_000;
 const BUFFER_SIZE: usize = 1024 * 1024;
+const ATTRIBUTE_TYPE_STANDARD_INFORMATION: u32 = 0x10;
 const ATTRIBUTE_TYPE_DATA: u32 = 0x80;
 const ATTRIBUTE_TYPE_END: u32 = 0xFFFF_FFFF;
 
@@ -38,6 +39,7 @@ const fn ctl_code(device: u32, function: u32, method: u32, access: u32) -> u32 {
 const FSCTL_GET_NTFS_VOLUME_DATA: u32 = ctl_code(FILE_DEVICE_FILE_SYSTEM, 25, METHOD_BUFFERED, 0);
 const FSCTL_QUERY_USN_JOURNAL: u32 = ctl_code(FILE_DEVICE_FILE_SYSTEM, 61, METHOD_BUFFERED, 0);
 const FSCTL_ENUM_USN_DATA: u32 = ctl_code(FILE_DEVICE_FILE_SYSTEM, 44, METHOD_NEITHER, FILE_ANY_ACCESS);
+const FSCTL_READ_USN_JOURNAL: u32 = ctl_code(FILE_DEVICE_FILE_SYSTEM, 46, METHOD_NEITHER, FILE_ANY_ACCESS);
 
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
@@ -90,8 +92,8 @@ pub(crate) enum MftError {
     Failed(String),
 }
 
-struct Volume {
-    handle: HANDLE,
+pub(crate) struct Volume {
+    pub(crate) handle: HANDLE,
 }
 
 impl Drop for Volume {
@@ -122,7 +124,7 @@ fn is_drive_root(path: &Path) -> bool {
     trimmed.len() == 2 && trimmed.as_bytes()[1] == b':'
 }
 
-fn open_volume(letter: char) -> Result<Volume, MftError> {
+pub(crate) fn open_volume(letter: char) -> Result<Volume, MftError> {
     let device = format!(r"\\.\{}:", letter);
     let name = wide(&device);
     let handle = unsafe {
@@ -145,7 +147,7 @@ fn open_volume(letter: char) -> Result<Volume, MftError> {
     Ok(Volume { handle })
 }
 
-unsafe fn ioctl(
+pub(crate) unsafe fn ioctl(
     handle: HANDLE,
     code: u32,
     input: *const core::ffi::c_void,
@@ -169,6 +171,36 @@ unsafe fn ioctl(
     } else {
         Ok(returned)
     }
+}
+
+/// True when the volume is NTFS, determined without opening the raw device so
+/// a non-elevated process can still pick the directory-walk fallback.
+pub(crate) fn is_ntfs_volume(path: &Path) -> bool {
+    let Some(letter) = drive_letter(path) else {
+        return false;
+    };
+    let name = wide(&format!("{letter}:\\"));
+    let mut file_system = [0u16; 32];
+    let ok = unsafe {
+        GetVolumeInformationW(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            file_system.as_mut_ptr(),
+            file_system.len() as u32,
+        )
+    };
+    if ok == 0 {
+        return false;
+    }
+    let length = file_system
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(file_system.len());
+    String::from_utf16_lossy(&file_system[..length]).eq_ignore_ascii_case("NTFS")
 }
 
 /// True when the volume is NTFS and readable by this process.
@@ -581,31 +613,25 @@ fn aggregate_root(node: &mut RawNode) {
     node.dir_count = dirs;
 }
 
-pub(crate) fn scan_volume(
-    root: &Path,
+fn filetime_to_unix(ft: i64) -> i64 {
+    if ft <= 0 {
+        0
+    } else {
+        ft / 10_000_000 - 11_644_473_600
+    }
+}
+
+/// Reads every live `$MFT` record once and returns `(size, modified)` per file
+/// reference. The index uses the same pass so it never has to `stat` files.
+///
+/// The third tuple element reports whether low memory cut the read short.
+fn read_mft_records(
+    handle: HANDLE,
+    volume_data: &NtfsVolumeData,
     cancel: &AtomicBool,
-    skip_heavy: bool,
     low_memory: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(MftPhase, u64),
-) -> Result<RawNode, MftError> {
-    let letter = drive_letter(root).ok_or_else(|| {
-        MftError::Failed("the path is not on a local drive".to_string())
-    })?;
-    let volume = open_volume(letter)?;
-
-    let mut volume_data: NtfsVolumeData = Default::default();
-    unsafe {
-        ioctl(
-            volume.handle,
-            FSCTL_GET_NTFS_VOLUME_DATA,
-            std::ptr::null(),
-            0,
-            &mut volume_data as *mut _ as *mut core::ffi::c_void,
-            std::mem::size_of::<NtfsVolumeData>() as u32,
-        )
-    }
-    .map_err(|err| MftError::Failed(format!("FSCTL_GET_NTFS_VOLUME_DATA failed (error {err})")))?;
-
+) -> Result<(HashMap<u64, (i64, i64)>, u64, bool), MftError> {
     let bytes_per_cluster = volume_data.bytes_per_cluster;
     let bytes_per_sector = volume_data.bytes_per_sector.max(512);
     let record_size = if volume_data.bytes_per_file_record_segment == 0 {
@@ -613,35 +639,152 @@ pub(crate) fn scan_volume(
     } else {
         volume_data.bytes_per_file_record_segment as usize
     };
-    if bytes_per_cluster == 0 || volume_data.mft_start_lcn < 0 {
+    let mut records: HashMap<u64, (i64, i64)> = HashMap::new();
+    let mut record0 = vec![0u8; record_size];
+    unsafe {
+        read_at(
+            handle,
+            volume_data.mft_start_lcn * bytes_per_cluster as i64,
+            &mut record0,
+        )
+    }
+    .map_err(|err| MftError::Failed(format!("cannot read $MFT record 0: {err}")))?;
+    if !apply_fixup(&mut record0, bytes_per_sector) {
         return Err(MftError::Failed(
-            "invalid NTFS volume data (cluster size or MFT start)".to_string(),
+            "$MFT record 0 fixup failed (unsupported sector size?)".to_string(),
+        ));
+    }
+    if &record0[0..4] != b"FILE" {
+        return Err(MftError::Failed("$MFT record 0 magic mismatch".to_string()));
+    }
+    let first_attribute = u16_at(&record0, 20).unwrap_or(0) as usize;
+    let mut position = first_attribute;
+    let mut runs = Vec::new();
+    while position + 16 <= record0.len() {
+        let Some(attribute_type) = u32_at(&record0, position) else {
+            break;
+        };
+        let Some(length) = u32_at(&record0, position + 4).map(|value| value as usize) else {
+            break;
+        };
+        if attribute_type == ATTRIBUTE_TYPE_END || length == 0 || position + length > record0.len() {
+            break;
+        }
+        let name_length = record0[position + 9];
+        let non_resident = record0[position + 8] != 0;
+        if attribute_type == ATTRIBUTE_TYPE_DATA && name_length == 0 && non_resident {
+            let run_offset = u16_at(&record0, position + 32).unwrap_or(0) as usize;
+            runs = parse_data_runs(&record0[position + run_offset..position + length]);
+            break;
+        }
+        position += length;
+    }
+    if runs.is_empty() {
+        return Err(MftError::Failed(
+            "cannot parse $MFT data runs from record 0".to_string(),
         ));
     }
 
-    let mut journal: UsnJournalData = Default::default();
-    unsafe {
-        ioctl(
-            volume.handle,
-            FSCTL_QUERY_USN_JOURNAL,
-            std::ptr::null(),
-            0,
-            &mut journal as *mut _ as *mut core::ffi::c_void,
-            std::mem::size_of::<UsnJournalData>() as u32,
-        )
+    let mut chunk = vec![0u8; BUFFER_SIZE];
+    let mut record_number = 0u64;
+    let mut truncated = false;
+    'runs: for (start_cluster, cluster_count) in runs {
+        let run_start = start_cluster * bytes_per_cluster as i64;
+        let run_length = cluster_count * bytes_per_cluster as i64;
+        let mut offset = 0i64;
+        while offset < run_length {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(MftError::Cancelled);
+            }
+            if low_memory() {
+                truncated = true;
+                break 'runs;
+            }
+            let to_read = ((run_length - offset) as usize).min(chunk.len());
+            let buffer = &mut chunk[..to_read];
+            if let Err(err) = unsafe { read_at(handle, run_start + offset, buffer) } {
+                log::warn!("[mft] {err}");
+                break 'runs;
+            }
+            let count = to_read / record_size;
+            for index in 0..count {
+                let record = &mut buffer[index * record_size..(index + 1) * record_size];
+                record_number += 1;
+                if record_number % 10_000 == 0 {
+                    progress(MftPhase::ReadingMft, record_number);
+                }
+                if &record[0..4] != b"FILE" {
+                    continue;
+                }
+                let flags = u16_at(record, 22).unwrap_or(0);
+                if flags & 0x0001 == 0 {
+                    continue;
+                }
+                let base_ref = u64_at(record, 32).unwrap_or(0) & 0x0000_FFFF_FFFF_FFFF;
+                let file_ref = if base_ref != 0 { base_ref } else { record_number };
+                if !apply_fixup(record, bytes_per_sector) {
+                    continue;
+                }
+                let mut size_value = 0i64;
+                let mut mtime_value = 0i64;
+                let first_attribute = u16_at(record, 20).unwrap_or(0) as usize;
+                let mut position = first_attribute;
+                while position + 16 <= record.len() {
+                    let Some(attribute_type) = u32_at(record, position) else {
+                        break;
+                    };
+                    let Some(length) = u32_at(record, position + 4).map(|value| value as usize) else {
+                        break;
+                    };
+                    if attribute_type == ATTRIBUTE_TYPE_END
+                        || length == 0
+                        || position + length > record.len()
+                    {
+                        break;
+                    }
+                    let name_length = record[position + 9];
+                    let non_resident = record[position + 8] != 0;
+                    if attribute_type == ATTRIBUTE_TYPE_STANDARD_INFORMATION && !non_resident {
+                        let content = u16_at(record, position + 20).unwrap_or(0) as usize;
+                        if let Some(ft) = u64_at(record, position + content + 8) {
+                            mtime_value = filetime_to_unix(ft as i64);
+                        }
+                    } else if attribute_type == ATTRIBUTE_TYPE_DATA && name_length == 0 {
+                        size_value = if non_resident {
+                            i64_at(record, position + 48).unwrap_or(0)
+                        } else {
+                            u32_at(record, position + 16).unwrap_or(0) as i64
+                        };
+                    }
+                    position += length;
+                }
+                records
+                    .entry(file_ref)
+                    .or_insert((size_value.max(0), mtime_value));
+            }
+            offset += to_read as i64;
+        }
     }
-    .map_err(|err| {
-        MftError::Failed(format!("FSCTL_QUERY_USN_JOURNAL failed (error {err})"))
-    })?;
+    progress(MftPhase::ReadingMft, record_number);
+    Ok((records, record_number, truncated))
+}
 
+/// Enumerates the USN journal once and returns every named record.
+fn enumerate_volume(
+    handle: HANDLE,
+    next_usn: i64,
+    cancel: &AtomicBool,
+    low_memory: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(MftPhase, u64),
+) -> Result<(Vec<UsnEntry>, bool), MftError> {
     progress(MftPhase::Enumerating, 0);
     let mut enum_data = MftEnumData {
         start_file_reference_number: 0,
         low_usn: 0,
-        high_usn: journal.next_usn,
+        high_usn: next_usn,
     };
     let mut buffer = vec![0u8; BUFFER_SIZE];
-    let mut entries: Vec<MftEntry> = Vec::new();
+    let mut entries: Vec<UsnEntry> = Vec::new();
     let mut total_records = 0u64;
     let mut low_memory_seen = false;
 
@@ -655,7 +798,7 @@ pub(crate) fn scan_volume(
         }
         let returned = unsafe {
             ioctl(
-                volume.handle,
+                handle,
                 FSCTL_ENUM_USN_DATA,
                 &enum_data as *const _ as *const core::ffi::c_void,
                 std::mem::size_of::<MftEnumData>() as u32,
@@ -688,13 +831,7 @@ pub(crate) fn scan_volume(
             if total_records > MAX_USN_RECORDS {
                 break;
             }
-            entries.push(MftEntry {
-                file_ref: entry.file_ref,
-                parent_ref: entry.parent_ref,
-                skipped: skip_name(&entry.name, skip_heavy),
-                name: entry.name,
-                attributes: entry.attributes,
-            });
+            entries.push(entry);
             if total_records % 100_000 == 0 {
                 progress(MftPhase::Enumerating, total_records);
             }
@@ -708,126 +845,279 @@ pub(crate) fn scan_volume(
         }
     }
     progress(MftPhase::Enumerating, total_records);
+    Ok((entries, low_memory_seen))
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct JournalSnapshot {
+    pub(crate) journal_id: u64,
+    pub(crate) next_usn: i64,
+    pub(crate) lowest_valid_usn: i64,
+}
+
+pub(crate) fn query_journal(volume: &Volume) -> Result<JournalSnapshot, MftError> {
+    let mut journal: UsnJournalData = Default::default();
+    unsafe {
+        ioctl(
+            volume.handle,
+            FSCTL_QUERY_USN_JOURNAL,
+            std::ptr::null(),
+            0,
+            &mut journal as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<UsnJournalData>() as u32,
+        )
+    }
+    .map_err(|err| MftError::Failed(format!("FSCTL_QUERY_USN_JOURNAL failed (error {err})")))?;
+    Ok(JournalSnapshot {
+        journal_id: journal.usn_journal_id,
+        next_usn: journal.next_usn,
+        lowest_valid_usn: journal.lowest_valid_usn,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UsnChange {
+    pub(crate) file_ref: u64,
+    pub(crate) parent_ref: u64,
+    pub(crate) name: String,
+    pub(crate) attributes: u32,
+    pub(crate) reason: u32,
+}
+
+fn parse_usn_change(data: &[u8], offset: usize, end: usize) -> Option<(UsnChange, usize)> {
+    if offset + 60 > end {
+        return None;
+    }
+    let record_length = u32_at(data, offset)? as usize;
+    if record_length < 60 || offset + record_length > end {
+        return None;
+    }
+    let file_ref = u64_at(data, offset + 8)? & 0x0000_FFFF_FFFF_FFFF;
+    let parent_ref = u64_at(data, offset + 16)? & 0x0000_FFFF_FFFF_FFFF;
+    let reason = u32_at(data, offset + 40)?;
+    let attributes = u32_at(data, offset + 52)?;
+    let name_length = u16_at(data, offset + 56)? as usize;
+    let name_offset = u16_at(data, offset + 58)? as usize;
+    let name_start = offset + name_offset;
+    let name_end = name_start + name_length;
+    let name = if name_end <= offset + record_length && name_end <= data.len() {
+        let units: Vec<u16> = data[name_start..name_end]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::new()
+    };
+    Some((
+        UsnChange {
+            file_ref,
+            parent_ref,
+            name,
+            attributes,
+            reason,
+        },
+        record_length,
+    ))
+}
+
+#[repr(C)]
+struct ReadUsnJournalData {
+    start_usn: i64,
+    reason_mask: u32,
+    return_only_on_close: u32,
+    timeout: u64,
+    bytes_to_wait_for: u64,
+    journal_id: u64,
+}
+
+/// Reads the USN journal slice starting at `start_usn`.
+pub(crate) fn read_usn_journal(
+    volume: &Volume,
+    journal_id: u64,
+    start_usn: i64,
+) -> Result<(Vec<UsnChange>, i64), MftError> {
+    let input = ReadUsnJournalData {
+        start_usn,
+        reason_mask: u32::MAX,
+        return_only_on_close: 0,
+        timeout: 0,
+        bytes_to_wait_for: 0,
+        journal_id,
+    };
+    let mut buffer = vec![0u8; BUFFER_SIZE];
+    let returned = unsafe {
+        ioctl(
+            volume.handle,
+            FSCTL_READ_USN_JOURNAL,
+            &input as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<ReadUsnJournalData>() as u32,
+            buffer.as_mut_ptr() as *mut core::ffi::c_void,
+            buffer.len() as u32,
+        )
+    }
+    .map_err(|err| MftError::Failed(format!("FSCTL_READ_USN_JOURNAL failed (error {err})")))? as usize;
+    if returned < 8 {
+        return Ok((Vec::new(), start_usn));
+    }
+    let next_usn = u64_at(&buffer, 0).unwrap_or(start_usn as u64) as i64;
+    let mut changes = Vec::new();
+    let mut offset = 8usize;
+    while offset < returned {
+        let Some((change, length)) = parse_usn_change(&buffer, offset, returned) else {
+            break;
+        };
+        offset += length;
+        if change.file_ref == 0 || change.name.is_empty() {
+            continue;
+        }
+        changes.push(change);
+    }
+    Ok((changes, next_usn))
+}
+
+/// One entry of a freshly read volume, ready to be packed into an index.
+#[derive(Debug, Clone)]
+pub(crate) struct VolumeEntry {
+    pub(crate) file_ref: u64,
+    pub(crate) parent_ref: u64,
+    pub(crate) name: String,
+    pub(crate) attributes: u32,
+    pub(crate) size: u64,
+    pub(crate) mtime: i64,
+}
+
+#[derive(Debug)]
+pub(crate) struct VolumeIndexData {
+    pub(crate) entries: Vec<VolumeEntry>,
+    pub(crate) journal_id: u64,
+    pub(crate) next_usn: i64,
+    pub(crate) volume_serial: u64,
+}
+
+/// Full-volume read used by the search index: every live entry plus the USN
+/// position needed for incremental updates afterwards.
+pub(crate) fn collect_volume_entries(
+    root: &Path,
+    cancel: &AtomicBool,
+    low_memory: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(MftPhase, u64),
+) -> Result<VolumeIndexData, MftError> {
+    let letter = drive_letter(root)
+        .ok_or_else(|| MftError::Failed("the path is not on a local drive".to_string()))?;
+    let volume = open_volume(letter)?;
+
+    let mut volume_data: NtfsVolumeData = Default::default();
+    unsafe {
+        ioctl(
+            volume.handle,
+            FSCTL_GET_NTFS_VOLUME_DATA,
+            std::ptr::null(),
+            0,
+            &mut volume_data as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<NtfsVolumeData>() as u32,
+        )
+    }
+    .map_err(|err| MftError::Failed(format!("FSCTL_GET_NTFS_VOLUME_DATA failed (error {err})")))?;
+    if volume_data.bytes_per_cluster == 0 || volume_data.mft_start_lcn < 0 {
+        return Err(MftError::Failed(
+            "invalid NTFS volume data (cluster size or MFT start)".to_string(),
+        ));
+    }
+
+    let journal = query_journal(&volume)?;
+    let (usn_entries, low_memory_seen) =
+        enumerate_volume(volume.handle, journal.next_usn, cancel, low_memory, progress)?;
+    if low_memory_seen {
+        return Err(MftError::Failed("low memory".to_string()));
+    }
+
+    let (records, _, truncated) =
+        read_mft_records(volume.handle, &volume_data, cancel, low_memory, progress)?;
+    if truncated {
+        return Err(MftError::Failed("low memory".to_string()));
+    }
+
+    progress(MftPhase::BuildingTree, 0);
+    let mut entries = Vec::with_capacity(usn_entries.len());
+    for entry in usn_entries {
+        if entry.file_ref == 5 {
+            continue;
+        }
+        let (size, mtime) = records.get(&entry.file_ref).copied().unwrap_or((0, 0));
+        entries.push(VolumeEntry {
+            file_ref: entry.file_ref,
+            parent_ref: entry.parent_ref,
+            name: entry.name,
+            attributes: entry.attributes,
+            size: size.max(0) as u64,
+            mtime,
+        });
+    }
+    progress(MftPhase::BuildingTree, entries.len() as u64);
+    Ok(VolumeIndexData {
+        entries,
+        journal_id: journal.journal_id,
+        next_usn: journal.next_usn,
+        volume_serial: volume_data.volume_serial_number as u64,
+    })
+}
+
+pub(crate) fn scan_volume(
+    root: &Path,
+    cancel: &AtomicBool,
+    skip_heavy: bool,
+    low_memory: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(MftPhase, u64),
+) -> Result<RawNode, MftError> {
+    let letter = drive_letter(root).ok_or_else(|| {
+        MftError::Failed("the path is not on a local drive".to_string())
+    })?;
+    let volume = open_volume(letter)?;
+
+    let mut volume_data: NtfsVolumeData = Default::default();
+    unsafe {
+        ioctl(
+            volume.handle,
+            FSCTL_GET_NTFS_VOLUME_DATA,
+            std::ptr::null(),
+            0,
+            &mut volume_data as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<NtfsVolumeData>() as u32,
+        )
+    }
+    .map_err(|err| MftError::Failed(format!("FSCTL_GET_NTFS_VOLUME_DATA failed (error {err})")))?;
+
+    let bytes_per_cluster = volume_data.bytes_per_cluster;
+    if bytes_per_cluster == 0 || volume_data.mft_start_lcn < 0 {
+        return Err(MftError::Failed(
+            "invalid NTFS volume data (cluster size or MFT start)".to_string(),
+        ));
+    }
+
+    let journal = query_journal(&volume)?;
+    let (usn_entries, low_memory_seen) =
+        enumerate_volume(volume.handle, journal.next_usn, cancel, low_memory, progress)?;
+    let entries: Vec<MftEntry> = usn_entries
+        .into_iter()
+        .map(|entry| MftEntry {
+            file_ref: entry.file_ref,
+            parent_ref: entry.parent_ref,
+            skipped: skip_name(&entry.name, skip_heavy),
+            name: entry.name,
+            attributes: entry.attributes,
+        })
+        .collect();
 
     progress(MftPhase::ReadingMft, 0);
     let mut sizes: HashMap<u64, i64> = HashMap::new();
     if !low_memory_seen {
-        let mut record0 = vec![0u8; record_size];
-        unsafe {
-            read_at(
-                volume.handle,
-                volume_data.mft_start_lcn * bytes_per_cluster as i64,
-                &mut record0,
-            )
-        }
-        .map_err(|err| MftError::Failed(format!("cannot read $MFT record 0: {err}")))?;
-        if !apply_fixup(&mut record0, bytes_per_sector) {
-            return Err(MftError::Failed(
-                "$MFT record 0 fixup failed (unsupported sector size?)".to_string(),
-            ));
-        }
-        if &record0[0..4] != b"FILE" {
-            return Err(MftError::Failed("$MFT record 0 magic mismatch".to_string()));
-        }
-        let first_attribute = u16_at(&record0, 20).unwrap_or(0) as usize;
-        let mut position = first_attribute;
-        let mut runs = Vec::new();
-        while position + 16 <= record0.len() {
-            let Some(attribute_type) = u32_at(&record0, position) else {
-                break;
-            };
-            let Some(length) = u32_at(&record0, position + 4).map(|value| value as usize) else {
-                break;
-            };
-            if attribute_type == ATTRIBUTE_TYPE_END || length == 0 || position + length > record0.len() {
-                break;
-            }
-            let name_length = record0[position + 9];
-            let non_resident = record0[position + 8] != 0;
-            if attribute_type == ATTRIBUTE_TYPE_DATA && name_length == 0 && non_resident {
-                let run_offset = u16_at(&record0, position + 32).unwrap_or(0) as usize;
-                runs = parse_data_runs(&record0[position + run_offset..position + length]);
-                break;
-            }
-            position += length;
-        }
-        if runs.is_empty() {
-            return Err(MftError::Failed(
-                "cannot parse $MFT data runs from record 0".to_string(),
-            ));
-        }
-
-        let mut chunk = vec![0u8; BUFFER_SIZE];
-        let mut record_number = 0u64;
-        'runs: for (start_cluster, cluster_count) in runs {
-            let run_start = start_cluster * bytes_per_cluster as i64;
-            let run_length = cluster_count * bytes_per_cluster as i64;
-            let mut offset = 0i64;
-            while offset < run_length {
-                if cancel.load(Ordering::Relaxed) {
-                    return Err(MftError::Cancelled);
-                }
-                if low_memory() {
-                    break 'runs;
-                }
-                let to_read = ((run_length - offset) as usize).min(chunk.len());
-                let buffer = &mut chunk[..to_read];
-                if let Err(err) = unsafe {
-                    read_at(volume.handle, run_start + offset, buffer)
-                } {
-                    log::warn!("[mft] {err}");
-                    break 'runs;
-                }
-                let count = to_read / record_size;
-                for index in 0..count {
-                    let record = &mut buffer[index * record_size..(index + 1) * record_size];
-                    record_number += 1;
-                    if &record[0..4] != b"FILE" {
-                        continue;
-                    }
-                    let flags = u16_at(record, 22).unwrap_or(0);
-                    if flags & 0x0001 == 0 {
-                        continue;
-                    }
-                    let base_ref = u64_at(record, 32).unwrap_or(0) & 0x0000_FFFF_FFFF_FFFF;
-                    let file_ref = if base_ref != 0 { base_ref } else { record_number };
-                    if !apply_fixup(record, bytes_per_sector) {
-                        continue;
-                    }
-                    let first_attribute = u16_at(record, 20).unwrap_or(0) as usize;
-                    let mut position = first_attribute;
-                    while position + 16 <= record.len() {
-                        let Some(attribute_type) = u32_at(record, position) else {
-                            break;
-                        };
-                        let Some(length) = u32_at(record, position + 4).map(|value| value as usize)
-                        else {
-                            break;
-                        };
-                        if attribute_type == ATTRIBUTE_TYPE_END
-                            || length == 0
-                            || position + length > record.len()
-                        {
-                            break;
-                        }
-                        let name_length = record[position + 9];
-                        if attribute_type == ATTRIBUTE_TYPE_DATA && name_length == 0 {
-                            let non_resident = record[position + 8] != 0;
-                            let size = if non_resident {
-                                i64_at(record, position + 48).unwrap_or(0)
-                            } else {
-                                u32_at(record, position + 16).unwrap_or(0) as i64
-                            };
-                            sizes.entry(file_ref).or_insert(size.max(0));
-                            break;
-                        }
-                        position += length;
-                    }
-                }
-                offset += to_read as i64;
-            }
-        }
-        progress(MftPhase::ReadingMft, record_number);
+        let (records, _, _) =
+            read_mft_records(volume.handle, &volume_data, cancel, low_memory, progress)?;
+        sizes = records
+            .into_iter()
+            .map(|(reference, (size, _))| (reference, size))
+            .collect();
     }
 
     progress(MftPhase::BuildingTree, 0);

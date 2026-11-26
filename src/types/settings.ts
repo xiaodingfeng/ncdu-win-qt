@@ -30,6 +30,16 @@ export interface AiSettings {
   hasApiKey: boolean;
 }
 
+export interface IndexPrefs {
+  enabled: boolean;
+  /** Selected volume letters. Empty means all local volumes. */
+  volumes: string[];
+  excludes: string[];
+  memoryBudgetMb: number;
+  maxEntries: number;
+  realtime: boolean;
+}
+
 export interface AppSettings {
   language: Language;
   theme: ThemeMode;
@@ -39,6 +49,7 @@ export interface AppSettings {
   moveScan: MoveScanPrefs;
   autoUpdateGuard: boolean;
   ai: AiSettings;
+  index: IndexPrefs;
 }
 
 export interface ImportReport {
@@ -62,4 +73,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   moveScan: { customDirs: [], scopeIndex: 0, lastTargetRoot: "" },
   autoUpdateGuard: false,
   ai: { baseUrl: "", model: "", hasApiKey: false },
+  index: {
+    enabled: true,
+    volumes: [],
+    excludes: ["$Recycle.Bin", "System Volume Information"],
+    memoryBudgetMb: 256,
+    maxEntries: 3_000_000,
+    realtime: true,
+  },
 };

@@ -4,6 +4,7 @@ mod appmove;
 mod appsync;
 mod config;
 mod elevate;
+mod index;
 mod legacy;
 mod locker;
 mod mft;
@@ -104,6 +105,7 @@ pub fn run() {
         .manage(scan::ScanStore::default())
         .manage(cleanup::CleanupStore::default())
         .manage(appsync::AppSyncState::default())
+        .manage(index::store::IndexStore::default())
         .setup(|app| {
             log::info!(
                 "NcduWin {} starting",
@@ -112,6 +114,10 @@ pub fn run() {
             if let Err(err) = settings::load_or_init(app.handle()) {
                 log::error!("initial settings load failed: {err}");
             }
+            // Load a saved index snapshot in the background; this never blocks
+            // the window and failures only leave the index idle.
+            index::commands::prepare(app.handle());
+            index::startup(app.handle().clone());
             // The runtime configuration file from older builds is obsolete:
             // configuration is now compiled into the executable.
             if let Ok(dir) = app.path().app_config_dir() {
@@ -176,7 +182,14 @@ pub fn run() {
             misc::is_portable,
             misc::submit_feedback,
             misc::log_client,
-            misc::download_update
+            misc::download_update,
+            index::commands::index_status,
+            index::commands::index_volumes,
+            index::commands::index_build,
+            index::commands::index_cancel,
+            index::commands::index_search,
+            index::commands::index_clear,
+            index::commands::restart_as_admin
         ])
         .run(tauri::generate_context!())
         .expect("error while running NcduWin");

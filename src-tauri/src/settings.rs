@@ -26,6 +26,7 @@ pub struct AppSettings {
     pub move_scan: MoveScanPrefs,
     pub auto_update_guard: bool,
     pub ai: AiSettings,
+    pub index: IndexPrefs,
 }
 
 impl Default for AppSettings {
@@ -39,6 +40,7 @@ impl Default for AppSettings {
             move_scan: MoveScanPrefs::default(),
             auto_update_guard: false,
             ai: AiSettings::default(),
+            index: IndexPrefs::default(),
         }
     }
 }
@@ -117,8 +119,35 @@ impl Default for AiSettings {
     }
 }
 
-fn default_language() -> String {
-    let locale = RegKey::predef(HKEY_CURRENT_USER)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct IndexPrefs {
+    pub enabled: bool,
+    /// Volumes selected in the UI. Empty means "all local volumes".
+    pub volumes: Vec<String>,
+    pub excludes: Vec<String>,
+    pub memory_budget_mb: u32,
+    pub max_entries: u32,
+    pub realtime: bool,
+}
+
+impl Default for IndexPrefs {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            volumes: Vec::new(),
+            excludes: vec![
+                "$Recycle.Bin".to_string(),
+                "System Volume Information".to_string(),
+            ],
+            memory_budget_mb: 256,
+            max_entries: 3_000_000,
+            realtime: true,
+        }
+    }
+}
+
+fn default_language() -> String {    let locale = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey("Control Panel\\International")
         .and_then(|key| key.get_value::<String, _>("LocaleName"));
     match locale {

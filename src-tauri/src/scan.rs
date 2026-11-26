@@ -131,6 +131,7 @@ pub struct ScanStore {
     inner: Mutex<Option<ScanState>>,
     cancel: Mutex<Option<Arc<AtomicBool>>>,
     generation: AtomicU64,
+    active: AtomicBool,
 }
 
 impl ScanStore {
@@ -138,6 +139,20 @@ impl ScanStore {
     pub(crate) fn with_state<R>(&self, f: impl FnOnce(&ScanState) -> R) -> Option<R> {
         let guard = self.inner.lock().ok()?;
         guard.as_ref().map(f)
+    }
+
+    pub(crate) fn is_scanning(&self) -> bool {
+        self.active.load(Ordering::Relaxed)
+    }
+}
+
+/// Clears the "scanning" flag on every exit path, including early returns.
+struct ScanActive(AppHandle);
+
+impl Drop for ScanActive {
+    fn drop(&mut self) {
+        let store = self.0.state::<ScanStore>();
+        store.active.store(false, Ordering::Relaxed);
     }
 }
 
@@ -801,8 +816,10 @@ pub fn start_scan(
         flag
     };
     let generation = store.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    store.active.store(true, Ordering::SeqCst);
 
     std::thread::spawn(move || {
+        let _active = ScanActive(app.clone());
         let store = app.state::<ScanStore>();
         let started = Instant::now();
         let root_display = normalize(&root_path);

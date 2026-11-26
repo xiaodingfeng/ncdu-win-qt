@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -316,11 +317,23 @@ pub fn open_path(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn reveal_path(path: String) -> Result<(), String> {
+    if !Path::new(&path).exists() {
+        return Err(format!("path no longer exists: {path}"));
+    }
     Command::new("explorer")
-        .arg(format!("/select,{path}"))
+        .raw_arg(select_switch(&path))
         .spawn()
         .map(|_| ())
         .map_err(|err| err.to_string())
+}
+
+/// Explorer re-parses its own command line and ignores the quoting that
+/// `Command::arg` would add around the whole switch, so paths containing
+/// spaces must be quoted explicitly after `/select,`. Without this, a path
+/// like `...\WPS Office\...` is cut at the first space, the missing target
+/// makes Explorer fall back to the Documents folder.
+fn select_switch(path: &str) -> String {
+    format!("/select,\"{path}\"")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -345,5 +358,18 @@ pub fn file_times(path: String) -> Result<FileTimes, String> {
         modified: millis(metadata.modified()),
         accessed: millis(metadata.accessed()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_switch;
+
+    #[test]
+    fn select_switch_quotes_paths_with_spaces() {
+        assert_eq!(
+            select_switch(r"D:\c-remove\WPS Office\addons\file.ini"),
+            "/select,\"D:\\c-remove\\WPS Office\\addons\\file.ini\""
+        );
+    }
 }
 

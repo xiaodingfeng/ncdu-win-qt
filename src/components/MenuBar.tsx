@@ -50,6 +50,7 @@ export default function MenuBar({
       items: [
         { label: t("menu.file.open_folder"), action: () => emit("open") },
         { label: t("menu.file.rescan"), action: () => emit("rescan") },
+        { label: t("menu.file.global_search"), action: () => emit("global-search") },
         { separator: true },
         { label: t("app_sync.menu"), action: () => emit("app-sync") },
         { separator: true },

@@ -43,3 +43,17 @@ export function typeVar(entry: NodeEntry): string {
   const key = typeKey(entry);
   return `--type-${key === "executable" ? "exec" : key}`;
 }
+
+/** Type bucket for a global-index hit, sharing the same groups as the scan list. */
+export function indexTypeKey(hit: { name: string; isDir: boolean; hidden: boolean }): string {
+  if (hit.isDir) return "folder";
+  const ext = extension(hit.name);
+  return GROUPS.find((group) => group.ext.includes(ext))?.key ?? "other";
+}
+
+export function indexTypeVar(hit: { name: string; isDir: boolean; hidden: boolean }): string {
+  if (hit.isDir) return "--type-dir";
+  if (hit.hidden) return "--type-hidden";
+  const key = indexTypeKey(hit);
+  return `--type-${key === "executable" ? "exec" : key}`;
+}

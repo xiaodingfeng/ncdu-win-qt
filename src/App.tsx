@@ -5,6 +5,7 @@ import { useSettings } from "./context/SettingsContext";
 import { useAppConfig } from "./context/AppConfigContext";
 import ScanPage from "./components/ScanPage";
 import MenuBar from "./components/MenuBar";
+import GlobalSearch from "./components/GlobalSearch";
 import AboutDialog from "./components/AboutDialog";
 import UpdateDialog from "./components/UpdateDialog";
 import UpdateToast from "./components/UpdateToast";
@@ -76,6 +77,7 @@ export default function App() {
         onAiQa={() => setDialog("aiQa")}
       />
       <ScanPage />
+      <GlobalSearch />
       <UpdateToast />
 
       <ThemeDialog open={dialog === "theme"} onClose={() => setDialog(null)} />

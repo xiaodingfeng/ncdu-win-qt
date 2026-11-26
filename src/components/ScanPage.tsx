@@ -17,6 +17,8 @@ import Modal from "../components/Modal";
 import Fade from "../components/Fade";
 import BusyOverlay from "../components/BusyOverlay";
 import PropertiesDialog from "../components/PropertiesDialog";
+import { indexStatus, subscribeIndex } from "../lib/index";
+import type { IndexStatus } from "../types/index";
 import {
   cancelScan,
   defaultPath,
@@ -95,6 +97,7 @@ export default function ScanPage() {
   const [summary, setSummary] = useState<ScanSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [indexInfo, setIndexInfo] = useState<IndexStatus | null>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<NodeEntry[] | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("size");
@@ -374,6 +377,114 @@ export default function ScanPage() {
     return () => window.removeEventListener("ncduwin:action", handler);
   }, [browse, buildAiPrompt, current, navigate, path, runScan, settings, update]);
 
+  useEffect(() => {
+    const nameOf = (target: string) =>
+      target.split(/[\\/]/).filter(Boolean).pop() ?? target;
+    const handleDelete = (event: Event) => {
+      const detail = (event as CustomEvent<{ paths?: string[]; permanent?: boolean }>).detail;
+      if (!detail?.paths?.length) return;
+      setConfirm({
+        permanent: Boolean(detail.permanent),
+        paths: detail.paths,
+        names: detail.paths.map(nameOf),
+      });
+    };
+    const handleAi = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{ path?: string; name?: string; size?: number; isDir?: boolean }>
+      ).detail;
+      if (!detail?.path) return;
+      const name = detail.name ?? nameOf(detail.path);
+      const intro = t("ai.prompt.intro", { lang: language === "zh" ? "简体中文" : "English" });
+      const prompt = t("ai.prompt.dir", {
+        intro,
+        path: detail.path,
+        kind: detail.isDir ? t("ai.prompt.kind_dir") : t("ai.prompt.kind_file"),
+        size: formatSize(detail.size ?? 0),
+        files: formatCount(0),
+        folders: formatCount(0),
+        limit: 0,
+        children: "",
+      });
+      setAiSession((previous) => ({
+        open: true,
+        key: previous.key + 1,
+        subject: name,
+        prompt,
+      }));
+    };
+    const handleMove = (event: Event) => {
+      const detail = (event as CustomEvent<{ paths?: string[] }>).detail;
+      if (detail?.paths?.length) setMoveTarget(detail.paths);
+    };
+    const handleLocate = (event: Event) => {
+      const detail = (event as CustomEvent<{ path?: string }>).detail;
+      const target = detail?.path;
+      if (!target) return;
+      const parent = pathSegments(target).slice(0, -1).pop();
+      if (!parent) return;
+      void navigate(parent.path).then(() => setSelected(new Set([target])));
+    };
+    const handleProperties = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          path?: string;
+          name?: string;
+          size?: number;
+          isDir?: boolean;
+          hidden?: boolean;
+        }>
+      ).detail;
+      if (!detail?.path) return;
+      setProperties({
+        path: detail.path,
+        name: detail.name ?? nameOf(detail.path),
+        kind: detail.isDir ? "directory" : "file",
+        size: detail.size ?? 0,
+        fileCount: 0,
+        dirCount: 0,
+        isHidden: Boolean(detail.hidden),
+        skipped: false,
+        error: null,
+      });
+    };
+    window.addEventListener("ncduwin:delete-paths", handleDelete);
+    window.addEventListener("ncduwin:ai-analyze-path", handleAi);
+    window.addEventListener("ncduwin:move-paths", handleMove);
+    window.addEventListener("ncduwin:locate", handleLocate);
+    window.addEventListener("ncduwin:properties-path", handleProperties);
+    return () => {
+      window.removeEventListener("ncduwin:delete-paths", handleDelete);
+      window.removeEventListener("ncduwin:ai-analyze-path", handleAi);
+      window.removeEventListener("ncduwin:move-paths", handleMove);
+      window.removeEventListener("ncduwin:locate", handleLocate);
+      window.removeEventListener("ncduwin:properties-path", handleProperties);
+    };
+  }, [language, navigate, t]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void indexStatus()
+      .then((value) => {
+        if (!disposed) setIndexInfo(value);
+      })
+      .catch(() => undefined);
+    void subscribeIndex({
+      onStatus: (value) => {
+        if (!disposed) setIndexInfo(value);
+      },
+      onProgress: () => undefined,
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   const requestDelete = useCallback(
     (permanent: boolean, target?: NodeEntry) => {
       const source = target
@@ -585,7 +696,7 @@ export default function ScanPage() {
           event.preventDefault();
           target?.blur();
           void runScan(current?.path ?? path);
-        } else if (mod && key === "f") {
+        } else if (mod && !event.shiftKey && key === "f") {
           event.preventDefault();
           searchRef.current?.focus();
         } else if (mod && key === "o") {
@@ -609,7 +720,7 @@ export default function ScanPage() {
       } else if (event.key === "Enter" && selected.size === 1) {
         const only = activeEntries.find((entry) => selected.has(entry.path));
         if (only) activate(only);
-      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+      } else if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "f") {
         event.preventDefault();
         searchRef.current?.focus();
       } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
@@ -679,6 +790,16 @@ export default function ScanPage() {
         pct: disk.total > 0 ? Math.round((disk.free / disk.total) * 100) : 0,
       })
     : "";
+
+  const indexBadge = (() => {
+    if (!indexInfo) return t("index.badge_idle");
+    if (indexInfo.status === "building") return t("index.badge_building");
+    if (indexInfo.status === "ready") {
+      return t("index.badge_ready", { n: formatCount(indexInfo.count) });
+    }
+    if (indexInfo.status === "disabled") return t("index.badge_off");
+    return t("index.badge_idle");
+  })();
 
   const confirmBody = confirm
     ? t(confirm.permanent ? "dialog.delete.body" : "dialog.recycle.body", {
@@ -751,6 +872,17 @@ export default function ScanPage() {
             if (event.key === "Escape") setQuery("");
           }}
         />
+        <button
+          className="btn small global-search-button"
+          title={t("search_global.shortcut_hint")}
+          onClick={() =>
+            window.dispatchEvent(
+              new CustomEvent("ncduwin:action", { detail: "global-search" }),
+            )
+          }
+        >
+          {t("search_global.toolbar")}
+        </button>
       </div>
 
       <Breadcrumb path={current?.path ?? path} onNavigate={(target) => void navigate(target)} />
@@ -872,6 +1004,17 @@ export default function ScanPage() {
             {engineText}
           </span>
         )}
+        <button
+          className="status-index"
+          title={t("search_global.title")}
+          onClick={() =>
+            window.dispatchEvent(
+              new CustomEvent("ncduwin:action", { detail: "global-search" }),
+            )
+          }
+        >
+          {indexBadge}
+        </button>
         <span className="status-disk">{diskText}</span>
       </footer>
 
