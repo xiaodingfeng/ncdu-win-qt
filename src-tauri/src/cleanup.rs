@@ -14,6 +14,7 @@ use crate::ops;
 use crate::scan::{NodeEntry, NodeKind, ScanStore};
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const MIN_LARGE_FILE_SIZE: u64 = 50 * 1024 * 1024;
 const LARGE_ARCHIVE_MIN_SIZE: u64 = 100 * 1024 * 1024;
 const MAX_LARGE_FILES: usize = 200;
@@ -283,7 +284,11 @@ fn compute_path_size(path: &Path, cancel: &AtomicBool) -> (u64, u32) {
             let Ok(meta) = entry.metadata() else {
                 continue;
             };
-            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            let attrs = meta.file_attributes();
+            // 与主扫描保持一致：只跳过目录型重解析点，文件型重解析点按普通文件统计
+            if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                && attrs & FILE_ATTRIBUTE_DIRECTORY != 0
+            {
                 continue;
             }
             if meta.is_dir() {
@@ -875,7 +880,11 @@ fn collect_files_from_disk(root: &Path, cancel: &AtomicBool, min_size: u64) -> V
             let Ok(meta) = entry.metadata() else {
                 continue;
             };
-            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            let attrs = meta.file_attributes();
+            // 与主扫描保持一致：只跳过目录型重解析点，文件型重解析点按普通文件统计
+            if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                && attrs & FILE_ATTRIBUTE_DIRECTORY != 0
+            {
                 continue;
             }
             if meta.is_dir() {
