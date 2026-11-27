@@ -767,6 +767,10 @@ export default function GlobalSearch() {
           </div>
         ) : query.trim() === "" ? (
           <div className="gs-empty gs-recent">
+            <div className="gs-desc">
+              <div className="gs-desc-title">{t("search_global.title")}</div>
+              <p className="gs-desc-text">{t("search_global.description")}</p>
+            </div>
             <div className="gs-empty-title">{t("search_global.recent_title")}</div>
             {recent.length === 0 ? (
               <p className="dialog-text">{t("search_global.recent_empty")}</p>

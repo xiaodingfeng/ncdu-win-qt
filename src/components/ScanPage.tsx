@@ -17,6 +17,7 @@ import Modal from "../components/Modal";
 import Fade from "../components/Fade";
 import BusyOverlay from "../components/BusyOverlay";
 import PropertiesDialog from "../components/PropertiesDialog";
+import { IconDrive } from "../components/icons";
 import { indexStatus, subscribeIndex } from "../lib/index";
 import type { IndexStatus } from "../types/index";
 import {
@@ -881,6 +882,7 @@ export default function ScanPage() {
             )
           }
         >
+          <IconDrive size={13} />
           {t("search_global.toolbar")}
         </button>
       </div>

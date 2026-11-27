@@ -2973,6 +2973,9 @@ button {
 /* ------------------------------------------------------------------ */
 
 .global-search-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   height: 30px;
   white-space: nowrap;
 }
@@ -3387,6 +3390,37 @@ mark.hl {
   padding: 32px;
   color: var(--text-sec);
   text-align: center;
+}
+
+.gs-empty.gs-recent {
+  justify-content: flex-start;
+  overflow-y: auto;
+  padding-top: 20px;
+}
+
+.gs-desc {
+  width: 100%;
+  max-width: 560px;
+  margin-bottom: 6px;
+  padding: 10px 12px;
+  text-align: left;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.gs-desc-title {
+  margin-bottom: 3px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.gs-desc-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
 }
 
 .gs-empty-title {
