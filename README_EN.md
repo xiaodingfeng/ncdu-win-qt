@@ -61,13 +61,21 @@ NcduWin is a native Windows desktop application: Rust handles scanning, cleanup 
 |---|---|
 | ![File list + treemap](docs/screenshots/treeMap.png) | ![Cleanup panel](docs/screenshots/cleanup.png) |
 
-| AI analysis | System optimization |
+| Large files | Duplicate files |
 |---|---|
-| ![AI analysis](docs/screenshots/ai.png) | ![System optimization](docs/screenshots/system.png) |
+| ![Large files](docs/screenshots/largeFile.png) | ![Duplicate files](docs/screenshots/duplicateFile.png) |
 
-| System folder relocation | User data folder relocation |
+| Global search | AI analysis |
 |---|---|
-| ![System folder relocation](docs/screenshots/systemMenu.png) | ![User data folder relocation](docs/screenshots/userMenu.png) |
+| ![Global search](docs/screenshots/everything.png) | ![AI analysis](docs/screenshots/ai.png) |
+
+| System optimization | System folder relocation |
+|---|---|
+| ![System optimization](docs/screenshots/system.png) | ![System folder relocation](docs/screenshots/systemMenu.png) |
+
+| User data folder relocation | |
+|---|---|
+| ![User data folder relocation](docs/screenshots/userMenu.png) | |
 
 ---
 

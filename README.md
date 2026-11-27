@@ -61,13 +61,21 @@ NcduWin 是一个原生 Windows 桌面应用：Rust 负责扫描、清理、迁�
 |---|---|
 | ![文件列表 + 树图](docs/screenshots/treeMap.png) | ![清理面板](docs/screenshots/cleanup.png) |
 
-| AI 分析 | 系统优化 |
+| 大文件 | 重复文件 |
 |---|---|
-| ![AI 分析](docs/screenshots/ai.png) | ![系统优化](docs/screenshots/system.png) |
+| ![大文件](docs/screenshots/largeFile.png) | ![重复文件](docs/screenshots/duplicateFile.png) |
 
-| 系统文件夹位置迁移 | 用户数据目录位置迁移 |
+| 全盘搜索 | AI 分析 |
 |---|---|
-| ![系统文件夹迁移](docs/screenshots/systemMenu.png) | ![用户数据目录迁移](docs/screenshots/userMenu.png) |
+| ![全盘搜索](docs/screenshots/everything.png) | ![AI 分析](docs/screenshots/ai.png) |
+
+| 系统优化 | 系统文件夹位置迁移 |
+|---|---|
+| ![系统优化](docs/screenshots/system.png) | ![系统文件夹迁移](docs/screenshots/systemMenu.png) |
+
+| 用户数据目录位置迁移 | |
+|---|---|
+| ![用户数据目录迁移](docs/screenshots/userMenu.png) | |
 
 ---
 
