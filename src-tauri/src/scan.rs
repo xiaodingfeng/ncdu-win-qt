@@ -353,7 +353,11 @@ fn fast_dir_size(path: &Path, ctx: &ScanContext) -> (u64, u32, u32) {
                 continue;
             };
             let attrs = metadata.file_attributes();
-            if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            // 仅跳过目录型重解析点（junction/符号链接）；文件型重解析点
+            // （云占位、AppX 存根等）是真实文件，必须计入大小
+            if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                && attrs & FILE_ATTRIBUTE_DIRECTORY != 0
+            {
                 continue;
             }
             if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
@@ -416,7 +420,8 @@ fn scan_directory(path: &Path, name: String, top: bool, depth: u32, ctx: &ScanCo
         };
         let attrs = metadata.file_attributes();
 
-        if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        // 目录型重解析点作为链接展示，不展开；文件型重解析点按普通文件统计
+        if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 && attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
             let size = metadata.len();
             node.children.push(RawNode {
                 name: child_name,

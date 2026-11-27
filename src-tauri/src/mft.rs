@@ -1,7 +1,6 @@
-//! NTFS $MFT fast scan, mirroring the Qt build's MftScanner: enumerate USN
+﻿//! NTFS $MFT fast scan, mirroring the Qt build's MftScanner: enumerate USN
 //! records for names and parent references, then read the raw $MFT for sizes.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -21,12 +20,20 @@ use crate::scan::{NodeKind, RawNode};
 
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+/// NTFS stores this extra directory bit inside FILE_NAME attribute flags.
+const FILE_ATTRIBUTE_DIRECTORY_NTFS: u32 = 0x1000_0000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const MAX_USN_RECORDS: u64 = 5_000_000;
 const BUFFER_SIZE: usize = 1024 * 1024;
 const ATTRIBUTE_TYPE_STANDARD_INFORMATION: u32 = 0x10;
+const ATTRIBUTE_TYPE_FILE_NAME: u32 = 0x30;
 const ATTRIBUTE_TYPE_DATA: u32 = 0x80;
 const ATTRIBUTE_TYPE_END: u32 = 0xFFFF_FFFF;
+/// FILE_NAME attribute value: parent ref (8) + timestamps/sizes (0x38) +
+/// length (1) + namespace (1); the UTF-16 name starts at 0x42.
+const FILE_NAME_HEADER_LEN: usize = 0x42;
+/// DOS 8.3 aliases are not real paths, so they must not create tree nodes.
+const FILE_NAME_NAMESPACE_DOS: u8 = 2;
 
 const FILE_DEVICE_FILE_SYSTEM: u32 = 0x0000_0009;
 const METHOD_BUFFERED: u32 = 0;
@@ -394,20 +401,13 @@ fn parse_data_runs(data: &[u8]) -> Vec<(i64, i64)> {
     runs
 }
 
-struct MftEntry {
-    file_ref: u64,
-    parent_ref: u64,
-    name: String,
-    attributes: u32,
-    skipped: bool,
-}
-
 struct MftNode {
+    file_ref: u64,
     name: String,
     attributes: u32,
     skipped: bool,
-    children: Vec<u64>,
-    parent: Option<u64>,
+    children: Vec<u32>,
+    parent: Option<u32>,
 }
 
 fn is_hidden(name: &str, attributes: u32) -> bool {
@@ -415,7 +415,9 @@ fn is_hidden(name: &str, attributes: u32) -> bool {
 }
 
 fn is_dir(attributes: u32) -> bool {
-    attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+    // The on-disk FILE_NAME entry marks directories with 0x10000000 in addition
+    // to the documented FILE_ATTRIBUTE_DIRECTORY (0x10) flag.
+    attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DIRECTORY_NTFS) != 0
 }
 
 fn is_symlink(attributes: u32) -> bool {
@@ -450,59 +452,53 @@ fn path_key(path: &str) -> String {
 }
 
 struct Tree {
-    nodes: HashMap<u64, MftNode>,
+    nodes: Vec<MftNode>,
     sizes: HashMap<u64, i64>,
 }
 
 impl Tree {
-    fn computed(&self, root: u64) -> HashMap<u64, (u64, u32, u32)> {
-        let mut result: HashMap<u64, (u64, u32, u32)> = HashMap::new();
-        // File references are sparse u64 values (not dense indices), so the
-        // traversal state stays a HashMap keyed by the reference.
-        let mut state: HashMap<u64, u8> = HashMap::new();
+    fn computed(&self, root: u32) -> Vec<(u64, u32, u32)> {
+        let mut result = vec![(0u64, 0u32, 0u32); self.nodes.len()];
+        let mut state = vec![0u8; self.nodes.len()];
         let mut stack = vec![(root, false)];
-        while let Some((reference, expanded)) = stack.pop() {
-            match state.get(&reference).copied() {
-                Some(2) => continue,
-                Some(1) if !expanded => continue,
+        while let Some((index, expanded)) = stack.pop() {
+            let slot = index as usize;
+            match state[slot] {
+                2 => continue,
+                1 if !expanded => continue,
                 _ => {}
             }
-            let Some(node) = self.nodes.get(&reference) else {
-                state.insert(reference, 2);
-                continue;
-            };
+            let node = &self.nodes[slot];
             if expanded {
-                let is_file = !is_dir(node.attributes) && !is_symlink(node.attributes);
+                // Reparse-point files (cloud placeholders, AppX stubs, …) are
+                // real files with a size; only reparse *directories* are links.
+                let is_file = !is_dir(node.attributes);
                 let mut size = if is_file {
-                    self.sizes.get(&reference).copied().unwrap_or(0).max(0) as u64
+                    self.sizes.get(&node.file_ref).copied().unwrap_or(0).max(0) as u64
                 } else {
                     0
                 };
                 let mut files = 0u32;
                 let mut dirs = 0u32;
-                for child in &node.children {
-                    let Some((child_size, child_files, child_dirs)) = result.get(child) else {
-                        continue;
-                    };
-                    let Some(child_node) = self.nodes.get(child) else {
-                        continue;
-                    };
+                for &child in &node.children {
+                    let (child_size, child_files, child_dirs) = result[child as usize];
+                    let child_node = &self.nodes[child as usize];
                     size += child_size;
                     if is_dir(child_node.attributes) && !is_symlink(child_node.attributes) {
                         dirs += 1 + child_dirs;
                         files += child_files;
-                    } else if !is_symlink(child_node.attributes) {
+                    } else if !is_dir(child_node.attributes) {
                         files += 1;
                     }
                 }
-                result.insert(reference, (size, files, dirs));
-                state.insert(reference, 2);
+                result[slot] = (size, files, dirs);
+                state[slot] = 2;
             } else {
-                state.insert(reference, 1);
-                stack.push((reference, true));
-                for child in node.children.iter().rev() {
-                    if state.get(child).copied().unwrap_or(0) == 0 {
-                        stack.push((*child, false));
+                state[slot] = 1;
+                stack.push((index, true));
+                for &child in node.children.iter().rev() {
+                    if state[child as usize] == 0 {
+                        stack.push((child, false));
                     }
                 }
             }
@@ -512,67 +508,65 @@ impl Tree {
 
     fn build_raw(
         &self,
-        reference: u64,
+        index: u32,
         name: String,
         kind: NodeKind,
-        computed: &HashMap<u64, (u64, u32, u32)>,
+        computed: &[(u64, u32, u32)],
         depth: u32,
     ) -> RawNode {
-        let node = self.nodes.get(&reference);
-        let skipped = node.map(|node| node.skipped).unwrap_or(false);
-        let hidden = node
-            .map(|node| is_hidden(&node.name, node.attributes))
-            .unwrap_or(false);
+        let node = &self.nodes[index as usize];
+        let (size, file_count, dir_count) = computed[index as usize];
         let mut raw = RawNode {
             name,
             kind,
             size: if kind == NodeKind::File {
-                self.sizes.get(&reference).copied().unwrap_or(0).max(0) as u64
+                self.sizes.get(&node.file_ref).copied().unwrap_or(0).max(0) as u64
             } else {
-                computed.get(&reference).map(|value| value.0).unwrap_or(0)
+                size
             },
-            file_count: computed.get(&reference).map(|value| value.1).unwrap_or(0),
-            dir_count: computed.get(&reference).map(|value| value.2).unwrap_or(0),
-            is_hidden: hidden,
-            skipped,
+            file_count,
+            dir_count,
+            is_hidden: is_hidden(&node.name, node.attributes),
+            skipped: node.skipped,
             error: None,
             children: Vec::new(),
         };
-        if skipped || depth >= 512 {
+        if node.skipped || depth >= 512 {
             return raw;
         }
-        if let Some(node) = node {
-            for child in &node.children {
-                let Some(child_node) = self.nodes.get(child) else {
-                    continue;
-                };
-                if is_dir(child_node.attributes) && is_symlink(child_node.attributes) {
-                    raw.children.push(RawNode {
-                        name: child_node.name.clone(),
-                        kind: NodeKind::Symlink,
-                        size: self.sizes.get(child).copied().unwrap_or(0).max(0) as u64,
-                        file_count: 0,
-                        dir_count: 0,
-                        is_hidden: is_hidden(&child_node.name, child_node.attributes),
-                        skipped: false,
-                        error: None,
-                        children: Vec::new(),
-                    });
-                    continue;
-                }
-                let child_kind = if is_dir(child_node.attributes) {
-                    NodeKind::Directory
-                } else {
-                    NodeKind::File
-                };
-                raw.children.push(self.build_raw(
-                    *child,
-                    child_node.name.clone(),
-                    child_kind,
-                    computed,
-                    depth + 1,
-                ));
+        for &child in &node.children {
+            let child_node = &self.nodes[child as usize];
+            if is_dir(child_node.attributes) && is_symlink(child_node.attributes) {
+                raw.children.push(RawNode {
+                    name: child_node.name.clone(),
+                    kind: NodeKind::Symlink,
+                    size: self
+                        .sizes
+                        .get(&child_node.file_ref)
+                        .copied()
+                        .unwrap_or(0)
+                        .max(0) as u64,
+                    file_count: 0,
+                    dir_count: 0,
+                    is_hidden: is_hidden(&child_node.name, child_node.attributes),
+                    skipped: false,
+                    error: None,
+                    children: Vec::new(),
+                });
+                continue;
             }
+            let child_kind = if is_dir(child_node.attributes) {
+                NodeKind::Directory
+            } else {
+                NodeKind::File
+            };
+            raw.children.push(self.build_raw(
+                child,
+                child_node.name.clone(),
+                child_kind,
+                computed,
+                depth + 1,
+            ));
         }
         raw
     }
@@ -606,8 +600,22 @@ fn filetime_to_unix(ft: i64) -> i64 {
     }
 }
 
+/// One on-disk FILE_NAME entry: a single path of a file record. Hard links
+/// yield several of these for the same `file_ref`, which is why the tree is
+/// built from these instead of the single name the USN journal returns.
+#[derive(Debug, Clone)]
+pub(crate) struct MftPath {
+    pub(crate) file_ref: u64,
+    pub(crate) parent_ref: u64,
+    pub(crate) name: String,
+    pub(crate) attributes: u32,
+}
+
 /// Reads every live `$MFT` record once and returns `(size, modified)` per file
 /// reference. The index uses the same pass so it never has to `stat` files.
+///
+/// `paths` holds every Win32 FILE_NAME entry (including those stored in
+/// extension records) so hard-linked paths are all represented.
 ///
 /// The third tuple element reports whether low memory cut the read short.
 fn read_mft_records(
@@ -616,7 +624,15 @@ fn read_mft_records(
     cancel: &AtomicBool,
     low_memory: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(MftPhase, u64),
-) -> Result<(HashMap<u64, (i64, i64)>, u64, bool), MftError> {
+) -> Result<
+    (
+        HashMap<u64, (i64, i64)>,
+        Vec<MftPath>,
+        u64,
+        bool,
+    ),
+    MftError,
+> {
     let bytes_per_cluster = volume_data.bytes_per_cluster;
     let bytes_per_sector = volume_data.bytes_per_sector.max(512);
     let record_size = if volume_data.bytes_per_file_record_segment == 0 {
@@ -673,6 +689,8 @@ fn read_mft_records(
     let mut chunk = vec![0u8; BUFFER_SIZE];
     let mut record_number = 0u64;
     let mut truncated = false;
+    let mut paths: Vec<MftPath> = Vec::new();
+    let mut name_slots: Vec<(u64, usize, usize, u32)> = Vec::new();
     'runs: for (start_cluster, cluster_count) in runs {
         let run_start = start_cluster * bytes_per_cluster as i64;
         let run_length = cluster_count * bytes_per_cluster as i64;
@@ -706,12 +724,19 @@ fn read_mft_records(
                     continue;
                 }
                 let base_ref = u64_at(record, 32).unwrap_or(0) & 0x0000_FFFF_FFFF_FFFF;
-                let file_ref = if base_ref != 0 { base_ref } else { record_number };
+                // `record_number` counts 1-based records (1 = $MFT), while MFT
+                // references are 0-based, so the current record is one less.
+                let file_ref = if base_ref != 0 {
+                    base_ref
+                } else {
+                    record_number - 1
+                };
                 if !apply_fixup(record, bytes_per_sector) {
                     continue;
                 }
                 let mut size_value = 0i64;
                 let mut mtime_value = 0i64;
+                name_slots.clear();
                 let first_attribute = u16_at(record, 20).unwrap_or(0) as usize;
                 let mut position = first_attribute;
                 while position + 16 <= record.len() {
@@ -740,18 +765,59 @@ fn read_mft_records(
                         } else {
                             u32_at(record, position + 16).unwrap_or(0) as i64
                         };
+                    } else if attribute_type == ATTRIBUTE_TYPE_FILE_NAME && !non_resident {
+                        let value_len = u32_at(record, position + 16).unwrap_or(0) as usize;
+                        let content = u16_at(record, position + 20).unwrap_or(0) as usize;
+                        let value_start = position + content;
+                        if value_len >= FILE_NAME_HEADER_LEN
+                            && value_start + value_len <= record.len()
+                            && record[value_start + 0x41] != FILE_NAME_NAMESPACE_DOS
+                        {
+                            let parent_ref =
+                                u64_at(record, value_start).unwrap_or(0) & 0x0000_FFFF_FFFF_FFFF;
+                            let units = record[value_start + 0x40] as usize;
+                            let name_start = value_start + FILE_NAME_HEADER_LEN;
+                            if parent_ref != 0
+                                && units > 0
+                                && name_start + units * 2 <= value_start + value_len
+                            {
+                                let attributes = u32_at(record, value_start + 0x38).unwrap_or(0);
+                                name_slots.push((parent_ref, name_start, units * 2, attributes));
+                            }
+                        }
                     }
                     position += length;
                 }
+                // Extension records carry extra hard-link names for their base
+                // record, so every FILE_NAME entry is emitted under `file_ref`.
+                for (parent_ref, name_start, name_bytes, attributes) in name_slots.drain(..) {
+                    let units: Vec<u16> = record[name_start..name_start + name_bytes]
+                        .chunks_exact(2)
+                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                        .collect();
+                    paths.push(MftPath {
+                        file_ref,
+                        parent_ref,
+                        name: String::from_utf16_lossy(&units),
+                        attributes,
+                    });
+                }
+                // Extension records share the base file reference but carry no
+                // size, so keep the largest value seen for that reference.
                 records
                     .entry(file_ref)
+                    .and_modify(|slot| {
+                        if size_value > slot.0 {
+                            slot.0 = size_value;
+                        }
+                    })
                     .or_insert((size_value.max(0), mtime_value));
             }
             offset += to_read as i64;
         }
     }
     progress(MftPhase::ReadingMft, record_number);
-    Ok((records, record_number, truncated))
+    Ok((records, paths, record_number, truncated))
 }
 
 /// Enumerates the USN journal once and returns every named record.
@@ -1017,7 +1083,7 @@ pub(crate) fn collect_volume_entries(
         return Err(MftError::Failed("low memory".to_string()));
     }
 
-    let (records, _, truncated) =
+    let (records, _, _, truncated) =
         read_mft_records(volume.handle, &volume_data, cancel, low_memory, progress)?;
     if truncated {
         return Err(MftError::Failed("low memory".to_string()));
@@ -1046,6 +1112,32 @@ pub(crate) fn collect_volume_entries(
         next_usn: journal.next_usn,
         volume_serial: volume_data.volume_serial_number as u64,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_mft_node(
+    nodes: &mut Vec<MftNode>,
+    dir_index: &mut HashMap<u64, u32>,
+    pending: &mut Vec<(u32, u64)>,
+    file_ref: u64,
+    attributes: u32,
+    parent_ref: u64,
+    name: &str,
+    skip_heavy: bool,
+) {
+    let index = nodes.len() as u32;
+    nodes.push(MftNode {
+        file_ref,
+        name: name.to_string(),
+        attributes,
+        skipped: skip_name(name, skip_heavy),
+        children: Vec::new(),
+        parent: None,
+    });
+    pending.push((index, parent_ref));
+    if is_dir(attributes) {
+        dir_index.entry(file_ref).or_insert(index);
+    }
 }
 
 pub(crate) fn scan_volume(
@@ -1080,95 +1172,93 @@ pub(crate) fn scan_volume(
         ));
     }
 
-    let journal = query_journal(&volume)?;
-    let (usn_entries, low_memory_seen) =
-        enumerate_volume(volume.handle, journal.next_usn, cancel, low_memory, progress)?;
-    let entries: Vec<MftEntry> = usn_entries
-        .into_iter()
-        .map(|entry| MftEntry {
-            file_ref: entry.file_ref,
-            parent_ref: entry.parent_ref,
-            skipped: skip_name(&entry.name, skip_heavy),
-            name: entry.name,
-            attributes: entry.attributes,
-        })
-        .collect();
-
     progress(MftPhase::ReadingMft, 0);
     let mut sizes: HashMap<u64, i64> = HashMap::new();
-    if !low_memory_seen {
-        let (records, _, _) =
-            read_mft_records(volume.handle, &volume_data, cancel, low_memory, progress)?;
-        sizes.reserve(records.len());
-        for (reference, (size, _)) in records {
-            sizes.insert(reference, size);
-        }
+    let (records, paths, _, _) =
+        read_mft_records(volume.handle, &volume_data, cancel, low_memory, progress)?;
+    sizes.reserve(records.len());
+    for (reference, (size, _)) in records {
+        sizes.insert(reference, size);
     }
 
     progress(MftPhase::BuildingTree, 0);
     let drive_prefix = format!("{letter}:\\");
-    let mut nodes: HashMap<u64, MftNode> = HashMap::new();
-    let mut links: Vec<(u64, u64)> = Vec::new();
-    for entry in &entries {
-        if entry.parent_ref == 0 {
+    let mut nodes: Vec<MftNode> = Vec::with_capacity(paths.len());
+    let mut dir_index: HashMap<u64, u32> = HashMap::new();
+    let mut pending: Vec<(u32, u64)> = Vec::with_capacity(paths.len());
+
+    // One node per FILE_NAME entry, so every hard-linked path keeps the size
+    // Explorer reports for it.
+    for path in &paths {
+        if path.parent_ref == 0 || path.name.is_empty() {
             continue;
         }
-        if let Entry::Vacant(slot) = nodes.entry(entry.file_ref) {
-            slot.insert(MftNode {
-                name: entry.name.clone(),
-                attributes: entry.attributes,
-                skipped: entry.skipped,
-                children: Vec::new(),
-                parent: None,
-            });
-            links.push((entry.file_ref, entry.parent_ref));
-        }
+        push_mft_node(
+            &mut nodes,
+            &mut dir_index,
+            &mut pending,
+            path.file_ref,
+            path.attributes,
+            path.parent_ref,
+            &path.name,
+            skip_heavy,
+        );
     }
-    // Record 5 is the volume root; some USN journals omit it or report no parent.
-    nodes.entry(5).or_insert_with(|| MftNode {
-        name: ".".to_string(),
-        attributes: FILE_ATTRIBUTE_DIRECTORY,
-        skipped: false,
-        children: Vec::new(),
-        parent: None,
-    });
-    for (reference, parent_ref) in &links {
-        if *parent_ref != 0 && *parent_ref != *reference && nodes.contains_key(parent_ref) {
-            if let Some(node) = nodes.get_mut(reference) {
-                node.parent = Some(*parent_ref);
-            }
-        }
+    drop(paths);
+    // Record 5 is the volume root; some journals omit its FILE_NAME entry.
+    if !dir_index.contains_key(&5) {
+        let index = nodes.len() as u32;
+        nodes.push(MftNode {
+            file_ref: 5,
+            name: ".".to_string(),
+            attributes: FILE_ATTRIBUTE_DIRECTORY,
+            skipped: false,
+            children: Vec::new(),
+            parent: None,
+        });
+        dir_index.insert(5, index);
     }
-    for (reference, parent_ref) in links {
-        if nodes.get(&reference).and_then(|node| node.parent) == Some(parent_ref) {
-            if let Some(parent_node) = nodes.get_mut(&parent_ref) {
-                parent_node.children.push(reference);
-            }
+    for (child, parent_ref) in pending {
+        if parent_ref == 0 {
+            continue;
         }
+        let Some(&parent) = dir_index.get(&parent_ref) else {
+            continue;
+        };
+        if parent == child {
+            continue;
+        }
+        nodes[child as usize].parent = Some(parent);
+        nodes[parent as usize].children.push(child);
     }
 
-    let root_ref = if is_drive_root(root) {
-        5u64
+
+    let root_index = if is_drive_root(root) {
+        dir_index[&5]
     } else {
         let target = normalize(&root.to_string_lossy());
-        let found = nodes
+        nodes
             .iter()
-            .find(|(reference, node)| {
-                **reference != 5
-                    && (node.parent == Some(5) || node.parent.is_none())
+            .enumerate()
+            .find(|(_, node)| {
+                node.file_ref != 5
+                    && node
+                        .parent
+                        .map(|parent| nodes[parent as usize].file_ref == 5)
+                        .unwrap_or(false)
                     && path_key(&join_path(&drive_prefix, &node.name)) == path_key(&target)
             })
-            .map(|(reference, _)| *reference);
-        found.ok_or_else(|| {
-            MftError::Failed(format!(
-                "cannot locate {} in the MFT",
-                root.to_string_lossy()
-            ))
-        })?
+            .map(|(index, _)| index as u32)
+            .ok_or_else(|| {
+                MftError::Failed(format!(
+                    "cannot locate {} in the MFT",
+                    root.to_string_lossy()
+                ))
+            })?
     };
 
     let tree = Tree { nodes, sizes };
-    let computed = tree.computed(root_ref);
+    let computed = tree.computed(root_index);
     let root_name = if is_drive_root(root) {
         format!("{letter}:")
     } else {
@@ -1181,12 +1271,13 @@ pub(crate) fn scan_volume(
     } else {
         NodeKind::Directory
     };
-    let mut raw = tree.build_raw(root_ref, root_name, root_kind, &computed, 0);
+    let mut raw = tree.build_raw(root_index, root_name, root_kind, &computed, 0);
     aggregate_root(&mut raw);
-    raw.size = computed.get(&root_ref).map(|value| value.0).unwrap_or(raw.size);
-    raw.file_count = computed.get(&root_ref).map(|value| value.1).unwrap_or(raw.file_count);
-    raw.dir_count = computed.get(&root_ref).map(|value| value.2).unwrap_or(raw.dir_count);
-    progress(MftPhase::BuildingTree, entries.len() as u64);
+    let (size, files, dirs) = computed[root_index as usize];
+    raw.size = size;
+    raw.file_count = files;
+    raw.dir_count = dirs;
+    progress(MftPhase::BuildingTree, tree.nodes.len() as u64);
     Ok(raw)
 }
 
@@ -1225,56 +1316,49 @@ mod tests {
 
     #[test]
     fn computed_counts_skipped_directories_in_parent() {
-        let mut nodes = HashMap::new();
-        nodes.insert(
-            5,
+        let nodes = vec![
             MftNode {
+                file_ref: 5,
                 name: ".".to_string(),
                 attributes: FILE_ATTRIBUTE_DIRECTORY,
                 skipped: false,
-                children: vec![10, 11],
+                children: vec![1, 2],
                 parent: None,
             },
-        );
-        nodes.insert(
-            10,
             MftNode {
+                file_ref: 10,
                 name: "WinSxS".to_string(),
                 attributes: FILE_ATTRIBUTE_DIRECTORY,
                 skipped: true,
-                children: vec![12],
-                parent: Some(5),
+                children: vec![3],
+                parent: Some(0),
             },
-        );
-        nodes.insert(
-            12,
             MftNode {
-                name: "big.dll".to_string(),
-                attributes: 0,
-                skipped: false,
-                children: Vec::new(),
-                parent: Some(10),
-            },
-        );
-        nodes.insert(
-            11,
-            MftNode {
+                file_ref: 11,
                 name: "normal.txt".to_string(),
                 attributes: 0,
                 skipped: false,
                 children: Vec::new(),
-                parent: Some(5),
+                parent: Some(0),
             },
-        );
+            MftNode {
+                file_ref: 12,
+                name: "big.dll".to_string(),
+                attributes: 0,
+                skipped: false,
+                children: Vec::new(),
+                parent: Some(1),
+            },
+        ];
         let mut sizes = HashMap::new();
         sizes.insert(12, 100i64);
         sizes.insert(11, 10i64);
         let tree = Tree { nodes, sizes };
-        let computed = tree.computed(5);
+        let computed = tree.computed(0);
         // WinSxS is skipped (not expanded in the UI) but its 100 bytes and
         // file still count towards the root, matching the directory walk.
-        assert_eq!(computed.get(&5).copied(), Some((110, 2, 1)));
-        assert_eq!(computed.get(&10).copied(), Some((100, 1, 0)));
+        assert_eq!(computed[0], (110, 2, 1));
+        assert_eq!(computed[1], (100, 1, 0));
     }
 
     #[test]
