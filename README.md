@@ -5,13 +5,13 @@
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB.svg)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61DAFB.svg)](https://react.dev)
 [![Platform: Windows](https://img.shields.io/badge/platform-windows-lightgrey.svg)](#运行环境)
-[![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-2.0.2-blue.svg)](#)
 
 **[English](README_EN.md)** | **[中文](README.md)**
 
 > **分支说明**
 >
-> - `master`（默认分支）：**最新版本**，由 C++/Qt 全面重构为 **Rust + Tauri 2**，当前版本 2.0.1，推荐下载使用本分支。
+> - `master`（默认分支）：**最新版本**，由 C++/Qt 全面重构为 **Rust + Tauri 2**，当前版本 2.0.2，推荐下载使用本分支。
 > - [`qt`](../../tree/qt)：旧版本，**C++17 + Qt 6** 实现，版本 1.1.0，仅作历史存档，不再新增功能。
 
 > 一款现代、浅色主题的 Windows 磁盘使用分析器，灵感来自 Linux 的 [`ncdu`](https://dev.yorhel.nl/ncdu)。
@@ -22,11 +22,12 @@ NcduWin 是一个原生 Windows 桌面应用：Rust 负责扫描、清理、迁�
 
 ## ✨ 功能特性
 
-- **极速扫描** — 直接读取 NTFS 主文件表（MFT）枚举文件，并保留传统目录遍历作为回退通道；多线程并行处理，大容量磁盘也能快速完成，扫描过程可随时取消。
+- **极速扫描** — 直接读取 NTFS 主文件表（MFT）枚举文件，并保留传统目录遍历作为回退通道；多线程并行处理，大容量磁盘也能快速完成，扫描过程可随时取消。硬链接的多条路径与文件型重解析点（云占位、AppX 存根等）均完整计入，目录大小与资源管理器一致。
 - **内存保护** — 扫描时监控可用内存，内存不足会提前停止并明确提示结果可能不完整，避免拖垮系统。
 - **跳过重型目录** — 自动跳过 `WinSxS`、`node_modules` 等巨型目录的深度扫描，目录大小仍然展示。
-- **双重视图** — 左侧 ncdu 风格文件列表，右侧交互式矩形树图，配合文件类型图例、面包屑与搜索框，快速定位空间占用。
-- **一键清理** — 「清理」标签页一次性扫描三类内容：
+- **双重视图** — 左侧 ncdu 风格文件列表，右侧交互式矩形树图，配合文件类型图例、面包屑与搜索框，快速定位空间占用；底部状态栏实时显示扫描耗时、处理速度与文件/目录计数。
+- **全局搜索** — 基于 NTFS MFT 与 USN 变更日志的 Everything 风格全盘搜索，按下 `Ctrl+Shift+F` 随时唤起；支持 `ext:` `size:` `path:` `dm:` 过滤、`*` 通配符以及 `|` 或、`!` 非语法，并提供搜索历史与书签。
+- **一键清理** — 「清理」标签页一次性扫描三类内容（Windows、Program Files、ProgramData 等系统与程序目录不纳入，避免误删）：
   - 常见垃圾：临时文件、浏览器缓存、pip/npm 等构建缓存
   - 大文件：≥50MB 的可疑大文件（归档包 ≥100MB 单独标记）
   - 重复文件：≥1MB 的文件按「大小分组 → 前 4KB 哈希 → 全文件哈希」三级漏斗查找
@@ -75,7 +76,7 @@ NcduWin 是一个原生 Windows 桌面应用：Rust 负责扫描、清理、迁�
 ### 选项 A — 下载发布版本
 
 1. 前往 [Releases](../../releases) 页面。
-2. 下载安装包 `NcduWin_2.0.1_x64-setup.exe`，或便携包 `NcduWin_2.0.1_x64-portable.zip`。
+2. 下载安装包 `NcduWin_2.0.2_x64-setup.exe`，或便携包 `NcduWin_2.0.2_x64-portable.zip`。
 3. 安装包按提示完成安装；便携包解压到任意目录后直接运行 `NcduWin.exe`，无需安装。
 
 ### 运行环境
@@ -102,8 +103,8 @@ npm run tauri build    # 生成安装包与可执行文件
 
 也可以直接双击根目录的 `package.bat` 一键打包（自动安装依赖、构建前端、编译 Rust、生成安装包与便携包），产物位于：
 
-- 安装包：`src-tauri/target/release/bundle/nsis/NcduWin_2.0.1_x64-setup.exe`
-- 便携包：`src-tauri/target/release/bundle/portable/NcduWin_2.0.1_x64-portable.zip`
+- 安装包：`src-tauri/target/release/bundle/nsis/NcduWin_2.0.2_x64-setup.exe`
+- 便携包：`src-tauri/target/release/bundle/portable/NcduWin_2.0.2_x64-portable.zip`
 
 ### 版本与发布配置
 
@@ -124,19 +125,19 @@ ncdu-win-qt/
 │   ├── build-release.ps1   # 构建 + 安装包 + 便携包
 │   └── 使用说明.txt         # 便携包内附说明（打包时自动同步版本号）
 ├── src/                    # React 前端
-│   ├── App.tsx
-│   ├── main.tsx
+│   ├── App.tsx / main.tsx
 │   ├── styles.css
 │   ├── theme.ts            # 主题调色板
-│   ├── components/         # 界面组件（扫描页 / 清理 / 树图 / 各类弹框）
+│   ├── components/         # 界面组件：扫描页 / 清理 / 树图 / 全局搜索 / 迁移 / 各类弹框
+│   │   └── ui/             # 自定义下拉、多选、颜色选择与锚定弹层
 │   ├── context/            # 设置、语言、应用配置上下文
-│   ├── i18n/locales/       # zh.json / en.json
-│   ├── lib/                # 后端命令封装（扫描 / 清理 / 迁移 / AI / 系统优化等）
+│   ├── i18n/               # 文案外壳（shell.ts）与 locales/zh.json、en.json
+│   ├── lib/                # 后端命令封装（扫描 / 清理 / 迁移 / AI / 系统优化 / 日志 / Markdown）
 │   └── types/
 ├── src-tauri/              # Rust 后端
 │   ├── src/
 │   │   ├── main.rs / lib.rs
-│   │   ├── scan.rs / mft.rs        # 扫描与 NTFS MFT 直读
+│   │   ├── scan.rs / mft.rs        # 扫描、NTFS MFT/USN 直读（含全局搜索）
 │   │   ├── cleanup.rs              # 清理分类、大文件、重复文件
 │   │   ├── appsync.rs / appmove.rs # 保存位置迁移与搬移
 │   │   ├── sysopt.rs               # 系统配置优化
@@ -168,6 +169,7 @@ ncdu-win-qt/
 | `Delete` | 将选中项移至回收站 |
 | `Shift+Delete` | 永久删除选中项 |
 | `Ctrl+F` | 聚焦搜索框 |
+| `Ctrl+Shift+F` | 打开全盘搜索 |
 | `Esc` | 清除搜索 / 清除选择 |
 
 ---

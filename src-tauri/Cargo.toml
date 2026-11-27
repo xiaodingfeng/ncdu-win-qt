@@ -1,6 +1,6 @@
 [package]
 name = "ncduwin"
-version = "2.0.1"
+version = "2.0.2"
 description = "NcduWin — disk analyzer"
 authors = ["NcduWin"]
 edition = "2021"

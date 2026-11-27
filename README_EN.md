@@ -5,13 +5,13 @@
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB.svg)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61DAFB.svg)](https://react.dev)
 [![Platform: Windows](https://img.shields.io/badge/platform-windows-lightgrey.svg)](#requirements)
-[![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-2.0.2-blue.svg)](#)
 
 **[English](README_EN.md)** | **[中文](README.md)**
 
 > **Branch notice**
 >
-> - `master` (default branch): the **latest release**, fully rebuilt from C++/Qt into **Rust + Tauri 2**, currently 2.0.1 — this is the branch to download and use.
+> - `master` (default branch): the **latest release**, fully rebuilt from C++/Qt into **Rust + Tauri 2**, currently 2.0.2 — this is the branch to download and use.
 > - [`qt`](../../tree/qt): the legacy **C++17 + Qt 6** implementation, version 1.1.0, kept for archival only and no longer developed.
 
 > A modern, light-themed disk usage analyzer for Windows, inspired by Linux [`ncdu`](https://dev.yorhel.nl/ncdu).
@@ -22,11 +22,12 @@ NcduWin is a native Windows desktop application: Rust handles scanning, cleanup 
 
 ## ✨ Features
 
-- **Blazing fast scanning** — enumerates files by reading the NTFS Master File Table (MFT) directly, with the classic directory walk kept as a fallback path. Multi-threaded processing keeps large drives responsive, and a scan can be cancelled at any time.
+- **Blazing fast scanning** — enumerates files by reading the NTFS Master File Table (MFT) directly, with the classic directory walk kept as a fallback path. Multi-threaded processing keeps large drives responsive, and a scan can be cancelled at any time. Every hard-link path and reparse-point file (cloud placeholders, AppX stubs, …) is counted, so folder sizes match Explorer.
 - **Memory guard** — available memory is monitored during scanning; if it runs low the scan stops early with a clear notice that results may be incomplete instead of dragging the system down.
 - **Skips heavy directories** — giant trees such as `WinSxS` and `node_modules` are not walked deeply, while their sizes are still shown.
-- **Dual visualization** — an ncdu-style file list on the left and an interactive treemap on the right, plus a file-type legend, breadcrumbs and a search box.
-- **One-click cleanup** — the Cleanup tab scans three kinds of content in one go:
+- **Dual visualization** — an ncdu-style file list on the left and an interactive treemap on the right, plus a file-type legend, breadcrumbs and a search box; a status bar shows elapsed time, throughput and file/folder counts while scanning.
+- **Global search** — Everything-style whole-disk search built on the NTFS MFT and USN change journal, opened any time with `Ctrl+Shift+F`; supports `ext:` `size:` `path:` `dm:` filters, `*` wildcards plus `|` OR and `!` NOT, with search history and bookmarks.
+- **One-click cleanup** — the Cleanup tab scans three kinds of content in one go (Windows, Program Files and ProgramData are excluded to avoid deleting system or program files):
   - Common junk: temp files, browser caches, pip/npm build caches
   - Large files: suspicious files ≥50MB (archives ≥100MB are flagged separately)
   - Duplicates: files ≥1MB found by a three-stage funnel (size grouping → first-4KB hash → full-content hash)
@@ -75,7 +76,7 @@ NcduWin is a native Windows desktop application: Rust handles scanning, cleanup 
 ### Option A — Download the release
 
 1. Go to the [Releases](../../releases) page.
-2. Download `NcduWin_2.0.1_x64-setup.exe` or the portable `NcduWin_2.0.1_x64-portable.zip`.
+2. Download `NcduWin_2.0.2_x64-setup.exe` or the portable `NcduWin_2.0.2_x64-portable.zip`.
 3. Run the installer and follow the prompts, or unzip the portable package and run `NcduWin.exe` — no installation required.
 
 ### Requirements
@@ -102,8 +103,8 @@ npm run tauri build    # build installer and executable
 
 You can also double-click `package.bat` in the repository root to package everything in one step (installs dependencies, builds the frontend, compiles Rust, produces the installer and the portable zip). Outputs:
 
-- Installer: `src-tauri/target/release/bundle/nsis/NcduWin_2.0.1_x64-setup.exe`
-- Portable: `src-tauri/target/release/bundle/portable/NcduWin_2.0.1_x64-portable.zip`
+- Installer: `src-tauri/target/release/bundle/nsis/NcduWin_2.0.2_x64-setup.exe`
+- Portable: `src-tauri/target/release/bundle/portable/NcduWin_2.0.2_x64-portable.zip`
 
 ### Version and release configuration
 
@@ -124,19 +125,19 @@ ncdu-win-qt/
 │   ├── build-release.ps1   # Build + installer + portable package
 │   └── 使用说明.txt         # Portable readme (version synced while packaging)
 ├── src/                    # React frontend
-│   ├── App.tsx
-│   ├── main.tsx
+│   ├── App.tsx / main.tsx
 │   ├── styles.css
 │   ├── theme.ts            # Theme palettes
-│   ├── components/         # UI components (scan page / cleanup / treemap / dialogs)
+│   ├── components/         # UI components: scan page / cleanup / treemap / global search / move / dialogs
+│   │   └── ui/             # Custom select, multi-select, color field and anchored popup
 │   ├── context/            # Settings, i18n and app-config contexts
-│   ├── i18n/locales/       # zh.json / en.json
-│   ├── lib/                # Backend command wrappers (scan / cleanup / move / AI / system)
+│   ├── i18n/               # Locale shell (shell.ts) plus locales/zh.json, en.json
+│   ├── lib/                # Backend command wrappers (scan / cleanup / move / AI / system / log / markdown)
 │   └── types/
 ├── src-tauri/              # Rust backend
 │   ├── src/
 │   │   ├── main.rs / lib.rs
-│   │   ├── scan.rs / mft.rs        # Scanning and NTFS MFT reader
+│   │   ├── scan.rs / mft.rs        # Scanning; NTFS MFT/USN reader (incl. global search)
 │   │   ├── cleanup.rs              # Categories, large files, duplicates
 │   │   ├── appsync.rs / appmove.rs # Save-location sync and moving
 │   │   ├── sysopt.rs               # System optimization
@@ -168,6 +169,7 @@ ncdu-win-qt/
 | `Delete` | Move selection to Recycle Bin |
 | `Shift+Delete` | Delete selection permanently |
 | `Ctrl+F` | Focus the search box |
+| `Ctrl+Shift+F` | Open global search |
 | `Esc` | Clear search / clear selection |
 
 ---
