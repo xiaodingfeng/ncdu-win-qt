@@ -20,6 +20,17 @@ export interface ScanProgress {
   engine: "mft" | "walk" | string;
   phase: string;
   count: number | null;
+  elapsedMs?: number | null;
+  filesPerSec?: number | null;
+}
+
+export interface ScanSummary {
+  path: string;
+  size: number;
+  files: number;
+  folders: number;
+  elapsedMs: number;
+  engine: string;
 }
 
 export interface ScanFinished {
@@ -36,6 +47,7 @@ export interface ScanFailure {
 export interface DirectoryView {
   node: NodeEntry;
   children: NodeEntry[];
+  total: number;
 }
 
 export interface TreemapNode {

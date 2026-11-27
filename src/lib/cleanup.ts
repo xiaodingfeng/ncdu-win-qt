@@ -33,11 +33,6 @@ export function cleanItems(items: CleanItem[], permanent: boolean): Promise<void
   return invoke("clean_items", { items, permanent });
 }
 
-/** Retries failed deletes through the elevated helper. */
-export function cleanItemsElevated(items: CleanItem[], permanent: boolean): Promise<void> {
-  return invoke("clean_items_elevated", { items, permanent });
-}
-
 export interface CleanupEvents {
   onTarget: (target: CleanupTarget) => void;
   onLargeFile: (file: LargeFile) => void;

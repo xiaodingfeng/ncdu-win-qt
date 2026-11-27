@@ -18,8 +18,22 @@ export function cancelScan(): Promise<void> {
   return invoke("cancel_scan");
 }
 
-export function getDirectory(path: string): Promise<DirectoryView> {
-  return invoke<DirectoryView>("get_directory", { path });
+export function getDirectory(
+  path: string,
+  offset?: number,
+  limit?: number,
+): Promise<DirectoryView> {
+  return invoke<DirectoryView>("get_directory", { path, offset, limit });
+}
+
+export function releaseScan(): Promise<void> {
+  return invoke("release_scan");
+}
+
+export function subscribeScanProgress(
+  onProgress: (payload: ScanProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<ScanProgress>("scan://progress", (event) => onProgress(event.payload));
 }
 
 export function getTreemap(

@@ -1,4 +1,4 @@
-export type IndexEngineStatus = "idle" | "building" | "ready" | "error" | "disabled";
+export type IndexEngineStatus = "idle" | "loading" | "building" | "ready" | "error" | "disabled";
 
 export interface VolumeStatus {
   volume: string;

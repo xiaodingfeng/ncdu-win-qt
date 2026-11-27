@@ -11,15 +11,14 @@ pub(crate) mod query;
 pub(crate) mod store;
 pub(crate) mod watch;
 
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
-
 use tauri::{AppHandle, Manager};
 
 use store::{IndexStore, VolumeSlot};
 
-/// Loads snapshots for every configured volume in the background. Failures
-/// only leave those volumes idle so the user can build them manually.
+/// Registers the configured volumes at startup but deliberately does not load
+/// their snapshots. `commands::ensure_loaded` runs on the first open of the
+/// search dialog and keeps the result resident afterwards, so users who never
+/// search pay neither the decode time nor the memory.
 pub(crate) fn startup(app: AppHandle) {
     std::thread::spawn(move || {
         let settings = match crate::settings::load_or_init(&app) {
@@ -47,50 +46,7 @@ pub(crate) fn startup(app: AppHandle) {
             };
         }
         store::emit_status(&app);
-
-        let writable = app.state::<IndexStore>().writable();
-        let mut broken: Vec<String> = Vec::new();
-        for volume in &targets {
-            match persist::load(&app, &volume) {
-                Ok(index) => {
-                    let built_at = index.built_at;
-                    let journal_id = index.journal_id;
-                    let generation = app.state::<IndexStore>().generation.load(Ordering::SeqCst);
-                    {
-                        let store = app.state::<IndexStore>();
-                        if let Ok(mut state) = store.state.write() {
-                            if let Some(slot) = state.volumes.get_mut(volume) {
-                                slot.index = Some(Arc::new(RwLock::new(index)));
-                                slot.status = "ready".to_string();
-                                slot.message.clear();
-                                slot.built_at = built_at;
-                                slot.elapsed_ms = 0;
-                                slot.snapshot = true;
-                                slot.generation = generation;
-                            }
-                        };
-                    }
-                    log::info!("index snapshot loaded for volume {volume}");
-                    if settings.index.realtime && journal_id != 0 && writable {
-                        watch::start(app.clone(), volume.clone(), true);
-                    }
-                }
-                Err(err) => {
-                    log::info!("no usable index snapshot for volume {volume}: {err}");
-                    // A missing snapshot is just as much a reason to build as a
-                    // corrupt one: the configured volumes are expected to be
-                    // searchable right after startup.
-                    if writable {
-                        broken.push(volume.clone());
-                    }
-                }
-            }
-        }
-        store::emit_status(&app);
-        if !broken.is_empty() {
-            log::info!("building indexes for volumes without a usable snapshot: {broken:?}");
-            commands::spawn_build(app.clone(), Some(broken));
-        }
+        log::info!("index snapshots will load on first use: {targets:?}");
     });
 }
 

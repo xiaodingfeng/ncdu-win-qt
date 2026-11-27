@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useI18n } from "../context/I18nContext";
 import { formatSize } from "../lib/format";
 import { typeKey, typeVar } from "../lib/fileType";
@@ -28,14 +28,15 @@ const asEntry = (node: TreemapNode): NodeEntry => ({
   error: null,
 });
 
-function worstRatio(row: number[], side: number): number {
-  if (side <= 0) return Number.POSITIVE_INFINITY;
-  const sum = row.reduce((acc, value) => acc + value, 0);
-  if (sum <= 0) return Number.POSITIVE_INFINITY;
-  const max = Math.max(...row);
-  const min = Math.min(...row);
-  return Math.max((side * side * max) / (sum * sum), (sum * sum) / (side * side * min));
+function worstRatio(sum: number, min: number, max: number, side: number): number {
+  if (side <= 0 || sum <= 0) return Number.POSITIVE_INFINITY;
+  return Math.max(
+    (side * side * max) / (sum * sum),
+    (sum * sum) / (side * side * min),
+  );
 }
+
+const MAX_CHILDREN = 2000;
 
 /** Squarified treemap layout (Bruls, Houtman, van Wijk). */
 function squarify(children: TreemapNode[], width: number, height: number): Layout[] {
@@ -50,45 +51,64 @@ function squarify(children: TreemapNode[], width: number, height: number): Layou
 
   const layouts: Layout[] = [];
   let index = 0;
+  let itemCursor = 0;
   let { x, y, w, h } = { x: 0, y: 0, w: width, h: height };
 
   while (index < values.length && w > 0 && h > 0) {
     const side = Math.min(w, h);
-    const row: number[] = [values[index]];
+    let rowSum = values[index];
+    let rowMin = values[index];
+    let rowMax = values[index];
+    let rowCount = 1;
     index += 1;
-    while (
-      index < values.length &&
-      worstRatio([...row, values[index]], side) <= worstRatio(row, side)
-    ) {
-      row.push(values[index]);
-      index += 1;
+
+    while (index < values.length) {
+      const value = values[index];
+      const nextSum = rowSum + value;
+      const nextMin = Math.min(rowMin, value);
+      const nextMax = Math.max(rowMax, value);
+      if (
+        worstRatio(nextSum, nextMin, nextMax, side) <=
+        worstRatio(rowSum, rowMin, rowMax, side)
+      ) {
+        rowSum = nextSum;
+        rowMin = nextMin;
+        rowMax = nextMax;
+        rowCount += 1;
+        index += 1;
+      } else {
+        break;
+      }
     }
 
-    const rowSum = row.reduce((acc, value) => acc + value, 0);
     if (w >= h) {
       const stripWidth = rowSum / h;
       let cursor = y;
-      row.forEach((value) => {
+      for (let i = 0; i < rowCount; i += 1) {
+        const value = values[itemCursor];
         const itemHeight = value / stripWidth;
         layouts.push({
-          node: items[layouts.length].node,
+          node: items[itemCursor].node,
           rect: { x, y: cursor, w: stripWidth, h: itemHeight },
         });
         cursor += itemHeight;
-      });
+        itemCursor += 1;
+      }
       x += stripWidth;
       w -= stripWidth;
     } else {
       const stripHeight = rowSum / w;
       let cursor = x;
-      row.forEach((value) => {
+      for (let i = 0; i < rowCount; i += 1) {
+        const value = values[itemCursor];
         const itemWidth = value / stripHeight;
         layouts.push({
-          node: items[layouts.length].node,
+          node: items[itemCursor].node,
           rect: { x: cursor, y, w: itemWidth, h: stripHeight },
         });
         cursor += itemWidth;
-      });
+        itemCursor += 1;
+      }
       y += stripHeight;
       h -= stripHeight;
     }
@@ -107,7 +127,7 @@ interface TreemapProps {
   onShowFiles?: () => void;
 }
 
-export default function Treemap({
+function Treemap({
   node,
   onActivate,
   onContextMenu,
@@ -132,14 +152,31 @@ export default function Treemap({
 
   const layouts = useMemo(() => {
     if (!node) return [];
-    const visible = node.children.filter((child) => {
-      const key = typeKey(asEntry(child));
-      return !hiddenTypes || !hiddenTypes.has(key);
-    });
+    let visible = node.children
+      .filter((child) => {
+        const key = typeKey(asEntry(child));
+        return !hiddenTypes || !hiddenTypes.has(key);
+      })
+      .sort((a, b) => b.size - a.size);
+    if (visible.length > MAX_CHILDREN) {
+      const head = visible.slice(0, MAX_CHILDREN - 1);
+      const rest = visible.slice(MAX_CHILDREN - 1);
+      const restSum = rest.reduce((acc, child) => acc + child.size, 0);
+      visible = [
+        ...head,
+        {
+          path: "",
+          name: t("treemap.other", { n: rest.length }),
+          kind: "other",
+          size: restSum,
+          children: [],
+        },
+      ];
+    }
     return squarify(visible, size.width, size.height).filter(
       ({ rect }) => rect.w >= 2 && rect.h >= 2,
     );
-  }, [node, size, hiddenTypes]);
+  }, [node, size, hiddenTypes, t]);
 
   return (
     <div className="treemap" ref={containerRef}>
@@ -158,8 +195,11 @@ export default function Treemap({
                   <g
                     key={child.path}
                     className="treemap-cell"
-                    onClick={() => onActivate(entry)}
+                    onClick={() => {
+                      if (child.path) onActivate(entry);
+                    }}
                     onContextMenu={(event) => {
+                      if (!child.path) return;
                       if (!onContextMenu) return;
                       event.preventDefault();
                       onContextMenu(entry, event);
@@ -207,3 +247,5 @@ export default function Treemap({
     </div>
   );
 }
+
+export default memo(Treemap);

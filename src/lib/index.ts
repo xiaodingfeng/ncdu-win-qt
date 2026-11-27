@@ -16,6 +16,11 @@ export function indexVolumes(): Promise<VolumeInfo[]> {
   return invoke<VolumeInfo[]>("index_volumes");
 }
 
+/** Loads snapshots into memory on first use; they stay resident afterwards. */
+export function ensureIndexLoaded(): Promise<void> {
+  return invoke("index_ensure_loaded");
+}
+
 export function indexBuild(volumes?: string[] | null): Promise<void> {
   return invoke("index_build", { volumes: volumes && volumes.length ? volumes : null });
 }
@@ -38,10 +43,6 @@ export function indexSearch(args: IndexSearchArgs): Promise<IndexSearchResponse>
     limit: args.limit ?? null,
     caseSensitive: args.caseSensitive ?? null,
   });
-}
-
-export function restartAsAdmin(): Promise<void> {
-  return invoke("restart_as_admin");
 }
 
 export interface IndexEvents {

@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "../context/I18nContext";
 import { useSettings } from "../context/SettingsContext";
 import FileTable, { type SortKey } from "../components/FileTable";
+import StatusBar from "./StatusBar";
 import Treemap from "../components/Treemap";
 import LegendBar from "../components/LegendBar";
 import CleanupPanel from "../components/CleanupPanel";
@@ -27,28 +28,28 @@ import {
   getDirectory,
   getScanRoot,
   getTreemap,
+  releaseScan,
   searchTree,
   startScan,
   subscribeScan,
 } from "../lib/scan";
 import { deletePaths, openPath, revealPath } from "../lib/ops";
 import { closeLockingProcesses } from "../lib/locker";
-import { formatDuration, formatSize, formatCount, pathSegments } from "../lib/format";
+import { formatSize, formatCount, pathSegments } from "../lib/format";
 import { typeKey } from "../lib/fileType";
-import type { DirectoryView, DiskInfo, NodeEntry, ScanProgress, TreemapNode } from "../types/scan";
+import type {
+  DirectoryView,
+  DiskInfo,
+  NodeEntry,
+  ScanSummary,
+  TreemapNode,
+} from "../types/scan";
 import type { LockingProcess } from "../types/locker";
 import { isDir } from "../types/scan";
 
 type PanelTab = "treemap" | "cleanup" | "sysopt";
 
-interface ScanSummary {
-  path: string;
-  size: number;
-  files: number;
-  folders: number;
-  elapsedMs: number;
-  engine: string;
-}
+const PAGE_SIZE = 200;
 
 interface DeleteConfirm {
   permanent: boolean;
@@ -90,11 +91,11 @@ export default function ScanPage() {
   const [path, setPath] = useState("");
   const [current, setCurrent] = useState<NodeEntry | null>(null);
   const [entries, setEntries] = useState<NodeEntry[]>([]);
+  const [entriesTotal, setEntriesTotal] = useState(0);
   const [treemap, setTreemap] = useState<TreemapNode | null>(null);
   const [disk, setDisk] = useState<DiskInfo | null>(null);
   const [scanning, setScanning] = useState(false);
   const [cancelling, setCancelling] = useState(false);
-  const [progress, setProgress] = useState<ScanProgress | null>(null);
   const [summary, setSummary] = useState<ScanSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -128,16 +129,22 @@ export default function ScanPage() {
 
   const skipHeavy = settings?.scan.skipHeavyDirs ?? true;
   const showFiles = settings?.scan.showFiles ?? true;
+  const filesHidden = useMemo(
+    () => !showFiles && entries.some((entry) => !isDir(entry)),
+    [entries, showFiles],
+  );
   const navigationId = useRef(0);
+  const loadingMore = useRef(false);
   const searchRef = useRef<HTMLInputElement>(null);
 
   const navigate = useCallback(async (target: string) => {
     const requestId = ++navigationId.current;
     try {
-      const view: DirectoryView = await getDirectory(target);
+      const view: DirectoryView = await getDirectory(target, 0, PAGE_SIZE);
       if (requestId !== navigationId.current) return;
       setCurrent(view.node);
       setEntries(view.children);
+      setEntriesTotal(view.total);
       setSelected(new Set());
       setQuery("");
       setResults(null);
@@ -153,7 +160,6 @@ export default function ScanPage() {
       if (!trimmed) return;
       setError(null);
       setNotice(null);
-      setProgress(null);
       setCancelling(false);
       setScanning(true);
       setResults(null);
@@ -174,14 +180,11 @@ export default function ScanPage() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void subscribeScan({
-      onProgress: (payload) => {
-        if (!disposed) setProgress(payload);
-      },
+      onProgress: () => undefined,
       onFinished: (payload) => {
         if (disposed) return;
         setScanning(false);
         setCancelling(false);
-        setProgress(null);
         setSummary({
           path: payload.root.path,
           size: payload.root.size,
@@ -198,7 +201,6 @@ export default function ScanPage() {
         if (disposed) return;
         setScanning(false);
         setCancelling(false);
-        setProgress(null);
         if (payload.code === "cancelled") {
           setNotice(t("status.cancelled"));
         } else {
@@ -275,24 +277,62 @@ export default function ScanPage() {
 
   const activeEntries = results ?? entries;
   const parentSize = current?.size ?? 0;
+  const isDefaultSort = sortKey === "size" && !sortAsc;
 
   const sortedEntries = useMemo(() => {
+    if (isDefaultSort && !results) return activeEntries;
     const list = [...activeEntries];
     list.sort((a, b) => {
       const order = compareEntries(a, b, sortKey, parentSize);
       return sortAsc ? order : -order;
     });
     return list;
-  }, [activeEntries, sortKey, sortAsc, parentSize]);
+  }, [activeEntries, isDefaultSort, results, sortKey, sortAsc, parentSize]);
 
-  const onSort = (key: SortKey) => {
-    if (key === sortKey) {
-      setSortAsc((value) => !value);
-    } else {
-      setSortKey(key);
-      setSortAsc(key === "name" || key === "type");
+  const loadMore = useCallback(async () => {
+    if (!current || loadingMore.current || entries.length >= entriesTotal) return;
+    loadingMore.current = true;
+    const requestId = navigationId.current;
+    try {
+      const view = await getDirectory(current.path, entries.length, PAGE_SIZE);
+      if (requestId !== navigationId.current) return;
+      setEntries((prev) => [...prev, ...view.children]);
+      setEntriesTotal(view.total);
+    } catch {
+      /* ignore */
+    } finally {
+      loadingMore.current = false;
     }
-  };
+  }, [current, entries.length, entriesTotal]);
+
+  useEffect(() => {
+    if (results || !current) return;
+    if (sortKey === "size" && !sortAsc) return;
+    if (entries.length >= entriesTotal) return;
+    let disposed = false;
+    void getDirectory(current.path)
+      .then((view) => {
+        if (disposed) return;
+        setEntries(view.children);
+        setEntriesTotal(view.total);
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
+  }, [results, current, sortKey, sortAsc, entries.length, entriesTotal]);
+
+  const onSort = useCallback(
+    (key: SortKey) => {
+      if (key === sortKey) {
+        setSortAsc((value) => !value);
+      } else {
+        setSortKey(key);
+        setSortAsc(key === "name" || key === "type");
+      }
+    },
+    [sortKey],
+  );
 
   const activate = useCallback(
     (entry: NodeEntry) => {
@@ -305,14 +345,14 @@ export default function ScanPage() {
     [navigate],
   );
 
-  const select = (entry: NodeEntry, additive: boolean) => {
+  const select = useCallback((entry: NodeEntry, additive: boolean) => {
     setSelected((previous) => {
       const next = additive ? new Set(previous) : new Set<string>();
       if (additive && previous.has(entry.path)) next.delete(entry.path);
       else next.add(entry.path);
       return next;
     });
-  };
+  }, []);
 
   const browse = useCallback(async () => {
     const picked = await open({ directory: true, multiple: false, title: t("button.browse") });
@@ -424,7 +464,21 @@ export default function ScanPage() {
       if (!target) return;
       const parent = pathSegments(target).slice(0, -1).pop();
       if (!parent) return;
-      void navigate(parent.path).then(() => setSelected(new Set([target])));
+      // Locate may target any child, so load the full listing after the
+      // first page before selecting it.
+      void (async () => {
+        await navigate(parent.path);
+        const requestId = navigationId.current;
+        try {
+          const view = await getDirectory(parent.path);
+          if (requestId !== navigationId.current) return;
+          setEntries(view.children);
+          setEntriesTotal(view.total);
+        } catch {
+          /* keep the first page */
+        }
+        setSelected(new Set([target]));
+      })();
     };
     const handleProperties = (event: Event) => {
       const detail = (
@@ -605,10 +659,43 @@ export default function ScanPage() {
     }
   };
 
-  const openContextMenu = (entry: NodeEntry, event: MouseEvent) => {
-    if (!selected.has(entry.path)) setSelected(new Set([entry.path]));
-    setMenu({ x: event.clientX, y: event.clientY, entry });
-  };
+  const openContextMenu = useCallback(
+    (entry: NodeEntry, event: MouseEvent) => {
+      if (!selected.has(entry.path)) setSelected(new Set([entry.path]));
+      setMenu({ x: event.clientX, y: event.clientY, entry });
+    },
+    [selected],
+  );
+
+  const treeContextMenu = useCallback(
+    (entry: NodeEntry, event: MouseEvent) => {
+      if (!selected.has(entry.path)) setSelected(new Set([entry.path]));
+      setTreeMenu({ x: event.clientX, y: event.clientY, entry });
+    },
+    [selected],
+  );
+
+  const showFilesAll = useCallback(() => {
+    update({ scan: { ...settings!.scan, showFiles: true } });
+  }, [settings, update]);
+
+  const release = useCallback(async () => {
+    try {
+      await releaseScan();
+      setCurrent(null);
+      setEntries([]);
+      setEntriesTotal(0);
+      setTreemap(null);
+      setSummary(null);
+      setResults(null);
+      setQuery("");
+      setSelected(new Set());
+      setScanSeq((value) => value + 1);
+      setNotice(t("status.released"));
+    } catch (err) {
+      setError(String(err));
+    }
+  }, [t]);
 
   const refreshAfterClean = useCallback(async () => {
     if (current) await navigate(current.path);
@@ -736,54 +823,6 @@ export default function ScanPage() {
     return () => window.removeEventListener("keydown", handler);
   }, [activeEntries, browse, current, path, requestDelete, runScan, selected, activate, navigate]);
 
-  const statusText = (() => {
-    if (error) return error;
-    if (scanning) {
-      if (progress?.engine === "mft") {
-        const phase =
-          progress.phase === "enumerating"
-            ? t("scan.phase.enumerating")
-            : progress.phase === "readingMft"
-              ? t("scan.phase.reading_mft")
-              : progress.phase === "buildingTree"
-                ? t("scan.phase.building_tree")
-                : t("scan.engine_mft");
-        const count = progress.count ? ` (${formatCount(progress.count)})` : "";
-        return `${phase}${count}`;
-      }
-      const target = progress?.path || path;
-      return cancelling ? t("status.cancelling") : t("status.scanning", { path: target });
-    }
-    if (notice) return notice;
-    if (results) return t("status.search_results", { query: query.trim(), n: results.length });
-    if (current) {
-      const isRoot = summary?.path === current.path;
-      if (isRoot && summary) {
-        return t("status.scanned", {
-          path: current.path,
-          size: formatSize(summary.size),
-          files: formatCount(summary.files),
-          folders: formatCount(summary.folders),
-          time: formatDuration(summary.elapsedMs, t),
-        });
-      }
-      return t("status.current", {
-        path: current.path,
-        size: formatSize(current.size),
-        files: formatCount(current.fileCount),
-        folders: formatCount(current.dirCount),
-      });
-    }
-    return t("status.ready");
-  })();
-
-  const engineText = (() => {
-    const engine = scanning ? progress?.engine : summary?.engine;
-    if (engine === "mft") return t("scan.engine_mft");
-    if (engine === "walk") return t("scan.engine_walk");
-    return "";
-  })();
-
   const diskText = disk
     ? t("status.disk_free", {
         free: formatSize(disk.free),
@@ -795,6 +834,7 @@ export default function ScanPage() {
   const indexBadge = (() => {
     if (!indexInfo) return t("index.badge_idle");
     if (indexInfo.status === "building") return t("index.badge_building");
+    if (indexInfo.status === "loading") return t("index.badge_loading");
     if (indexInfo.status === "ready") {
       return t("index.badge_ready", { n: formatCount(indexInfo.count) });
     }
@@ -852,6 +892,11 @@ export default function ScanPage() {
         >
           {t("button.refresh")}
         </button>
+        {summary && !scanning && (
+          <button className="btn" onClick={() => void release()}>
+            {t("button.release")}
+          </button>
+        )}
         <label className="check" title={t("tooltip.skip_heavy")}>
           <input
             type="checkbox"
@@ -892,6 +937,7 @@ export default function ScanPage() {
       <div className="scan-body">
         <div className="table-pane">
           <FileTable
+            key={current?.path ?? "empty"}
             entries={sortedEntries}
             parentSize={parentSize}
             sortKey={sortKey}
@@ -903,6 +949,9 @@ export default function ScanPage() {
             onActivate={activate}
             onSelect={select}
             onContextMenu={openContextMenu}
+            total={isDefaultSort && !results ? entriesTotal : undefined}
+            onLoadMore={isDefaultSort && !results ? loadMore : undefined}
+            resetKey={current?.path ?? ""}
           />
         </div>
 
@@ -942,14 +991,9 @@ export default function ScanPage() {
                   node={treemap}
                   onActivate={activate}
                   hiddenTypes={hiddenTypes}
-                  onContextMenu={(entry, event) => {
-                    if (!selected.has(entry.path)) setSelected(new Set([entry.path]));
-                    setTreeMenu({ x: event.clientX, y: event.clientY, entry });
-                  }}
-                  filesHidden={!showFiles && entries.some((entry) => !isDir(entry))}
-                  onShowFiles={() =>
-                    update({ scan: { ...settings!.scan, showFiles: true } })
-                  }
+                  onContextMenu={treeContextMenu}
+                  filesHidden={filesHidden}
+                  onShowFiles={showFilesAll}
                 />
                 <LegendBar
                   hiddenTypes={hiddenTypes}
@@ -997,28 +1041,21 @@ export default function ScanPage() {
         </div>
       </div>
 
-      <footer className="status-bar">
-        <span className="status-text" title={statusText}>
-          {statusText}
-        </span>
-        {engineText && (
-          <span className="status-engine" title={t("scan.engine_tip")}>
-            {engineText}
-          </span>
-        )}
-        <button
-          className="status-index"
-          title={t("search_global.title")}
-          onClick={() =>
-            window.dispatchEvent(
-              new CustomEvent("ncduwin:action", { detail: "global-search" }),
-            )
-          }
-        >
-          {indexBadge}
-        </button>
-        <span className="status-disk">{diskText}</span>
-      </footer>
+      <StatusBar
+        scanning={scanning}
+        cancelling={cancelling}
+        error={error}
+        notice={notice}
+        results={results}
+        query={query}
+        current={current}
+        summary={summary}
+        diskText={diskText}
+        indexBadge={indexBadge}
+        onGlobalSearch={() =>
+          window.dispatchEvent(new CustomEvent("ncduwin:action", { detail: "global-search" }))
+        }
+      />
 
       <Fade show={Boolean(menu)}>
         {menu && (

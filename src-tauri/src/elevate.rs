@@ -53,7 +53,6 @@ pub(crate) enum HelperOp {
     NetworkFix,
     FlushDns,
     CreateJunction { source: String, target: String },
-    DeletePaths { paths: Vec<String>, permanent: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -668,48 +667,7 @@ fn execute(op: HelperOp) -> HelperResponse {
         HelperOp::NetworkFix => network_fix(),
         HelperOp::FlushDns => flush_dns(),
         HelperOp::CreateJunction { source, target } => create_junction(&source, &target),
-        HelperOp::DeletePaths { paths, permanent } => delete_paths(&paths, permanent),
     }
-}
-
-/// Deletes the requested paths with administrator rights.
-fn delete_paths(paths: &[String], permanent: bool) -> HelperResponse {
-    let mut deleted = 0u32;
-    let mut errors = Vec::new();
-    if permanent {
-        for path in paths {
-            match crate::ops::permanent_delete(path) {
-                Ok(()) => deleted += 1,
-                Err(err) => errors.push(format!("{path}: {err}")),
-            }
-        }
-    } else {
-        match crate::ops::move_to_recycle_bin(paths) {
-            Ok(()) => deleted = paths.len() as u32,
-            Err(err) => errors.push(err),
-        }
-    }
-    if errors.is_empty() {
-        HelperResponse::ok_with(deleted)
-    } else {
-        HelperResponse {
-            ok: deleted > 0,
-            needs_reboot: false,
-            message: errors.join("; "),
-            total: deleted,
-        }
-    }
-}
-
-/// Retries a failed delete through the elevated helper (one UAC prompt).
-pub(crate) fn delete_paths_elevated(
-    paths: &[String],
-    permanent: bool,
-) -> Result<ElevateOutcome, String> {
-    run_elevated(HelperOp::DeletePaths {
-        paths: paths.to_vec(),
-        permanent,
-    })
 }
 
 /// Creates a junction through the elevated helper, used when a direct

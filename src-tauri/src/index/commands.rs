@@ -13,7 +13,6 @@ use windows_sys::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
 };
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
 
 use crate::mft;
 use crate::scan::ScanStore;
@@ -369,7 +368,7 @@ fn run_build(
                     set_volume_message(
                         &app,
                         &volume,
-                        "administrator rights were denied; only accessible folders are indexed",
+                        "cannot read the raw volume; only accessible folders are indexed",
                     );
                 }
             }
@@ -459,6 +458,114 @@ fn install(
     log::info!("index ready: volume {volume}, {count} entries, {memory} bytes, {elapsed} ms");
     emit_status(app);
     watch::start(app.clone(), volume.to_string(), realtime && journal_id != 0);
+}
+
+/// Loads snapshots the first time the search dialog opens and keeps them in
+/// memory for the rest of the session. Starting the app alone therefore costs
+/// neither the decode time nor the resident memory; volumes without a usable
+/// snapshot are built at this point instead of at startup.
+pub(crate) fn ensure_loaded(app: AppHandle) {
+    let settings = crate::settings::load_or_init(&app).unwrap_or_default();
+    if !settings.index.enabled {
+        super::store::update_status(&app, "disabled", "index is disabled in settings");
+        return;
+    }
+    let targets = target_volumes(&app, None);
+    let store = app.state::<IndexStore>();
+    let generation = store.generation.load(Ordering::SeqCst);
+    let mut pending: Vec<String> = Vec::new();
+    {
+        let Ok(mut state) = store.state.write() else {
+            return;
+        };
+        state.realtime = settings.index.realtime;
+        for volume in &targets {
+            let slot = state
+                .volumes
+                .entry(volume.clone())
+                .or_insert_with(|| VolumeSlot::new(volume));
+            if slot.index.is_some() || slot.status == "building" || slot.status == "loading" {
+                continue;
+            }
+            slot.status = "loading".to_string();
+            slot.message.clear();
+            pending.push(volume.clone());
+        }
+    };
+    if pending.is_empty() {
+        return;
+    }
+    // A previous failure (for example a read-only instance that refused to
+    // build) must not mask a successful load.
+    clear_status_override(&app);
+    emit_status(&app);
+
+    let worker = app.clone();
+    std::thread::spawn(move || {
+        let mut missing: Vec<String> = Vec::new();
+        for volume in &pending {
+            if worker.state::<IndexStore>().generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            match persist::load(&worker, volume) {
+                Ok(index) => {
+                    let built_at = index.built_at;
+                    let journal_id = index.journal_id;
+                    {
+                        let store = worker.state::<IndexStore>();
+                        let Ok(mut state) = store.state.write() else {
+                            return;
+                        };
+                        let Some(slot) = state.volumes.get_mut(volume) else {
+                            continue;
+                        };
+                        if slot.status != "loading" {
+                            continue;
+                        }
+                        slot.index = Some(Arc::new(RwLock::new(index)));
+                        slot.status = "ready".to_string();
+                        slot.message.clear();
+                        slot.built_at = built_at;
+                        slot.elapsed_ms = 0;
+                        slot.snapshot = true;
+                        slot.generation = generation;
+                    }
+                    log::info!("index snapshot loaded for volume {volume}");
+                    if settings.index.realtime
+                        && journal_id != 0
+                        && worker.state::<IndexStore>().writable()
+                    {
+                        watch::start(worker.clone(), volume.clone(), true);
+                    }
+                }
+                Err(err) => {
+                    log::info!("no usable index snapshot for volume {volume}: {err}");
+                    missing.push(volume.clone());
+                }
+            }
+        }
+        if missing.is_empty() {
+            return;
+        }
+        if worker.state::<IndexStore>().writable() {
+            spawn_build(worker.clone(), Some(missing));
+        } else {
+            for volume in &missing {
+                set_volume_status(
+                    &worker,
+                    volume,
+                    "error",
+                    "another instance owns the index; this window is read-only",
+                );
+            }
+        }
+    });
+}
+
+#[tauri::command]
+pub fn index_ensure_loaded(app: AppHandle) -> Result<(), String> {
+    ensure_loaded(app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -645,27 +752,4 @@ pub fn index_search(
         });
     }
     Ok(response)
-}
-
-#[tauri::command]
-pub fn restart_as_admin(app: AppHandle) -> Result<(), String> {
-    let exe =
-        std::env::current_exe().map_err(|err| format!("cannot locate the executable: {err}"))?;
-    let operation = wide("runas");
-    let file = wide(&exe.to_string_lossy());
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            operation.as_ptr(),
-            file.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1,
-        )
-    };
-    if result as isize <= 32 {
-        return Err("elevation was cancelled".to_string());
-    }
-    app.exit(0);
-    Ok(())
 }

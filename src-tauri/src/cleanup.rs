@@ -147,8 +147,6 @@ pub struct CleanFinished {
     pub total_freed: u64,
     pub items: Vec<CleanItemOutcome>,
     pub failed: Vec<String>,
-    /// Set when failures look permission-related and elevation may help.
-    pub needs_elevation: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1095,7 +1093,7 @@ pub fn scan_duplicates(app: AppHandle, store: State<'_, CleanupStore>) -> Result
                 if classify_file_danger(&entry.path, &entry.name) == DangerLevel::C {
                     return;
                 }
-                buckets.entry(entry.size).or_default().push(entry.clone());
+                buckets.entry(entry.size).or_default().push(entry);
             });
         });
         if from_tree.is_none() {
@@ -1610,15 +1608,6 @@ pub fn clean_items(app: AppHandle, items: Vec<CleanItem>, permanent: bool) -> Re
             crate::scan::remove_paths(&scan, &deleted_paths);
         }
 
-        let needs_elevation = outcomes.iter().any(|outcome| {
-            outcome.failed
-                && outcome.key != "cleanup.b_recycle"
-                && !outcome.message.contains("no longer exists")
-                && !outcome.message.contains("not found")
-                && !outcome.message.contains("protected")
-                && outcome.path.to_lowercase().len() > 2
-        });
-
         log::info!(
             "cleanup finished: {} deleted, {} skipped, {} bytes freed",
             total_deleted,
@@ -1633,79 +1622,10 @@ pub fn clean_items(app: AppHandle, items: Vec<CleanItem>, permanent: bool) -> Re
                 total_freed,
                 items: outcomes,
                 failed,
-                needs_elevation,
             },
         );
     });
 
-    Ok(())
-}
-
-/// Retries failed deletes through the elevated helper (one UAC prompt).
-#[tauri::command]
-pub fn clean_items_elevated(
-    app: AppHandle,
-    items: Vec<CleanItem>,
-    permanent: bool,
-) -> Result<(), String> {
-    if items.is_empty() {
-        return Err("no items selected".to_string());
-    }
-    std::thread::spawn(move || {
-        let mut paths = Vec::new();
-        let mut sizes = Vec::new();
-        for item in items.iter().filter(|item| item.kind != "target") {
-            let size = fs::metadata(&item.path)
-                .map(|meta| if meta.is_dir() { 0 } else { meta.len() })
-                .unwrap_or(0);
-            sizes.push((item.path.clone(), size));
-            paths.push(item.path.clone());
-        }
-        let outcome = crate::elevate::delete_paths_elevated(&paths, permanent);
-        let ok = matches!(&outcome, Ok(value) if value.ok);
-        let message = match outcome {
-            Ok(value) => value.message,
-            Err(err) => err,
-        };
-
-        let mut deleted_paths = Vec::new();
-        let mut total_freed = 0u64;
-        let outcomes: Vec<CleanItemOutcome> = sizes
-            .iter()
-            .map(|(path, size)| CleanItemOutcome {
-                key: "large".to_string(),
-                path: path.clone(),
-                deleted: if ok { 1 } else { 0 },
-                skipped: if ok { 0 } else { 1 },
-                freed: if ok { *size } else { 0 },
-                failed: !ok,
-                message: if ok || message.is_empty() {
-                    String::new()
-                } else {
-                    message.clone()
-                },
-            })
-            .collect();
-        if ok {
-            total_freed = sizes.iter().map(|(_, size)| *size).sum();
-            deleted_paths = paths.clone();
-        }
-        if !deleted_paths.is_empty() {
-            let scan = app.state::<ScanStore>();
-            crate::scan::remove_paths(&scan, &deleted_paths);
-        }
-        let _ = app.emit(
-            "cleanup://clean-finished",
-            CleanFinished {
-                total_deleted: if ok { paths.len() as u32 } else { 0 },
-                total_skipped: if ok { 0 } else { paths.len() as u32 },
-                total_freed,
-                items: outcomes,
-                failed: if ok { Vec::new() } else { vec![message] },
-                needs_elevation: false,
-            },
-        );
-    });
     Ok(())
 }
 

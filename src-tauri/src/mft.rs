@@ -1,6 +1,7 @@
 //! NTFS $MFT fast scan, mirroring the Qt build's MftScanner: enumerate USN
 //! records for names and parent references, then read the raw $MFT for sizes.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -141,7 +142,7 @@ pub(crate) fn open_volume(letter: char) -> Result<Volume, MftError> {
     if handle.is_null() || handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
         let err = unsafe { GetLastError() };
         return Err(MftError::Failed(format!(
-            "cannot open volume {device} (error {err}); administrator rights are required"
+            "cannot open volume {device} (error {err})"
         )));
     }
     Ok(Volume { handle })
@@ -407,7 +408,6 @@ struct MftNode {
     skipped: bool,
     children: Vec<u64>,
     parent: Option<u64>,
-    path: String,
 }
 
 fn is_hidden(name: &str, attributes: u32) -> bool {
@@ -455,60 +455,54 @@ struct Tree {
 }
 
 impl Tree {
-    fn computed(&self, _root: u64) -> HashMap<u64, (u64, u32, u32)> {
+    fn computed(&self, root: u64) -> HashMap<u64, (u64, u32, u32)> {
         let mut result: HashMap<u64, (u64, u32, u32)> = HashMap::new();
+        // File references are sparse u64 values (not dense indices), so the
+        // traversal state stays a HashMap keyed by the reference.
         let mut state: HashMap<u64, u8> = HashMap::new();
-        for start in self.nodes.keys().copied() {
-            if state.get(&start).copied() == Some(2) {
-                continue;
+        let mut stack = vec![(root, false)];
+        while let Some((reference, expanded)) = stack.pop() {
+            match state.get(&reference).copied() {
+                Some(2) => continue,
+                Some(1) if !expanded => continue,
+                _ => {}
             }
-            let mut stack = vec![(start, false)];
-            while let Some((reference, expanded)) = stack.pop() {
-                match state.get(&reference).copied() {
-                    Some(2) => continue,
-                    Some(1) if !expanded => continue,
-                    _ => {}
-                }
-                let Some(node) = self.nodes.get(&reference) else {
-                    state.insert(reference, 2);
-                    continue;
-                };
-                if expanded {
-                    let is_file = !is_dir(node.attributes) && !is_symlink(node.attributes);
-                    let mut size = if is_file {
-                        self.sizes.get(&reference).copied().unwrap_or(0).max(0) as u64
-                    } else {
-                        0
-                    };
-                    let mut files = 0u32;
-                    let mut dirs = 0u32;
-                    for child in &node.children {
-                        let Some((child_size, child_files, child_dirs)) = result.get(child) else {
-                            continue;
-                        };
-                        let Some(child_node) = self.nodes.get(child) else {
-                            continue;
-                        };
-                        if child_node.skipped {
-                            continue;
-                        }
-                        size += child_size;
-                        if is_dir(child_node.attributes) && !is_symlink(child_node.attributes) {
-                            dirs += 1 + child_dirs;
-                            files += child_files;
-                        } else if !is_symlink(child_node.attributes) {
-                            files += 1;
-                        }
-                    }
-                    result.insert(reference, (size, files, dirs));
-                    state.insert(reference, 2);
+            let Some(node) = self.nodes.get(&reference) else {
+                state.insert(reference, 2);
+                continue;
+            };
+            if expanded {
+                let is_file = !is_dir(node.attributes) && !is_symlink(node.attributes);
+                let mut size = if is_file {
+                    self.sizes.get(&reference).copied().unwrap_or(0).max(0) as u64
                 } else {
-                    state.insert(reference, 1);
-                    stack.push((reference, true));
-                    for child in node.children.iter().rev() {
-                        if state.get(child).copied().unwrap_or(0) == 0 {
-                            stack.push((*child, false));
-                        }
+                    0
+                };
+                let mut files = 0u32;
+                let mut dirs = 0u32;
+                for child in &node.children {
+                    let Some((child_size, child_files, child_dirs)) = result.get(child) else {
+                        continue;
+                    };
+                    let Some(child_node) = self.nodes.get(child) else {
+                        continue;
+                    };
+                    size += child_size;
+                    if is_dir(child_node.attributes) && !is_symlink(child_node.attributes) {
+                        dirs += 1 + child_dirs;
+                        files += child_files;
+                    } else if !is_symlink(child_node.attributes) {
+                        files += 1;
+                    }
+                }
+                result.insert(reference, (size, files, dirs));
+                state.insert(reference, 2);
+            } else {
+                state.insert(reference, 1);
+                stack.push((reference, true));
+                for child in node.children.iter().rev() {
+                    if state.get(child).copied().unwrap_or(0) == 0 {
+                        stack.push((*child, false));
                     }
                 }
             }
@@ -519,7 +513,6 @@ impl Tree {
     fn build_raw(
         &self,
         reference: u64,
-        path: String,
         name: String,
         kind: NodeKind,
         computed: &HashMap<u64, (u64, u32, u32)>,
@@ -531,7 +524,6 @@ impl Tree {
             .map(|node| is_hidden(&node.name, node.attributes))
             .unwrap_or(false);
         let mut raw = RawNode {
-            path: path.clone().into(),
             name,
             kind,
             size: if kind == NodeKind::File {
@@ -555,9 +547,7 @@ impl Tree {
                     continue;
                 };
                 if is_dir(child_node.attributes) && is_symlink(child_node.attributes) {
-                    let child_path = join_path(&path, &child_node.name);
                     raw.children.push(RawNode {
-                        path: child_path.into(),
                         name: child_node.name.clone(),
                         kind: NodeKind::Symlink,
                         size: self.sizes.get(child).copied().unwrap_or(0).max(0) as u64,
@@ -570,7 +560,6 @@ impl Tree {
                     });
                     continue;
                 }
-                let child_path = join_path(&path, &child_node.name);
                 let child_kind = if is_dir(child_node.attributes) {
                     NodeKind::Directory
                 } else {
@@ -578,7 +567,6 @@ impl Tree {
                 };
                 raw.children.push(self.build_raw(
                     *child,
-                    child_path,
                     child_node.name.clone(),
                     child_kind,
                     computed,
@@ -595,9 +583,6 @@ fn aggregate_root(node: &mut RawNode) {
     let mut files = 0u32;
     let mut dirs = 0u32;
     for child in &node.children {
-        if child.skipped {
-            continue;
-        }
         size += child.size;
         match child.kind {
             NodeKind::Directory | NodeKind::Drive => {
@@ -1114,29 +1099,30 @@ pub(crate) fn scan_volume(
     if !low_memory_seen {
         let (records, _, _) =
             read_mft_records(volume.handle, &volume_data, cancel, low_memory, progress)?;
-        sizes = records
-            .into_iter()
-            .map(|(reference, (size, _))| (reference, size))
-            .collect();
+        sizes.reserve(records.len());
+        for (reference, (size, _)) in records {
+            sizes.insert(reference, size);
+        }
     }
 
     progress(MftPhase::BuildingTree, 0);
     let drive_prefix = format!("{letter}:\\");
     let mut nodes: HashMap<u64, MftNode> = HashMap::new();
-    let mut parent_refs: HashMap<u64, u64> = HashMap::new();
+    let mut links: Vec<(u64, u64)> = Vec::new();
     for entry in &entries {
         if entry.parent_ref == 0 {
             continue;
         }
-        parent_refs.entry(entry.file_ref).or_insert(entry.parent_ref);
-        nodes.entry(entry.file_ref).or_insert_with(|| MftNode {
-            name: entry.name.clone(),
-            attributes: entry.attributes,
-            skipped: entry.skipped,
-            children: Vec::new(),
-            parent: None,
-            path: String::new(),
-        });
+        if let Entry::Vacant(slot) = nodes.entry(entry.file_ref) {
+            slot.insert(MftNode {
+                name: entry.name.clone(),
+                attributes: entry.attributes,
+                skipped: entry.skipped,
+                children: Vec::new(),
+                parent: None,
+            });
+            links.push((entry.file_ref, entry.parent_ref));
+        }
     }
     // Record 5 is the volume root; some USN journals omit it or report no parent.
     nodes.entry(5).or_insert_with(|| MftNode {
@@ -1145,94 +1131,44 @@ pub(crate) fn scan_volume(
         skipped: false,
         children: Vec::new(),
         parent: None,
-        path: String::new(),
     });
-    let mut parent_links: Vec<(u64, Option<u64>)> = nodes
-        .keys()
-        .map(|reference| {
-            let parent = parent_refs
-                .get(reference)
-                .copied()
-                .filter(|parent| *parent != 0 && *parent != *reference && nodes.contains_key(parent));
-            (*reference, parent)
-        })
-        .collect();
-    for (reference, parent) in parent_links.drain(..) {
-        if let Some(node) = nodes.get_mut(&reference) {
-            node.parent = parent;
+    for (reference, parent_ref) in &links {
+        if *parent_ref != 0 && *parent_ref != *reference && nodes.contains_key(parent_ref) {
+            if let Some(node) = nodes.get_mut(reference) {
+                node.parent = Some(*parent_ref);
+            }
         }
     }
-    let parents: Vec<(u64, u64)> = nodes
-        .iter()
-        .filter_map(|(reference, node)| node.parent.map(|parent| (*reference, parent)))
-        .collect();
-    for (child, parent) in parents {
-        if let Some(parent_node) = nodes.get_mut(&parent) {
-            parent_node.children.push(child);
-        }
-    }
-
-    let root_ref = if is_drive_root(root) {
-        Some(5u64)
-    } else {
-        let target = normalize(&root.to_string_lossy());
-        nodes
-            .iter()
-            .find(|(reference, node)| {
-                if **reference == 5 {
-                    return false;
-                }
-                let path = if let Some(parent) = node.parent {
-                    if parent == 5 {
-                        join_path(&drive_prefix, &node.name)
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    join_path(&drive_prefix, &node.name)
-                };
-                !path.is_empty() && path_key(&path) == path_key(&target)
-            })
-            .map(|(reference, _)| *reference)
-    };
-    let root_ref = root_ref.ok_or_else(|| {
-        MftError::Failed(format!(
-            "cannot locate {} in the MFT",
-            root.to_string_lossy()
-        ))
-    })?;
-
-    // Assign paths top-down from the drive root and any orphan subtrees.
-    let mut stack: Vec<(u64, String)> = Vec::new();
-    if let Some(node) = nodes.get(&5) {
-        stack.push((5, drive_prefix.clone()));
-        let _ = node;
-    }
-    for (reference, node) in &nodes {
-        if node.parent.is_none() && *reference != 5 {
-            stack.push((*reference, join_path(&drive_prefix, &node.name)));
-        }
-    }
-    while let Some((reference, path)) = stack.pop() {
-        let Some(node) = nodes.get_mut(&reference) else {
-            continue;
-        };
-        if !node.path.is_empty() {
-            continue;
-        }
-        node.path = path.clone();
-        for child in node.children.clone() {
-            if let Some(child_node) = nodes.get(&child) {
-                if child_node.path.is_empty() {
-                    stack.push((child, join_path(&path, &child_node.name)));
-                }
+    for (reference, parent_ref) in links {
+        if nodes.get(&reference).and_then(|node| node.parent) == Some(parent_ref) {
+            if let Some(parent_node) = nodes.get_mut(&parent_ref) {
+                parent_node.children.push(reference);
             }
         }
     }
 
+    let root_ref = if is_drive_root(root) {
+        5u64
+    } else {
+        let target = normalize(&root.to_string_lossy());
+        let found = nodes
+            .iter()
+            .find(|(reference, node)| {
+                **reference != 5
+                    && (node.parent == Some(5) || node.parent.is_none())
+                    && path_key(&join_path(&drive_prefix, &node.name)) == path_key(&target)
+            })
+            .map(|(reference, _)| *reference);
+        found.ok_or_else(|| {
+            MftError::Failed(format!(
+                "cannot locate {} in the MFT",
+                root.to_string_lossy()
+            ))
+        })?
+    };
+
     let tree = Tree { nodes, sizes };
     let computed = tree.computed(root_ref);
-    let root_node = tree.nodes.get(&root_ref);
     let root_name = if is_drive_root(root) {
         format!("{letter}:")
     } else {
@@ -1245,11 +1181,7 @@ pub(crate) fn scan_volume(
     } else {
         NodeKind::Directory
     };
-    let root_path = root_node
-        .map(|node| node.path.clone())
-        .filter(|path| !path.is_empty())
-        .unwrap_or_else(|| normalize(&root.to_string_lossy()));
-    let mut raw = tree.build_raw(root_ref, root_path, root_name, root_kind, &computed, 0);
+    let mut raw = tree.build_raw(root_ref, root_name, root_kind, &computed, 0);
     aggregate_root(&mut raw);
     raw.size = computed.get(&root_ref).map(|value| value.0).unwrap_or(raw.size);
     raw.file_count = computed.get(&root_ref).map(|value| value.1).unwrap_or(raw.file_count);
@@ -1289,6 +1221,60 @@ mod tests {
         assert_eq!(entry.file_ref, 42);
         assert_eq!(entry.parent_ref, 5);
         assert_eq!(entry.name, "hello.txt");
+    }
+
+    #[test]
+    fn computed_counts_skipped_directories_in_parent() {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            5,
+            MftNode {
+                name: ".".to_string(),
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+                skipped: false,
+                children: vec![10, 11],
+                parent: None,
+            },
+        );
+        nodes.insert(
+            10,
+            MftNode {
+                name: "WinSxS".to_string(),
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+                skipped: true,
+                children: vec![12],
+                parent: Some(5),
+            },
+        );
+        nodes.insert(
+            12,
+            MftNode {
+                name: "big.dll".to_string(),
+                attributes: 0,
+                skipped: false,
+                children: Vec::new(),
+                parent: Some(10),
+            },
+        );
+        nodes.insert(
+            11,
+            MftNode {
+                name: "normal.txt".to_string(),
+                attributes: 0,
+                skipped: false,
+                children: Vec::new(),
+                parent: Some(5),
+            },
+        );
+        let mut sizes = HashMap::new();
+        sizes.insert(12, 100i64);
+        sizes.insert(11, 10i64);
+        let tree = Tree { nodes, sizes };
+        let computed = tree.computed(5);
+        // WinSxS is skipped (not expanded in the UI) but its 100 bytes and
+        // file still count towards the root, matching the directory walk.
+        assert_eq!(computed.get(&5).copied(), Some((110, 2, 1)));
+        assert_eq!(computed.get(&10).copied(), Some((100, 1, 0)));
     }
 
     #[test]

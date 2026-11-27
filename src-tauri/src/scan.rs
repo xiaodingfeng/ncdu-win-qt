@@ -6,7 +6,7 @@ use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -21,9 +21,6 @@ const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const LOW_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
-
-const SKIP_ALWAYS: &[&str] = &["winsxs"];
-const SKIP_HEAVY: &[&str] = &["node_modules"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -59,6 +56,10 @@ pub struct ScanProgress {
     pub engine: String,
     pub phase: String,
     pub count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files_per_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +82,7 @@ pub struct ScanFailure {
 pub struct DirectoryView {
     pub node: NodeEntry,
     pub children: Vec<NodeEntry>,
+    pub total: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,7 +103,6 @@ pub struct DiskInfo {
 }
 
 pub(crate) struct RawNode {
-    pub(crate) path: PathBuf,
     pub(crate) name: String,
     pub(crate) kind: NodeKind,
     pub(crate) size: u64,
@@ -113,32 +114,46 @@ pub(crate) struct RawNode {
     pub(crate) children: Vec<RawNode>,
 }
 
+#[derive(Clone)]
 struct NodeData {
-    entry: NodeEntry,
-    children: Vec<usize>,
-    parent: usize,
+    name: Box<str>,
+    kind: NodeKind,
+    size: u64,
+    file_count: u32,
+    dir_count: u32,
+    is_hidden: bool,
+    skipped: bool,
+    error: Option<Box<str>>,
+    parent: u32,
+    children: Vec<u32>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ScanState {
     arena: Vec<NodeData>,
-    by_path: HashMap<String, usize>,
-    root: usize,
+    by_path: HashMap<String, u32>, // 只索引目录/盘符
+    root: u32,
+    root_path: Box<str>,
 }
 
 #[derive(Default)]
 pub struct ScanStore {
-    inner: Mutex<Option<ScanState>>,
+    inner: std::sync::RwLock<Option<Arc<ScanState>>>,
     cancel: Mutex<Option<Arc<AtomicBool>>>,
     generation: AtomicU64,
     active: AtomicBool,
 }
 
 impl ScanStore {
+    /// Cheap snapshot of the current result: the lock is released immediately.
+    pub(crate) fn snapshot(&self) -> Option<Arc<ScanState>> {
+        self.inner.read().ok().and_then(|guard| guard.clone())
+    }
+
     /// Runs `f` against the current scan result, if one exists.
     pub(crate) fn with_state<R>(&self, f: impl FnOnce(&ScanState) -> R) -> Option<R> {
-        let guard = self.inner.lock().ok()?;
-        guard.as_ref().map(f)
+        let state = self.snapshot()?;
+        Some(f(state.as_ref()))
     }
 
     pub(crate) fn is_scanning(&self) -> bool {
@@ -147,12 +162,18 @@ impl ScanStore {
 }
 
 /// Clears the "scanning" flag on every exit path, including early returns.
-struct ScanActive(AppHandle);
+/// Only the thread of the latest generation may clear it.
+struct ScanActive {
+    app: AppHandle,
+    generation: u64,
+}
 
 impl Drop for ScanActive {
     fn drop(&mut self) {
-        let store = self.0.state::<ScanStore>();
-        store.active.store(false, Ordering::Relaxed);
+        let store = self.app.state::<ScanStore>();
+        if store.generation.load(Ordering::SeqCst) == self.generation {
+            store.active.store(false, Ordering::SeqCst);
+        }
     }
 }
 
@@ -188,6 +209,9 @@ struct ScanContext {
     last_emit: AtomicU64,
     low_memory: AtomicBool,
     skip_heavy: bool,
+    started: Instant,
+    last_mem_check: AtomicU64,
+    mem_checks: AtomicU64,
 }
 
 impl ScanContext {
@@ -198,6 +222,19 @@ impl ScanContext {
     fn is_low_memory(&self) -> bool {
         if self.low_memory.load(Ordering::Relaxed) {
             return true;
+        }
+        let count = self.mem_checks.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = self.started.elapsed().as_millis() as u64;
+        let last = self.last_mem_check.load(Ordering::Relaxed);
+        if count % 2048 != 0 && now.saturating_sub(last) < 500 {
+            return false;
+        }
+        if self
+            .last_mem_check
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
         }
         let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
         status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
@@ -213,10 +250,7 @@ impl ScanContext {
     }
 
     fn emit_progress(&self, path: &Path) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now = self.started.elapsed().as_millis() as u64;
         let last = self.last_emit.load(Ordering::Relaxed);
         if now.saturating_sub(last) < 100 {
             return;
@@ -228,28 +262,40 @@ impl ScanContext {
         {
             return;
         }
+        let elapsed = now;
+        let files = self.files.load(Ordering::Relaxed);
         let _ = self.app.emit(
             "scan://progress",
             ScanProgress {
                 path: path.to_string_lossy().into_owned(),
-                files: self.files.load(Ordering::Relaxed),
+                files,
                 dirs: self.dirs.load(Ordering::Relaxed),
                 bytes: self.bytes.load(Ordering::Relaxed),
                 engine: "walk".to_string(),
                 phase: "walking".to_string(),
                 count: None,
+                elapsed_ms: Some(elapsed),
+                files_per_sec: if elapsed == 0 {
+                    None
+                } else {
+                    Some(files * 1000 / elapsed.max(1))
+                },
             },
         );
     }
 }
 
-fn path_key(path: &Path) -> String {
-    let text = path.to_string_lossy().to_lowercase();
+fn path_key_str(text: &str) -> String {
+    let text = text.to_lowercase();
     if text.len() > 3 {
         text.trim_end_matches(['\\', '/']).to_string()
     } else {
         text
     }
+}
+
+fn path_key(path: &Path) -> String {
+    path_key_str(&path.to_string_lossy())
 }
 
 fn normalize(path: &Path) -> PathBuf {
@@ -286,16 +332,8 @@ fn is_hidden_name(name: &str) -> bool {
     name.starts_with('.') || name.starts_with('$')
 }
 
-fn skip_names(skip_heavy: bool) -> Vec<String> {
-    let mut names: Vec<String> = SKIP_ALWAYS.iter().map(|s| s.to_string()).collect();
-    if skip_heavy {
-        names.extend(SKIP_HEAVY.iter().map(|s| s.to_string()));
-    }
-    names
-}
-
-fn should_skip(name: &str, skip_list: &[String]) -> bool {
-    skip_list.iter().any(|skip| skip.eq_ignore_ascii_case(name))
+fn should_skip(name: &str, skip_heavy: bool) -> bool {
+    name.eq_ignore_ascii_case("winsxs") || (skip_heavy && name.eq_ignore_ascii_case("node_modules"))
 }
 
 fn fast_dir_size(path: &Path, ctx: &ScanContext) -> (u64, u32, u32) {
@@ -321,7 +359,7 @@ fn fast_dir_size(path: &Path, ctx: &ScanContext) -> (u64, u32, u32) {
             if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
                 dirs += 1;
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if !SKIP_ALWAYS.iter().any(|skip| skip.eq_ignore_ascii_case(&name)) {
+                if !name.eq_ignore_ascii_case("winsxs") {
                     pending.push(entry.path());
                 }
             } else {
@@ -335,7 +373,6 @@ fn fast_dir_size(path: &Path, ctx: &ScanContext) -> (u64, u32, u32) {
 
 fn scan_directory(path: &Path, name: String, top: bool, depth: u32, ctx: &ScanContext) -> RawNode {
     let mut node = RawNode {
-        path: path.to_path_buf(),
         is_hidden: is_hidden_name(&name),
         name,
         kind: if top && is_drive_root(path) {
@@ -354,120 +391,6 @@ fn scan_directory(path: &Path, name: String, top: bool, depth: u32, ctx: &ScanCo
     ctx.dirs.fetch_add(1, Ordering::Relaxed);
     ctx.emit_progress(path);
 
-    let skip_list = skip_names(ctx.skip_heavy);
-    let entries = match fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(err) => {
-            node.error = Some(if err.kind() == std::io::ErrorKind::PermissionDenied {
-                "Access denied".to_string()
-            } else {
-                err.to_string()
-            });
-            return node;
-        }
-    };
-
-    for entry in entries.flatten() {
-        if ctx.cancelled() || ctx.is_low_memory() {
-            break;
-        }
-        let child_path = entry.path();
-        let child_name = entry.file_name().to_string_lossy().into_owned();
-        let metadata = match entry.metadata() {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        let attrs = metadata.file_attributes();
-
-        if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            let size = metadata.len();
-            node.children.push(RawNode {
-                path: child_path,
-                name: child_name,
-                kind: NodeKind::Symlink,
-                size,
-                file_count: 0,
-                dir_count: 0,
-                is_hidden: attrs & FILE_ATTRIBUTE_HIDDEN != 0,
-                skipped: false,
-                error: None,
-                children: Vec::new(),
-            });
-            continue;
-        }
-
-        if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
-            let hidden = is_hidden_name(&child_name);
-            if should_skip(&child_name, &skip_list) || depth >= MAX_SCAN_DEPTH {
-                let (size, files, dirs) = fast_dir_size(&child_path, ctx);
-                node.children.push(RawNode {
-                    path: child_path,
-                    name: child_name,
-                    kind: NodeKind::Directory,
-                    size,
-                    file_count: files,
-                    dir_count: dirs,
-                    is_hidden: hidden,
-                    skipped: true,
-                    error: None,
-                    children: Vec::new(),
-                });
-            } else {
-                node.children.push(scan_directory(
-                    &child_path,
-                    child_name,
-                    false,
-                    depth + 1,
-                    ctx,
-                ));
-            }
-        } else {
-            let hidden = attrs & FILE_ATTRIBUTE_HIDDEN != 0 || is_hidden_name(&child_name);
-            node.children.push(RawNode {
-                path: child_path,
-                name: child_name,
-                kind: NodeKind::File,
-                size: metadata.len(),
-                file_count: 0,
-                dir_count: 0,
-                is_hidden: hidden,
-                skipped: false,
-                error: None,
-                children: Vec::new(),
-            });
-            ctx.files.fetch_add(1, Ordering::Relaxed);
-            ctx.bytes.fetch_add(metadata.len(), Ordering::Relaxed);
-        }
-    }
-
-    aggregate(&mut node);
-    node
-}
-
-/// Root pass: immediate subdirectories are scanned in parallel, matching the
-/// Qt implementation's thread-pool behaviour.
-fn scan_root(path: &Path, ctx: &ScanContext) -> RawNode {
-    let mut node = RawNode {
-        path: path.to_path_buf(),
-        name: display_name(path, true),
-        kind: if is_drive_root(path) {
-            NodeKind::Drive
-        } else {
-            NodeKind::Directory
-        },
-        size: 0,
-        file_count: 0,
-        dir_count: 0,
-        is_hidden: false,
-        skipped: false,
-        error: None,
-        children: Vec::new(),
-    };
-
-    ctx.dirs.fetch_add(1, Ordering::Relaxed);
-    ctx.emit_progress(path);
-
-    let skip_list = skip_names(ctx.skip_heavy);
     let entries = match fs::read_dir(path) {
         Ok(entries) => entries,
         Err(err) => {
@@ -487,17 +410,18 @@ fn scan_root(path: &Path, ctx: &ScanContext) -> RawNode {
         }
         let child_path = entry.path();
         let child_name = entry.file_name().to_string_lossy().into_owned();
-        let Ok(metadata) = entry.metadata() else {
-            continue;
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
         };
         let attrs = metadata.file_attributes();
 
         if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            let size = metadata.len();
             node.children.push(RawNode {
-                path: child_path,
                 name: child_name,
                 kind: NodeKind::Symlink,
-                size: metadata.len(),
+                size,
                 file_count: 0,
                 dir_count: 0,
                 is_hidden: attrs & FILE_ATTRIBUTE_HIDDEN != 0,
@@ -505,12 +429,14 @@ fn scan_root(path: &Path, ctx: &ScanContext) -> RawNode {
                 error: None,
                 children: Vec::new(),
             });
-        } else if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
-            if should_skip(&child_name, &skip_list) {
-                let hidden = is_hidden_name(&child_name);
+            continue;
+        }
+
+        if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            let hidden = is_hidden_name(&child_name);
+            if should_skip(&child_name, ctx.skip_heavy) || depth >= MAX_SCAN_DEPTH {
                 let (size, files, dirs) = fast_dir_size(&child_path, ctx);
                 node.children.push(RawNode {
-                    path: child_path,
                     name: child_name,
                     kind: NodeKind::Directory,
                     size,
@@ -527,7 +453,6 @@ fn scan_root(path: &Path, ctx: &ScanContext) -> RawNode {
         } else {
             let hidden = attrs & FILE_ATTRIBUTE_HIDDEN != 0 || is_hidden_name(&child_name);
             node.children.push(RawNode {
-                path: child_path,
                 name: child_name,
                 kind: NodeKind::File,
                 size: metadata.len(),
@@ -543,12 +468,21 @@ fn scan_root(path: &Path, ctx: &ScanContext) -> RawNode {
         }
     }
 
-    let scanned: Vec<RawNode> = subdirs
-        .par_iter()
-        .map(|(child_path, child_name)| {
-            scan_directory(child_path, child_name.clone(), false, 1, ctx)
-        })
-        .collect();
+    let scanned: Vec<RawNode> = if depth < 2 && subdirs.len() > 1 {
+        subdirs
+            .par_iter()
+            .map(|(child_path, child_name)| {
+                scan_directory(child_path, child_name.clone(), false, depth + 1, ctx)
+            })
+            .collect()
+    } else {
+        subdirs
+            .into_iter()
+            .map(|(child_path, child_name)| {
+                scan_directory(&child_path, child_name, false, depth + 1, ctx)
+            })
+            .collect()
+    };
     node.children.extend(scanned);
 
     aggregate(&mut node);
@@ -604,49 +538,156 @@ fn should_use_mft(path: &Path) -> bool {
     )
 }
 
+static SCAN_POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+
+fn scan_pool() -> Option<&'static rayon::ThreadPool> {
+    SCAN_POOL
+        .get_or_init(|| {
+            let workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .clamp(2, 8);
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
+/// Compares names case-insensitively without allocating.
+fn compare_name(left: &str, right: &str) -> std::cmp::Ordering {
+    let mut left = left.chars();
+    let mut right = right.chars();
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(a), Some(b)) => {
+                let ordering = a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase());
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
+            }
+        }
+    }
+}
+
 fn flatten(
     node: RawNode,
     arena: &mut Vec<NodeData>,
-    by_path: &mut HashMap<String, usize>,
-    parent: usize,
-) -> usize {
-    let index = arena.len();
+    by_path: &mut HashMap<String, u32>,
+    parent: u32,
+    parent_path: &str,
+    is_root: bool,
+) -> u32 {
+    let RawNode {
+        name,
+        kind,
+        size,
+        file_count,
+        dir_count,
+        is_hidden,
+        skipped,
+        error,
+        children: raw_children,
+        ..
+    } = node;
+    let is_dir = matches!(kind, NodeKind::Directory | NodeKind::Drive);
+    let full_path = if is_root {
+        parent_path.to_string()
+    } else if is_dir {
+        let mut text = String::with_capacity(parent_path.len() + 1 + name.len());
+        text.push_str(parent_path);
+        if !parent_path.ends_with('\\') && !parent_path.ends_with('/') {
+            text.push('\\');
+        }
+        text.push_str(&name);
+        text
+    } else {
+        String::new()
+    };
+
+    let index = arena.len() as u32;
     arena.push(NodeData {
-        entry: NodeEntry {
-            path: node.path.to_string_lossy().into_owned(),
-            name: node.name,
+        name: name.into_boxed_str(),
+        kind,
+        size,
+        file_count,
+        dir_count,
+        is_hidden,
+        skipped,
+        error: error.map(|value| value.into_boxed_str()),
+        parent,
+        children: Vec::new(),
+    });
+    if is_dir {
+        by_path.insert(path_key_str(&full_path), index);
+    }
+
+    let child_parent_path: &str = if is_dir { &full_path } else { parent_path };
+    let mut children = Vec::with_capacity(raw_children.len());
+    for child in raw_children {
+        children.push(flatten(
+            child,
+            arena,
+            by_path,
+            index,
+            child_parent_path,
+            false,
+        ));
+    }
+    children.sort_by(|a, b| {
+        let left = &arena[*a as usize];
+        let right = &arena[*b as usize];
+        right
+            .size
+            .cmp(&left.size)
+            .then_with(|| compare_name(&left.name, &right.name))
+    });
+    arena[index as usize].children = children;
+    index
+}
+
+impl ScanState {
+    fn path_of(&self, index: u32) -> String {
+        if index == self.root {
+            return self.root_path.to_string();
+        }
+        let mut names: Vec<&str> = Vec::new();
+        let mut cursor = index;
+        let mut guard = 0;
+        while cursor != self.root && cursor != u32::MAX && guard < 1024 {
+            let node = &self.arena[cursor as usize];
+            names.push(&node.name);
+            cursor = node.parent;
+            guard += 1;
+        }
+        let mut text = String::with_capacity(self.root_path.len() + 64);
+        text.push_str(&self.root_path);
+        for name in names.iter().rev() {
+            if !text.ends_with('\\') && !text.ends_with('/') {
+                text.push('\\');
+            }
+            text.push_str(name);
+        }
+        text
+    }
+
+    fn entry(&self, index: u32) -> NodeEntry {
+        let node = &self.arena[index as usize];
+        NodeEntry {
+            path: self.path_of(index),
+            name: node.name.to_string(),
             kind: node.kind,
             size: node.size,
             file_count: node.file_count,
             dir_count: node.dir_count,
             is_hidden: node.is_hidden,
             skipped: node.skipped,
-            error: node.error,
-        },
-        children: Vec::new(),
-        parent,
-    });
-    by_path.insert(path_key(&node.path), index);
-
-    let mut children = Vec::with_capacity(node.children.len());
-    for child in node.children {
-        children.push(flatten(child, arena, by_path, index));
-    }
-    children.sort_by(|a, b| {
-        let left = &arena[*a].entry;
-        let right = &arena[*b].entry;
-        right
-            .size
-            .cmp(&left.size)
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-    });
-    arena[index].children = children;
-    index
-}
-
-impl ScanState {
-    fn entry(&self, index: usize) -> NodeEntry {
-        self.arena[index].entry.clone()
+            error: node.error.as_ref().map(|value| value.to_string()),
+        }
     }
 
     /// Drops a deleted path (and its subtree) from the scanned tree and
@@ -655,52 +696,85 @@ impl ScanState {
         let Some(index) = self.find(path) else {
             return false;
         };
-        let entry = self.arena[index].entry.clone();
-        let parent = self.arena[index].parent;
+        let node = &self.arena[index as usize];
+        let size = node.size;
+        let file_count = node.file_count;
+        let dir_count = node.dir_count;
+        let kind = node.kind;
+        let parent = node.parent;
 
         let mut removed = Vec::new();
         let mut stack = vec![index];
         while let Some(current) = stack.pop() {
             removed.push(current);
-            stack.extend(self.arena[current].children.iter().copied());
+            stack.extend(self.arena[current as usize].children.iter().copied());
         }
-        if parent != usize::MAX {
-            self.arena[parent].children.retain(|child| *child != index);
+        if parent != u32::MAX {
+            self.arena[parent as usize]
+                .children
+                .retain(|child| *child != index);
         }
         for current in &removed {
-            self.by_path
-                .remove(&path_key(Path::new(&self.arena[*current].entry.path)));
+            if matches!(
+                self.arena[*current as usize].kind,
+                NodeKind::Directory | NodeKind::Drive
+            ) {
+                self.by_path
+                    .remove(&path_key(Path::new(&self.path_of(*current))));
+            }
         }
 
-        let is_directory = matches!(entry.kind, NodeKind::Directory | NodeKind::Drive);
+        let is_directory = matches!(kind, NodeKind::Directory | NodeKind::Drive);
         let mut cursor = parent;
-        while cursor != usize::MAX {
-            let node = &mut self.arena[cursor];
-            node.entry.size = node.entry.size.saturating_sub(entry.size);
+        while cursor != u32::MAX {
+            let node = &mut self.arena[cursor as usize];
+            node.size = node.size.saturating_sub(size);
             if is_directory {
-                node.entry.file_count = node.entry.file_count.saturating_sub(entry.file_count);
-                node.entry.dir_count = node
-                    .entry
-                    .dir_count
-                    .saturating_sub(1 + entry.dir_count);
-            } else if entry.kind == NodeKind::File {
-                node.entry.file_count = node.entry.file_count.saturating_sub(1);
+                node.file_count = node.file_count.saturating_sub(file_count);
+                node.dir_count = node.dir_count.saturating_sub(1 + dir_count);
+            } else if kind == NodeKind::File {
+                node.file_count = node.file_count.saturating_sub(1);
             }
             cursor = node.parent;
         }
         true
     }
 
-    fn child_entries(&self, index: usize) -> Vec<NodeEntry> {
-        self.arena[index]
-            .children
+    pub(crate) fn directory_view(
+        &self,
+        index: u32,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> DirectoryView {
+        let children = &self.arena[index as usize].children;
+        let total = children.len();
+        let start = offset.unwrap_or(0).min(total);
+        let end = limit.map(|count| (start + count).min(total)).unwrap_or(total);
+        let items = children[start..end]
             .iter()
             .map(|child| self.entry(*child))
-            .collect()
+            .collect();
+        DirectoryView {
+            node: self.entry(index),
+            children: items,
+            total: total as u32,
+        }
     }
 
-    fn find(&self, path: &Path) -> Option<usize> {
-        self.by_path.get(&path_key(path)).copied()
+    fn find(&self, path: &Path) -> Option<u32> {
+        if let Some(index) = self.by_path.get(&path_key(path)) {
+            return Some(*index);
+        }
+        let parent_index = *self.by_path.get(&path_key(path.parent()?))?;
+        let name = path.file_name()?.to_string_lossy();
+        self.arena[parent_index as usize]
+            .children
+            .iter()
+            .copied()
+            .find(|child| {
+                let node = &self.arena[*child as usize];
+                node.name.eq_ignore_ascii_case(name.as_ref())
+            })
     }
 
     /// Entry lookup for modules outside the scan commands (cleanup, migrate).
@@ -710,55 +784,50 @@ impl ScanState {
 
     /// Every file in the scanned tree, used by the cleanup and duplicate scans.
     pub(crate) fn file_entries(&self) -> Vec<NodeEntry> {
-        self.arena
-            .iter()
-            .filter(|node| node.entry.kind == NodeKind::File)
-            .map(|node| node.entry.clone())
+        (0..self.arena.len() as u32)
+            .filter(|index| self.arena[*index as usize].kind == NodeKind::File)
+            .map(|index| self.entry(index))
             .collect()
     }
 
     /// Visits every file without cloning the whole tree (memory friendly).
-    pub(crate) fn for_each_file(&self, mut visit: impl FnMut(&NodeEntry)) {
-        for node in self.arena.iter() {
-            if node.entry.kind == NodeKind::File {
-                visit(&node.entry);
+    pub(crate) fn for_each_file(&self, mut visit: impl FnMut(NodeEntry)) {
+        for index in 0..self.arena.len() as u32 {
+            if self.arena[index as usize].kind == NodeKind::File {
+                visit(self.entry(index));
             }
         }
     }
-}
 
-impl ScanState {
-
-    fn treemap(&self, index: usize, depth: u32, show_files: bool) -> TreemapNode {
-        let entry = &self.arena[index].entry;
+    fn treemap(&self, index: u32, depth: u32, show_files: bool) -> TreemapNode {
+        let node = &self.arena[index as usize];
         let mut children = Vec::new();
         if depth > 0 {
-            for child in &self.arena[index].children {
-                let child_entry = &self.arena[*child].entry;
-                if !show_files && child_entry.kind == NodeKind::File {
+            for child in &node.children {
+                if !show_files && self.arena[*child as usize].kind == NodeKind::File {
                     continue;
                 }
                 children.push(self.treemap(*child, depth - 1, show_files));
             }
         }
         TreemapNode {
-            path: entry.path.clone(),
-            name: entry.name.clone(),
-            kind: entry.kind,
-            size: entry.size,
+            path: self.path_of(index),
+            name: node.name.to_string(),
+            kind: node.kind,
+            size: node.size,
             children,
         }
     }
 
-    fn search(&self, start: usize, query: &str, limit: usize, results: &mut Vec<NodeEntry>) {
+    fn search(&self, start: u32, query: &str, limit: usize, results: &mut Vec<NodeEntry>) {
         if results.len() >= limit {
             return;
         }
-        let entry = &self.arena[start].entry;
-        if wildcard_match(&entry.name, query) {
-            results.push(entry.clone());
+        let node = &self.arena[start as usize];
+        if wildcard_match(&node.name, query) {
+            results.push(self.entry(start));
         }
-        for child in &self.arena[start].children {
+        for child in &node.children {
             if results.len() >= limit {
                 break;
             }
@@ -819,28 +888,14 @@ pub fn start_scan(
     store.active.store(true, Ordering::SeqCst);
 
     std::thread::spawn(move || {
-        let _active = ScanActive(app.clone());
+        let _active = ScanActive {
+            app: app.clone(),
+            generation,
+        };
         let store = app.state::<ScanStore>();
         let started = Instant::now();
         let root_display = normalize(&root_path);
-
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .clamp(2, 8);
-        let pool = match rayon::ThreadPoolBuilder::new().num_threads(workers).build() {
-            Ok(pool) => pool,
-            Err(err) => {
-                let _ = app.emit(
-                    "scan://failed",
-                    ScanFailure {
-                        code: "failed".to_string(),
-                        message: err.to_string(),
-                    },
-                );
-                return;
-            }
-        };
+        let root_path = root_display.to_string_lossy().into_owned();
 
         let ctx = ScanContext {
             cancel: cancel.clone(),
@@ -851,6 +906,28 @@ pub fn start_scan(
             last_emit: AtomicU64::new(0),
             low_memory: AtomicBool::new(false),
             skip_heavy,
+            started,
+            last_mem_check: AtomicU64::new(0),
+            mem_checks: AtomicU64::new(0),
+        };
+
+        let walk = || match scan_pool() {
+            Some(pool) => pool.install(|| {
+                scan_directory(
+                    &root_display,
+                    display_name(&root_display, true),
+                    true,
+                    0,
+                    &ctx,
+                )
+            }),
+            None => scan_directory(
+                &root_display,
+                display_name(&root_display, true),
+                true,
+                0,
+                &ctx,
+            ),
         };
 
         let mut engine = "walk";
@@ -872,6 +949,8 @@ pub fn start_scan(
                         engine: "mft".to_string(),
                         phase: phase_name.to_string(),
                         count: Some(count),
+                        elapsed_ms: Some(started.elapsed().as_millis() as u64),
+                        files_per_sec: None,
                     },
                 );
             };
@@ -901,11 +980,11 @@ pub fn start_scan(
                         "MFT scan unavailable for {}: {err}; falling back to directory walk",
                         root_display.display()
                     );
-                    pool.install(|| scan_root(&root_display, &ctx))
+                    walk()
                 }
             }
         } else {
-            pool.install(|| scan_root(&root_display, &ctx))
+            walk()
         };
 
         if cancel.load(Ordering::Relaxed) {
@@ -918,14 +997,18 @@ pub fn start_scan(
             );
             return;
         }
+        if store.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
 
         let mut arena = Vec::new();
         let mut by_path = HashMap::new();
-        let root_index = flatten(raw, &mut arena, &mut by_path, usize::MAX);
+        let root_index = flatten(raw, &mut arena, &mut by_path, u32::MAX, &root_path, true);
         let state = ScanState {
             arena,
             by_path,
             root: root_index,
+            root_path: root_path.into_boxed_str(),
         };
         let summary = state.entry(root_index);
         let low_memory = ctx.low_memory.load(Ordering::Relaxed);
@@ -940,11 +1023,14 @@ pub fn start_scan(
             if low_memory { " [low memory]" } else { "" }
         );
 
-        if let Ok(mut guard) = store_guard(&store) {
-            *guard = Some(state);
-        }
         if store.generation.load(Ordering::SeqCst) != generation {
             return;
+        }
+        if let Ok(mut guard) = store.inner.write() {
+            if store.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            *guard = Some(Arc::new(state));
         }
 
         if low_memory {
@@ -970,12 +1056,13 @@ pub fn start_scan(
 }
 
 pub(crate) fn remove_paths(store: &ScanStore, paths: &[String]) -> usize {
-    let Ok(mut guard) = store.inner.lock() else {
+    let Ok(mut guard) = store.inner.write() else {
         return 0;
     };
-    let Some(state) = guard.as_mut() else {
+    let Some(current) = guard.as_mut() else {
         return 0;
     };
+    let state = Arc::make_mut(current);
     let mut removed = 0;
     for path in paths {
         if state.remove_path(Path::new(path)) {
@@ -983,12 +1070,6 @@ pub(crate) fn remove_paths(store: &ScanStore, paths: &[String]) -> usize {
         }
     }
     removed
-}
-
-fn store_guard<'a>(
-    store: &'a State<'_, ScanStore>,
-) -> Result<std::sync::MutexGuard<'a, Option<ScanState>>, String> {
-    store.inner.lock().map_err(|_| "scan state poisoned".to_string())
 }
 
 #[tauri::command]
@@ -1001,17 +1082,24 @@ pub fn cancel_scan(store: State<'_, ScanStore>) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn release_scan(store: State<'_, ScanStore>) -> Result<(), String> {
+    let mut guard = store.inner.write().map_err(|_| "scan state poisoned")?;
+    *guard = None;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn get_directory(
     store: State<'_, ScanStore>,
     path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
 ) -> Result<DirectoryView, String> {
-    let guard = store_guard(&store)?;
-    let state = guard.as_ref().ok_or("no scan result")?;
-    let index = state.find(Path::new(&path)).ok_or("path not in scan result")?;
-    Ok(DirectoryView {
-        node: state.entry(index),
-        children: state.child_entries(index),
-    })
+    let state = store.snapshot().ok_or("no scan result")?;
+    let index = state
+        .find(Path::new(&path))
+        .ok_or("path not in scan result")?;
+    Ok(state.directory_view(index, offset, limit))
 }
 
 #[tauri::command]
@@ -1021,9 +1109,10 @@ pub fn get_treemap(
     depth: Option<u32>,
     show_files: Option<bool>,
 ) -> Result<TreemapNode, String> {
-    let guard = store_guard(&store)?;
-    let state = guard.as_ref().ok_or("no scan result")?;
-    let index = state.find(Path::new(&path)).ok_or("path not in scan result")?;
+    let state = store.snapshot().ok_or("no scan result")?;
+    let index = state
+        .find(Path::new(&path))
+        .ok_or("path not in scan result")?;
     Ok(state.treemap(index, depth.unwrap_or(1), show_files.unwrap_or(true)))
 }
 
@@ -1038,9 +1127,10 @@ pub fn search_tree(
     if trimmed.is_empty() {
         return Ok(Vec::new());
     }
-    let guard = store_guard(&store)?;
-    let state = guard.as_ref().ok_or("no scan result")?;
-    let index = state.find(Path::new(&path)).ok_or("path not in scan result")?;
+    let state = store.snapshot().ok_or("no scan result")?;
+    let index = state
+        .find(Path::new(&path))
+        .ok_or("path not in scan result")?;
     let mut results = Vec::new();
     let pattern = if trimmed.contains('*') || trimmed.contains('?') {
         trimmed.to_string()
@@ -1053,8 +1143,9 @@ pub fn search_tree(
 
 #[tauri::command]
 pub fn get_scan_root(store: State<'_, ScanStore>) -> Result<Option<NodeEntry>, String> {
-    let guard = store_guard(&store)?;
-    Ok(guard.as_ref().map(|state| state.entry(state.root)))
+    Ok(store
+        .snapshot()
+        .map(|state| state.entry(state.root)))
 }
 
 #[tauri::command]
@@ -1082,4 +1173,236 @@ pub fn disk_info(path: String) -> Result<DiskInfo, String> {
         return Err("cannot read disk space".to_string());
     }
     Ok(DiskInfo { free, total })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(name: &str, size: u64) -> RawNode {
+        RawNode {
+            name: name.to_string(),
+            kind: NodeKind::File,
+            size,
+            file_count: 0,
+            dir_count: 0,
+            is_hidden: false,
+            skipped: false,
+            error: None,
+            children: Vec::new(),
+        }
+    }
+
+    fn dir(name: &str, size: u64, file_count: u32, dir_count: u32, children: Vec<RawNode>) -> RawNode {
+        RawNode {
+            name: name.to_string(),
+            kind: NodeKind::Directory,
+            size,
+            file_count,
+            dir_count,
+            is_hidden: false,
+            skipped: false,
+            error: None,
+            children,
+        }
+    }
+
+    fn sample_root() -> RawNode {
+        RawNode {
+            name: "C:".to_string(),
+            kind: NodeKind::Drive,
+            size: 300,
+            file_count: 4,
+            dir_count: 2,
+            is_hidden: false,
+            skipped: false,
+            error: None,
+            children: vec![
+                dir(
+                    "Alpha",
+                    100,
+                    2,
+                    0,
+                    vec![file("Beta.bin", 60), file("alpha.bin", 40)],
+                ),
+                dir(
+                    "beta",
+                    200,
+                    2,
+                    0,
+                    vec![file("Beta.txt", 50), file("alpha.txt", 50)],
+                ),
+            ],
+        }
+    }
+
+    fn sample_state() -> ScanState {
+        let mut arena = Vec::new();
+        let mut by_path = HashMap::new();
+        let root = flatten(
+            sample_root(),
+            &mut arena,
+            &mut by_path,
+            u32::MAX,
+            r"C:\",
+            true,
+        );
+        ScanState {
+            arena,
+            by_path,
+            root,
+            root_path: r"C:\".to_string().into_boxed_str(),
+        }
+    }
+
+    #[test]
+    fn flatten_indexes_directories_and_resolves_paths() {
+        let state = sample_state();
+
+        let alpha = state.find(Path::new(r"C:\Alpha")).expect("Alpha dir");
+        let alpha_entry = state.entry(alpha);
+        assert_eq!(alpha_entry.path, r"C:\Alpha");
+        assert_eq!(alpha_entry.kind, NodeKind::Directory);
+
+        // Path lookups ignore case.
+        assert!(state.find(Path::new(r"c:\alpha")).is_some());
+
+        // Files are resolved through their parent directory.
+        let beta_bin = state
+            .find(Path::new(r"C:\Alpha\Beta.bin"))
+            .expect("file in Alpha");
+        let beta_entry = state.entry(beta_bin);
+        assert_eq!(beta_entry.name, "Beta.bin");
+        assert_eq!(beta_entry.path, r"C:\Alpha\Beta.bin");
+        assert_eq!(beta_entry.kind, NodeKind::File);
+        assert!(state.find(Path::new(r"c:\alpha\BETA.BIN")).is_some());
+
+        // Root is reachable through its own key.
+        let root = state.find(Path::new(r"C:\")).expect("root");
+        assert_eq!(root, state.root);
+        assert_eq!(state.entry(root).path, r"C:\");
+    }
+
+    #[test]
+    fn flatten_sorts_children_by_size_then_name_ignoring_case() {
+        let state = sample_state();
+
+        let root = state.directory_view(state.root, None, None);
+        assert_eq!(root.total, 2);
+        let names: Vec<&str> = root.children.iter().map(|child| child.name.as_str()).collect();
+        // "beta" (200) before "Alpha" (100).
+        assert_eq!(names, vec!["beta", "Alpha"]);
+
+        let beta = state
+            .find(Path::new(r"C:\beta"))
+            .expect("beta dir");
+        let view = state.directory_view(beta, None, None);
+        let names: Vec<&str> = view.children.iter().map(|child| child.name.as_str()).collect();
+        // Equal sizes fall back to a case-insensitive name order.
+        assert_eq!(names, vec!["alpha.txt", "Beta.txt"]);
+
+        let paged = state.directory_view(state.root, Some(1), Some(1));
+        assert_eq!(paged.total, 2);
+        assert_eq!(paged.children.len(), 1);
+        assert_eq!(paged.children[0].name, "Alpha");
+    }
+
+    #[test]
+    fn remove_path_updates_ancestors_and_drops_lookup() {
+        let mut state = sample_state();
+
+        assert!(state.remove_path(Path::new(r"C:\Alpha")));
+        assert!(state.find(Path::new(r"C:\Alpha")).is_none());
+
+        let root = state.entry(state.root);
+        assert_eq!(root.size, 200);
+        assert_eq!(root.file_count, 2);
+        assert_eq!(root.dir_count, 1);
+
+        assert!(state.remove_path(Path::new(r"C:\beta\Beta.txt")));
+        assert!(state.find(Path::new(r"C:\beta\Beta.txt")).is_none());
+
+        let root = state.entry(state.root);
+        assert_eq!(root.size, 150);
+        assert_eq!(root.file_count, 1);
+        assert_eq!(root.dir_count, 1);
+
+        let beta = state.find(Path::new(r"C:\beta")).expect("beta dir");
+        let view = state.directory_view(beta, None, None);
+        assert_eq!(view.total, 1);
+        assert_eq!(view.children[0].name, "alpha.txt");
+    }
+
+    #[test]
+    fn search_and_treemap_keep_full_paths() {
+        let state = sample_state();
+        let mut results = Vec::new();
+        state.search(state.root, "*alpha*", 10, &mut results);
+        assert!(results.iter().any(|entry| entry.path == r"C:\Alpha\alpha.bin"));
+        assert!(results.iter().any(|entry| entry.path == r"C:\beta\alpha.txt"));
+
+        let tree = state.treemap(state.root, 1, true);
+        assert_eq!(tree.path, r"C:\");
+        assert!(tree.children.iter().any(|child| child.path == r"C:\beta"));
+        assert!(tree.children.iter().any(|child| child.path == r"C:\Alpha"));
+    }
+
+    #[test]
+    #[ignore = "benchmark: cargo test -- --ignored --nocapture bench_flatten"]
+    fn bench_flatten_one_million_nodes() {
+        const DIRS: usize = 1_000;
+        const FILES_PER_DIR: usize = 1_000;
+        let children: Vec<RawNode> = (0..DIRS)
+            .map(|dir_index| {
+                let files: Vec<RawNode> = (0..FILES_PER_DIR)
+                    .map(|file_index| {
+                        let size = (file_index as u64 % 4096) + 1;
+                        file(&format!("file{file_index}.bin"), size)
+                    })
+                    .collect();
+                dir(
+                    &format!("dir{dir_index}"),
+                    FILES_PER_DIR as u64 * 2048,
+                    FILES_PER_DIR as u32,
+                    0,
+                    files,
+                )
+            })
+            .collect();
+        let root = RawNode {
+            name: "C:".to_string(),
+            kind: NodeKind::Drive,
+            size: DIRS as u64 * FILES_PER_DIR as u64 * 2048,
+            file_count: (DIRS * FILES_PER_DIR) as u32,
+            dir_count: DIRS as u32,
+            is_hidden: false,
+            skipped: false,
+            error: None,
+            children,
+        };
+
+        let started = Instant::now();
+        let mut arena = Vec::new();
+        let mut by_path = HashMap::new();
+        let root_index = flatten(root, &mut arena, &mut by_path, u32::MAX, r"C:\", true);
+        let elapsed = started.elapsed();
+        println!(
+            "flatten: {} nodes in {elapsed:?}, arena bytes={}, indexed dirs={}",
+            arena.len(),
+            std::mem::size_of::<NodeData>() * arena.len(),
+            by_path.len()
+        );
+        let state = ScanState {
+            arena,
+            by_path,
+            root: root_index,
+            root_path: r"C:\".to_string().into_boxed_str(),
+        };
+        let lookup = Instant::now();
+        for index in 0..1_000u32 {
+            let _ = state.entry(index);
+        }
+        println!("1000 entry() lookups in {:?}", lookup.elapsed());
+        assert_eq!(state.directory_view(state.root, None, None).total, DIRS as u32);
+    }
 }

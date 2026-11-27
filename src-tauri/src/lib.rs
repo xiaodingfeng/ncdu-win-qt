@@ -143,6 +143,7 @@ pub fn run() {
             scan::get_scan_root,
             scan::default_path,
             scan::disk_info,
+            scan::release_scan,
             ops::delete_paths,
             ops::open_path,
             ops::reveal_path,
@@ -155,7 +156,6 @@ pub fn run() {
             cleanup::scan_duplicates,
             cleanup::cancel_cleanup,
             cleanup::clean_items,
-            cleanup::clean_items_elevated,
             cleanup::cleanup_disk_space,
             sysopt::get_update_status,
             sysopt::set_update_enabled,
@@ -185,11 +185,11 @@ pub fn run() {
             misc::download_update,
             index::commands::index_status,
             index::commands::index_volumes,
+            index::commands::index_ensure_loaded,
             index::commands::index_build,
             index::commands::index_cancel,
             index::commands::index_search,
-            index::commands::index_clear,
-            index::commands::restart_as_admin
+            index::commands::index_clear
         ])
         .run(tauri::generate_context!())
         .expect("error while running NcduWin");

@@ -6,13 +6,13 @@ import ContextMenu, { type MenuItem } from "./ContextMenu";
 import { IconClose, IconDrive, IconSearch } from "./icons";
 import { formatCount, formatSize } from "../lib/format";
 import {
+  ensureIndexLoaded,
   indexBuild,
   indexCancel,
   indexClear,
   indexSearch,
   indexStatus,
   indexVolumes,
-  restartAsAdmin,
   subscribeIndex,
 } from "../lib/index";
 import { openPath, revealPath } from "../lib/ops";
@@ -107,7 +107,10 @@ export default function GlobalSearch() {
     setError(null);
     setNotice(null);
     setShowSettings(false);
-    void indexStatus()
+    // The first open loads the snapshots; later opens are a no-op because the
+    // backend keeps every loaded volume resident.
+    void ensureIndexLoaded()
+      .then(() => indexStatus())
       .then(setStatus)
       .catch(() => undefined);
     void indexVolumes()
@@ -476,6 +479,7 @@ export default function GlobalSearch() {
         phase: progress ? t(`search_global.phase_${progress.phase}`) : "",
       });
     }
+    if (status.status === "loading") return t("search_global.loading_index");
     if (status.status === "ready") {
       const ready = status.volumes
         .filter((item) => item.status === "ready")
@@ -598,15 +602,6 @@ export default function GlobalSearch() {
             )}
             {status && !status.writable && (
               <span className="gs-status gs-readonly">{t("search_global.read_only")}</span>
-            )}
-            {status && !status.canBuild && status.engine !== "walk" && (
-              <button
-                className="btn small"
-                title={t("search_global.admin_hint")}
-                onClick={() => void restartAsAdmin().catch((err) => setError(String(err)))}
-              >
-                {t("search_global.restart_admin")}
-              </button>
             )}
           </div>
         </div>
@@ -771,6 +766,12 @@ export default function GlobalSearch() {
               <div className="gs-desc-title">{t("search_global.title")}</div>
               <p className="gs-desc-text">{t("search_global.description")}</p>
             </div>
+            {status?.status === "loading" && (
+              <span className="gs-loading-hint">
+                <span className="gs-spinner" aria-hidden />
+                {t("search_global.loading_index")}
+              </span>
+            )}
             <div className="gs-empty-title">{t("search_global.recent_title")}</div>
             {recent.length === 0 ? (
               <p className="dialog-text">{t("search_global.recent_empty")}</p>
@@ -819,13 +820,17 @@ export default function GlobalSearch() {
           </div>
         ) : !searchable ? (
           <div className="gs-empty">
-            {status?.status === "building"
-              ? t("search_global.empty_building")
-              : status?.status === "disabled"
-                ? t("search_global.status_disabled")
-                : t("search_global.empty_no_index")}
-            {status && !status.canBuild && (
-              <div className="gs-empty-hint">{t("search_global.admin_hint")}</div>
+            {status?.status === "loading" ? (
+              <span className="gs-loading-hint">
+                <span className="gs-spinner" aria-hidden />
+                {t("search_global.loading_index")}
+              </span>
+            ) : status?.status === "building" ? (
+              t("search_global.empty_building")
+            ) : status?.status === "disabled" ? (
+              t("search_global.status_disabled")
+            ) : (
+              t("search_global.empty_no_index")
             )}
           </div>
         ) : response && response.items.length === 0 ? (

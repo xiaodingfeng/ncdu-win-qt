@@ -175,6 +175,7 @@ impl IndexStore {
         let mut snapshot = false;
         let mut any_ready = false;
         let mut any_building = false;
+        let mut any_loading = false;
         let mut any_error = false;
         let mut any_mft = false;
         let mut any_walk = false;
@@ -205,6 +206,7 @@ impl IndexStore {
             }
             match slot.status.as_str() {
                 "building" => any_building = true,
+                "loading" => any_loading = true,
                 "ready" => {
                     any_ready = true;
                     if primary.is_none() {
@@ -240,6 +242,8 @@ impl IndexStore {
             state.status.clone()
         } else if any_building {
             "building".to_string()
+        } else if any_loading {
+            "loading".to_string()
         } else if any_ready {
             "ready".to_string()
         } else if any_error {

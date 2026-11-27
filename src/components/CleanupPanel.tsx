@@ -14,7 +14,6 @@ import { defaultPath } from "../lib/scan";
 import {
   cancelCleanup,
   cleanItems,
-  cleanItemsElevated,
   scanCleanup,
   scanDuplicates,
   subscribeCleanup,
@@ -133,8 +132,6 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
   const [cleanResult, setCleanResult] = useState<CleanFinished | null>(null);
   const [failed, setFailed] = useState<string[] | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
-  /** Remembers which button the user pressed, for the elevated retry. */
-  const [lastPermanent, setLastPermanent] = useState(false);
   const [details, setDetailsState] = useState<CleanupTarget | null>(null);
   const [detailsItems, setDetailsItems] = useState<{ name: string; path: string; size: number; isDir: boolean }[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -601,32 +598,11 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
 
   const runClean = async (permanent: boolean) => {
     if (!confirm) return;
-    setLastPermanent(permanent);
     setCleaning(true);
     setError(null);
     setCleanProgress({ index: 0, total: confirm.items.length, label: "" });
     try {
       await cleanItems(confirm.items, permanent);
-    } catch (err) {
-      setCleaning(false);
-      setCleanProgress(null);
-      setError(String(err));
-    }
-  };
-
-  /** Retries permission failures with administrator rights. */
-  const retryElevated = async () => {
-    if (!cleanResult) return;
-    const retries: CleanItem[] = cleanResult.items
-      .filter((item) => item.failed && item.key === "large")
-      .map((item) => ({ type: "file", key: "", path: item.path }));
-    if (!retries.length) return;
-    setFailed(null);
-    setCleanResult(null);
-    setCleaning(true);
-    setCleanProgress({ index: 0, total: retries.length, label: "" });
-    try {
-      await cleanItemsElevated(retries, lastPermanent);
     } catch (err) {
       setCleaning(false);
       setCleanProgress(null);
@@ -1142,11 +1118,6 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
             }}
             footer={
               <>
-                {cleanResult?.needsElevation && (
-                  <button className="btn" onClick={() => void retryElevated()}>
-                    {t("cleanup.retry_elevated")}
-                  </button>
-                )}
                 <button
                   className="btn primary"
                   onClick={() => {
@@ -1164,9 +1135,6 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
                 <p className="dialog-text">{t("cleanup.failed_body", { items: failed.slice(0, 10).join("\n") })}</p>
                 {failed.length > 10 && (
                   <p className="dialog-text">{t("cleanup.failed_more", { n: failed.length - 10 })}</p>
-                )}
-                {cleanResult?.needsElevation && (
-                  <p className="dialog-text muted">{t("cleanup.needs_admin")}</p>
                 )}
               </>
             )}

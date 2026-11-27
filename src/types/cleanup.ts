@@ -92,5 +92,4 @@ export interface CleanFinished {
   totalFreed: number;
   items: CleanItemOutcome[];
   failed: string[];
-  needsElevation: boolean;
 }
