@@ -1,0 +1,4 @@
+[target.x86_64-pc-windows-msvc]
+# Use the rust-lld linker bundled with the toolchain; much faster than link.exe
+# for fat-LTO release builds and does not change the produced binary.
+linker = "rust-lld"

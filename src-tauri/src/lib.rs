@@ -85,7 +85,6 @@ pub fn apply_update_if_requested() -> Option<i32> {
 pub fn run() {
     install_panic_hook();
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_log::Builder::new()
