@@ -533,6 +533,9 @@ export default function AppMoveDialog({ open: visible, onClose, embedded = false
       if (key === "app_move.fail_link" || key === "app_move.fail_rename") {
         return t(key, { reason: rest.join("|") });
       }
+      if (key === "app_move.target_exists") {
+        return t(key, { path: rest.join("|") });
+      }
       if (key === "move.err.size_mismatch") {
         return t(key, {
           value: `${formatSize(Number(rest[0]) || 0)} / ${formatSize(Number(rest[1]) || 0)}`,

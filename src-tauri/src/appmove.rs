@@ -688,7 +688,7 @@ fn move_one(source: &Path, target_root: &Path, journal: &mut Journal) -> Result<
         .unwrap_or_else(|| "AppData".to_string());
     let target = target_root.join(&parent).join(&name);
     if target.exists() && fs::read_dir(&target).map(|mut dir| dir.next().is_some()).unwrap_or(false) {
-        return Err("app_move.fail_target_exists".to_string());
+        return Err(format!("app_move.target_exists|{}", target.to_string_lossy()));
     }
     if normalize(&target.to_string_lossy()).starts_with(&format!("{}/", normalize(&source.to_string_lossy()))) {
         return Err("app_move.fail_invalid".to_string());
