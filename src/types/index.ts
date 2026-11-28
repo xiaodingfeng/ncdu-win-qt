@@ -1,4 +1,12 @@
-export type IndexEngineStatus = "idle" | "loading" | "building" | "ready" | "error" | "disabled";
+export type IndexEngineStatus =
+  | "idle"
+  | "loading"
+  | "building"
+  | "syncing"
+  | "stored"
+  | "ready"
+  | "error"
+  | "disabled";
 
 export interface VolumeStatus {
   volume: string;
@@ -11,6 +19,8 @@ export interface VolumeStatus {
   canBuild: boolean;
   snapshot: boolean;
   engine: string;
+  truncated: number;
+  loaded: boolean;
 }
 
 export interface IndexStatus {
@@ -27,7 +37,24 @@ export interface IndexStatus {
   snapshot: boolean;
   engine: string;
   writable: boolean;
+  truncated: number;
   volumes: VolumeStatus[];
+  unindexedVolumes: string[];
+}
+
+export interface IndexDiagnosis {
+  volume: string;
+  volumeIndexed: boolean;
+  volumeStatus: string;
+  engine: string;
+  entries: number;
+  truncated: number;
+  nameFound: boolean;
+  indexedPath: string | null;
+  matched: number;
+  hitExclude: string | null;
+  reparseTarget: string | null;
+  hint: string;
 }
 
 /** A local drive shown in the volume picker. */

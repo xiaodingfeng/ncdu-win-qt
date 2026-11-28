@@ -136,6 +136,10 @@ export default function ScanPage() {
   const navigationId = useRef(0);
   const loadingMore = useRef(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  // Mirrors whether the backend currently holds a scan tree. A rescan drops
+  // the old tree immediately, so navigation/search must stay silent until the
+  // new tree is installed.
+  const hasTreeRef = useRef(false);
 
   const navigate = useCallback(async (target: string) => {
     const requestId = ++navigationId.current;
@@ -150,14 +154,17 @@ export default function ScanPage() {
       setResults(null);
       setError(null);
     } catch (err) {
-      if (requestId === navigationId.current) setError(String(err));
+      if (requestId === navigationId.current && hasTreeRef.current) setError(String(err));
     }
   }, []);
 
   const runScan = useCallback(
     async (target: string) => {
       const trimmed = target.trim();
-      if (!trimmed) return;
+      // Repeated triggers (F5, menu, path Enter) must not stack scans.
+      if (!trimmed || scanning) return;
+      const hadTree = hasTreeRef.current;
+      hasTreeRef.current = false;
       setError(null);
       setNotice(null);
       setCancelling(false);
@@ -169,11 +176,13 @@ export default function ScanPage() {
       try {
         await startScan(trimmed, skipHeavy);
       } catch (err) {
+        // An invalid path is rejected before the backend drops the old tree.
+        hasTreeRef.current = hadTree;
         setScanning(false);
         setError(String(err));
       }
     },
-    [skipHeavy],
+    [skipHeavy, scanning],
   );
 
   useEffect(() => {
@@ -183,6 +192,7 @@ export default function ScanPage() {
       onProgress: () => undefined,
       onFinished: (payload) => {
         if (disposed) return;
+        hasTreeRef.current = true;
         setScanning(false);
         setCancelling(false);
         setSummary({
@@ -255,7 +265,7 @@ export default function ScanPage() {
 
   useEffect(() => {
     const trimmed = query.trim();
-    if (!trimmed || !current) {
+    if (!trimmed || !current || !hasTreeRef.current) {
       setResults(null);
       return;
     }
@@ -682,6 +692,7 @@ export default function ScanPage() {
   const release = useCallback(async () => {
     try {
       await releaseScan();
+      hasTreeRef.current = false;
       setCurrent(null);
       setEntries([]);
       setEntriesTotal(0);
@@ -834,7 +845,9 @@ export default function ScanPage() {
   const indexBadge = (() => {
     if (!indexInfo) return t("index.badge_idle");
     if (indexInfo.status === "building") return t("index.badge_building");
+    if (indexInfo.status === "syncing") return t("index.badge_syncing");
     if (indexInfo.status === "loading") return t("index.badge_loading");
+    if (indexInfo.status === "stored") return t("index.badge_stored");
     if (indexInfo.status === "ready") {
       return t("index.badge_ready", { n: formatCount(indexInfo.count) });
     }
@@ -1016,6 +1029,7 @@ export default function ScanPage() {
                 <CleanupPanel
                   root={summary?.path ?? current?.path ?? null}
                   scanSeq={scanSeq}
+                  mainScanning={scanning}
                   disk={disk}
                   onCleaned={refreshAfterClean}
                   onAiAnalyze={(subject, prompt) =>

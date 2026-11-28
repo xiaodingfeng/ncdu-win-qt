@@ -189,6 +189,7 @@ pub fn run() {
             index::commands::index_build,
             index::commands::index_cancel,
             index::commands::index_search,
+            index::commands::index_diagnose,
             index::commands::index_clear
         ])
         .run(tauri::generate_context!())

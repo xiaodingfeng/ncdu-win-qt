@@ -790,6 +790,11 @@
   "search_global.status_loading": "Reading index status…",
   "search_global.loading_index": "Loading index…",
   "search_global.status_building": "Building the index for {volume}: {phase} ({n} entries)",
+  "search_global.status_syncing": "Syncing index changes…",
+  "search_global.unindexed_volume": "Not indexed: {volume}:",
+  "search_global.truncated": " · {n} files not indexed",
+  "search_global.why_not_found": "Why can't I find it?",
+  "search_global.diagnose_hint": "Diagnosis: {hint}",
   "search_global.phase_enumerating": "enumerating MFT",
   "search_global.phase_readingMft": "reading $MFT",
   "search_global.phase_buildingTree": "packing entries",
@@ -845,6 +850,8 @@
   "index.badge_building": "Indexing…",
   "index.badge_loading": "Loading index",
   "index.badge_ready": "Index {n}",
+  "index.badge_stored": "Index built · loads on search",
+  "index.badge_syncing": "Syncing index",
   "index.badge_off": "Index off",
   "search_global.footer_hint": "↑↓ select · Enter open · Ctrl+Enter reveal · Alt+Enter treemap · Delete remove · Esc close"
 }

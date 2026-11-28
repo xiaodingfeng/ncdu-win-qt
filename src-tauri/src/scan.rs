@@ -140,6 +140,8 @@ pub struct ScanState {
 pub struct ScanStore {
     inner: std::sync::RwLock<Option<Arc<ScanState>>>,
     cancel: Mutex<Option<Arc<AtomicBool>>>,
+    /// Held for the whole build so only one whole-volume scan runs at a time.
+    running: Mutex<()>,
     generation: AtomicU64,
     active: AtomicBool,
 }
@@ -203,6 +205,7 @@ pub(crate) fn disk_space(path: &Path) -> (u64, u64) {
 struct ScanContext {
     cancel: Arc<AtomicBool>,
     app: AppHandle,
+    generation: u64,
     files: AtomicU64,
     dirs: AtomicU64,
     bytes: AtomicU64,
@@ -250,6 +253,10 @@ impl ScanContext {
     }
 
     fn emit_progress(&self, path: &Path) {
+        // Superseded scans must stay silent so they cannot flip the UI state.
+        if self.app.state::<ScanStore>().generation.load(Ordering::SeqCst) != self.generation {
+            return;
+        }
         let now = self.started.elapsed().as_millis() as u64;
         let last = self.last_emit.load(Ordering::Relaxed);
         if now.saturating_sub(last) < 100 {
@@ -586,7 +593,11 @@ fn flatten(
     parent: u32,
     parent_path: &str,
     is_root: bool,
-) -> u32 {
+    cancel: &AtomicBool,
+) -> Option<u32> {
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     let RawNode {
         name,
         kind,
@@ -634,6 +645,9 @@ fn flatten(
     let child_parent_path: &str = if is_dir { &full_path } else { parent_path };
     let mut children = Vec::with_capacity(raw_children.len());
     for child in raw_children {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         children.push(flatten(
             child,
             arena,
@@ -641,7 +655,8 @@ fn flatten(
             index,
             child_parent_path,
             false,
-        ));
+            cancel,
+        )?);
     }
     children.sort_by(|a, b| {
         let left = &arena[*a as usize];
@@ -652,7 +667,22 @@ fn flatten(
             .then_with(|| compare_name(&left.name, &right.name))
     });
     arena[index as usize].children = children;
-    index
+    Some(index)
+}
+
+/// Counts the flat arena size the tree needs so `flatten` can preallocate.
+fn raw_stats(node: &RawNode) -> (usize, usize) {
+    let mut nodes = 0usize;
+    let mut dirs = 0usize;
+    let mut stack: Vec<&RawNode> = vec![node];
+    while let Some(current) = stack.pop() {
+        nodes += 1;
+        if matches!(current.kind, NodeKind::Directory | NodeKind::Drive) {
+            dirs += 1;
+        }
+        stack.extend(current.children.iter());
+    }
+    (nodes, dirs)
 }
 
 impl ScanState {
@@ -891,13 +921,32 @@ pub fn start_scan(
     };
     let generation = store.generation.fetch_add(1, Ordering::SeqCst) + 1;
     store.active.store(true, Ordering::SeqCst);
+    // Release the previous tree now instead of keeping it until the new one is
+    // built: a whole-volume rescan otherwise holds two full trees at once.
+    {
+        let mut guard = store
+            .inner
+            .write()
+            .map_err(|_| "scan state poisoned")?;
+        *guard = None;
+    }
 
     std::thread::spawn(move || {
+        let store = app.state::<ScanStore>();
+        // A thread that was already superseded has no work to do.
+        if store.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        // Only one build runs at a time; wait until the previous tree (and its
+        // temporary structures) has been dropped before starting a new one.
+        let _run = store.running.lock().unwrap_or_else(|err| err.into_inner());
         let _active = ScanActive {
             app: app.clone(),
             generation,
         };
-        let store = app.state::<ScanStore>();
+        if store.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
         let started = Instant::now();
         let root_display = normalize(&root_path);
         let root_path = root_display.to_string_lossy().into_owned();
@@ -905,6 +954,7 @@ pub fn start_scan(
         let ctx = ScanContext {
             cancel: cancel.clone(),
             app: app.clone(),
+            generation,
             files: AtomicU64::new(0),
             dirs: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
@@ -939,6 +989,9 @@ pub fn start_scan(
         let raw = if should_use_mft(&root_display) && mft::is_supported(&root_display) {
             let low_memory = || ctx.is_low_memory();
             let mut on_progress = |phase: mft::MftPhase, count: u64| {
+                if store.generation.load(Ordering::SeqCst) != generation {
+                    return;
+                }
                 let phase_name = match phase {
                     mft::MftPhase::Enumerating => "enumerating",
                     mft::MftPhase::ReadingMft => "readingMft",
@@ -971,18 +1024,20 @@ pub fn start_scan(
                     node
                 }
                 Err(mft::MftError::Cancelled) => {
-                    let _ = app.emit(
-                        "scan://failed",
-                        ScanFailure {
-                            code: "cancelled".to_string(),
-                            message: "scan cancelled".to_string(),
-                        },
-                    );
+                    if store.generation.load(Ordering::SeqCst) == generation {
+                        let _ = app.emit(
+                            "scan://failed",
+                            ScanFailure {
+                                code: "cancelled".to_string(),
+                                message: "scan cancelled".to_string(),
+                            },
+                        );
+                    }
                     return;
                 }
-                Err(mft::MftError::Failed(err)) => {
+                Err(err @ (mft::MftError::Failed(_) | mft::MftError::JournalReset)) => {
                     log::warn!(
-                        "MFT scan unavailable for {}: {err}; falling back to directory walk",
+                        "MFT scan unavailable for {}: {err:?}; falling back to directory walk",
                         root_display.display()
                     );
                     walk()
@@ -993,22 +1048,35 @@ pub fn start_scan(
         };
 
         if cancel.load(Ordering::Relaxed) {
-            let _ = app.emit(
-                "scan://failed",
-                ScanFailure {
-                    code: "cancelled".to_string(),
-                    message: "scan cancelled".to_string(),
-                },
-            );
+            if store.generation.load(Ordering::SeqCst) == generation {
+                let _ = app.emit(
+                    "scan://failed",
+                    ScanFailure {
+                        code: "cancelled".to_string(),
+                        message: "scan cancelled".to_string(),
+                    },
+                );
+            }
             return;
         }
         if store.generation.load(Ordering::SeqCst) != generation {
             return;
         }
 
-        let mut arena = Vec::new();
-        let mut by_path = HashMap::new();
-        let root_index = flatten(raw, &mut arena, &mut by_path, u32::MAX, &root_path, true);
+        let (node_count, dir_count) = raw_stats(&raw);
+        let mut arena = Vec::with_capacity(node_count);
+        let mut by_path = HashMap::with_capacity(dir_count);
+        let Some(root_index) = flatten(
+            raw,
+            &mut arena,
+            &mut by_path,
+            u32::MAX,
+            &root_path,
+            true,
+            &cancel,
+        ) else {
+            return;
+        };
         let state = ScanState {
             arena,
             by_path,
@@ -1251,7 +1319,9 @@ mod tests {
             u32::MAX,
             r"C:\",
             true,
-        );
+            &AtomicBool::new(false),
+        )
+        .expect("flatten");
         ScanState {
             arena,
             by_path,
@@ -1353,6 +1423,31 @@ mod tests {
     }
 
     #[test]
+    fn flatten_returns_none_when_cancelled() {
+        let cancel = AtomicBool::new(true);
+        let mut arena = Vec::new();
+        let mut by_path = HashMap::new();
+        let result = flatten(
+            sample_root(),
+            &mut arena,
+            &mut by_path,
+            u32::MAX,
+            r"C:\",
+            true,
+            &cancel,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn raw_stats_counts_nodes_and_directories() {
+        let (nodes, dirs) = raw_stats(&sample_root());
+        // Root drive + two directories + four files.
+        assert_eq!(nodes, 7);
+        assert_eq!(dirs, 3);
+    }
+
+    #[test]
     #[ignore = "benchmark: cargo test -- --ignored --nocapture bench_flatten"]
     fn bench_flatten_one_million_nodes() {
         const DIRS: usize = 1_000;
@@ -1389,7 +1484,9 @@ mod tests {
         let started = Instant::now();
         let mut arena = Vec::new();
         let mut by_path = HashMap::new();
-        let root_index = flatten(root, &mut arena, &mut by_path, u32::MAX, r"C:\", true);
+        let root_index =
+            flatten(root, &mut arena, &mut by_path, u32::MAX, r"C:\", true, &AtomicBool::new(false))
+                .expect("flatten");
         let elapsed = started.elapsed();
         println!(
             "flatten: {} nodes in {elapsed:?}, arena bytes={}, indexed dirs={}",

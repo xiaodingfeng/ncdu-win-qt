@@ -10,6 +10,7 @@ import {
   indexBuild,
   indexCancel,
   indexClear,
+  indexDiagnose,
   indexSearch,
   indexStatus,
   indexVolumes,
@@ -19,6 +20,7 @@ import { openPath, revealPath } from "../lib/ops";
 import { saveSettings } from "../lib/settings";
 import { getScanRoot } from "../lib/scan";
 import type {
+  IndexDiagnosis,
   IndexHit,
   IndexPrefs,
   IndexProgress,
@@ -99,6 +101,8 @@ export default function GlobalSearch() {
   const [recent, setRecent] = useState<string[]>(loadRecent);
   const [favorites, setFavorites] = useState<FavoriteHit[]>(loadFavorites);
   const [form, setForm] = useState<IndexPrefs>(settings?.index ?? DEFAULT_SETTINGS.index);
+  const [diagnosis, setDiagnosis] = useState<IndexDiagnosis | null>(null);
+  const [diagnosing, setDiagnosing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const requestRef = useRef(0);
 
@@ -215,6 +219,7 @@ export default function GlobalSearch() {
       setResponse(null);
       return;
     }
+    setDiagnosis(null);
     const requestId = ++requestRef.current;
     const timer = window.setTimeout(() => {
       setBusy(true);
@@ -246,7 +251,7 @@ export default function GlobalSearch() {
         .finally(() => {
           if (requestId === requestRef.current) setBusy(false);
         });
-    }, 40);
+    }, 120);
     return () => window.clearTimeout(timer);
   }, [open, query, searchable, status, scope, scopeMode, sort, asc, caseSensitive]);
 
@@ -422,6 +427,46 @@ export default function GlobalSearch() {
     }
   };
 
+  const runDiagnose = async () => {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    setDiagnosing(true);
+    try {
+      setDiagnosis(await indexDiagnose(trimmed));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setDiagnosing(false);
+    }
+  };
+
+  /** One-click: add an uncovered local drive to the index and build it. */
+  const addVolume = async (letter: string) => {
+    const currentVolumes = form.volumes.length
+      ? form.volumes
+      : volumes.map((info) => info.letter);
+    const nextForm = {
+      ...form,
+      volumes: Array.from(new Set([...currentVolumes, letter])).sort(),
+    };
+    setForm(nextForm);
+    if (settings) {
+      const next = { ...settings, index: nextForm };
+      update({ index: nextForm });
+      try {
+        await saveSettings(next);
+      } catch (err) {
+        setError(String(err));
+      }
+    }
+    try {
+      setError(null);
+      await indexBuild([letter]);
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   const saveAndRebuild = async () => {
     try {
       setError(null);
@@ -467,6 +512,25 @@ export default function GlobalSearch() {
     setForm({ ...form, volumes: [...next].sort() });
   };
 
+  const volumeStateLabel = (state: string, count: number) => {
+    switch (state) {
+      case "building":
+        return t("index.badge_building");
+      case "syncing":
+        return t("index.badge_syncing");
+      case "loading":
+        return t("index.badge_loading");
+      case "ready":
+        return t("index.badge_ready", { n: formatCount(count) });
+      case "stored":
+        return t("index.badge_stored");
+      case "disabled":
+        return t("index.badge_off");
+      default:
+        return state;
+    }
+  };
+
   if (!open) return null;
 
   const building = status?.status === "building";
@@ -479,7 +543,9 @@ export default function GlobalSearch() {
         phase: progress ? t(`search_global.phase_${progress.phase}`) : "",
       });
     }
+    if (status.status === "syncing") return t("search_global.status_syncing");
     if (status.status === "loading") return t("search_global.loading_index");
+    if (status.status === "stored") return t("index.badge_stored");
     if (status.status === "ready") {
       const ready = status.volumes
         .filter((item) => item.status === "ready")
@@ -490,7 +556,11 @@ export default function GlobalSearch() {
           volume: ready || status.volume,
           n: formatCount(status.count),
           memory: formatSize(status.memoryBytes),
-        }) + (status.engine === "walk" ? t("search_global.engine_walk") : "")
+        }) +
+        (status.engine === "walk" ? t("search_global.engine_walk") : "") +
+        (status.truncated > 0
+          ? t("search_global.truncated", { n: formatCount(status.truncated) })
+          : "")
       );
     }
     if (status.status === "error") return t("search_global.status_error", { msg: status.message });
@@ -573,6 +643,16 @@ export default function GlobalSearch() {
                 {item.volume}:
               </button>
             ))}
+            {(status?.unindexedVolumes ?? []).map((letter) => (
+              <button
+                key={`unindexed-${letter}`}
+                className="gs-scope gs-scope-warn"
+                title={t("search_global.unindexed_volume", { volume: letter })}
+                onClick={() => void addVolume(letter)}
+              >
+                {t("search_global.unindexed_volume", { volume: letter })}
+              </button>
+            ))}
             <button
               className={`gs-scope ${scopeMode === "dir" ? "active" : ""}`}
               disabled={!scanRoot}
@@ -582,7 +662,19 @@ export default function GlobalSearch() {
               {t("search_global.scope_dir")}
             </button>
           </div>
-          <span className="gs-status" title={status?.message || statusText}>
+          <span
+            className={`gs-status ${
+              status &&
+              (status.status === "error" ||
+                status.truncated > 0 ||
+                status.volumes.some(
+                  (item) => item.status === "error" || item.truncated > 0,
+                ))
+                ? "gs-warn"
+                : ""
+            }`}
+            title={status?.message || statusText}
+          >
             {statusText}
           </span>
           <div className="gs-meta-actions">
@@ -631,6 +723,9 @@ export default function GlobalSearch() {
             <div className="gs-volumes">
               {volumes.map((info) => {
                 const selected = selectedVolumes.includes(info.letter);
+                const volumeStatus = status?.volumes.find(
+                  (item) => item.volume === info.letter,
+                );
                 return (
                   <label
                     key={info.letter}
@@ -668,6 +763,20 @@ export default function GlobalSearch() {
                           total: formatSize(info.totalBytes),
                         })}
                       </span>
+                      {volumeStatus && (
+                        <span className="gs-volume-meta">
+                          {volumeStateLabel(volumeStatus.status, volumeStatus.count)}
+                          {volumeStatus.engine ? ` · ${volumeStatus.engine}` : ""}
+                          {volumeStatus.status !== "ready" && volumeStatus.count > 0
+                            ? ` · ${formatCount(volumeStatus.count)}`
+                            : ""}
+                          {volumeStatus.truncated > 0
+                            ? t("search_global.truncated", {
+                                n: formatCount(volumeStatus.truncated),
+                              })
+                            : ""}
+                        </span>
+                      )}
                     </span>
                   </label>
                 );
@@ -827,6 +936,10 @@ export default function GlobalSearch() {
               </span>
             ) : status?.status === "building" ? (
               t("search_global.empty_building")
+            ) : status?.status === "syncing" ? (
+              t("search_global.status_syncing")
+            ) : status?.status === "stored" ? (
+              t("index.badge_stored")
             ) : status?.status === "disabled" ? (
               t("search_global.status_disabled")
             ) : (
@@ -834,7 +947,21 @@ export default function GlobalSearch() {
             )}
           </div>
         ) : response && response.items.length === 0 ? (
-          <div className="gs-empty">{t("search_global.empty_none", { query: query.trim() })}</div>
+          <div className="gs-empty">
+            <div>{t("search_global.empty_none", { query: query.trim() })}</div>
+            <button
+              className="gs-link"
+              disabled={diagnosing}
+              onClick={() => void runDiagnose()}
+            >
+              {t("search_global.why_not_found")}
+            </button>
+            {diagnosis && (
+              <p className="gs-hint">
+                {t("search_global.diagnose_hint", { hint: diagnosis.hint })}
+              </p>
+            )}
+          </div>
         ) : (
           <SearchResults
             items={hits}

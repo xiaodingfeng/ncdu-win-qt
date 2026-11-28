@@ -5,14 +5,50 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_LOWEST,
+};
 
 use crate::mft;
 
 use super::model::Index;
+
+/// Bounds the query workers so a 2-core machine still keeps a core for the UI.
+static INDEX_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+
+pub(crate) fn index_pool() -> Option<&'static rayon::ThreadPool> {
+    INDEX_POOL
+        .get_or_init(|| {
+            let workers = std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(2)
+                .saturating_sub(1)
+                .clamp(1, 6);
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .thread_name(|index| format!("ncduwin-index-{index}"))
+                .start_handler(|_| set_thread_priority(THREAD_PRIORITY_BELOW_NORMAL))
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
+fn set_thread_priority(priority: i32) {
+    unsafe {
+        SetThreadPriority(GetCurrentThread(), priority);
+    }
+}
+
+/// Background builds, watchers and startup maintenance must never compete with
+/// the UI thread.
+pub(crate) fn lower_thread_priority() {
+    set_thread_priority(THREAD_PRIORITY_LOWEST);
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +63,8 @@ pub struct VolumeStatus {
     pub(crate) can_build: bool,
     pub(crate) snapshot: bool,
     pub(crate) engine: String,
+    pub(crate) truncated: u64,
+    pub(crate) loaded: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,7 +83,10 @@ pub struct IndexStatus {
     pub(crate) snapshot: bool,
     pub(crate) engine: String,
     pub(crate) writable: bool,
+    pub(crate) truncated: u64,
     pub(crate) volumes: Vec<VolumeStatus>,
+    /// Local drives that are not part of the configured index targets.
+    pub(crate) unindexed_volumes: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -64,6 +105,14 @@ pub(crate) struct VolumeSlot {
     pub(crate) can_build: bool,
     pub(crate) snapshot: bool,
     pub(crate) generation: u64,
+    /// Candidate entries dropped by the entry cap.
+    pub(crate) truncated: u64,
+    /// Entry count taken from the snapshot header when the index is not loaded.
+    pub(crate) stored_count: u64,
+    pub(crate) engine: String,
+    pub(crate) loaded: bool,
+    /// Set when the search panel opens while this volume is building/syncing.
+    pub(crate) load_requested: bool,
 }
 
 impl VolumeSlot {
@@ -77,6 +126,11 @@ impl VolumeSlot {
             can_build: mft::is_supported(Path::new(&volume_root(volume))),
             snapshot: false,
             generation: 0,
+            truncated: 0,
+            stored_count: 0,
+            engine: String::new(),
+            loaded: false,
+            load_requested: false,
         }
     }
 }
@@ -109,6 +163,10 @@ pub struct IndexStore {
     pub(crate) watchers: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     pub(crate) generation: AtomicU64,
     pub(crate) query_cache: Mutex<Option<CachedResponse>>,
+    /// Serialises queries so at most one full scan runs at a time.
+    pub(crate) search_gate: Mutex<()>,
+    pub(crate) search_seq: AtomicU64,
+    pub(crate) search_cancel: Mutex<Option<(u64, Arc<AtomicBool>)>>,
 }
 
 impl Default for IndexStore {
@@ -119,6 +177,9 @@ impl Default for IndexStore {
             watchers: Mutex::new(BTreeMap::new()),
             generation: AtomicU64::new(0),
             query_cache: Mutex::new(None),
+            search_gate: Mutex::new(()),
+            search_seq: AtomicU64::new(0),
+            search_cancel: Mutex::new(None),
         }
     }
 }
@@ -161,7 +222,9 @@ impl IndexStore {
             snapshot: false,
             engine: String::new(),
             writable: false,
+            truncated: 0,
             volumes: Vec::new(),
+            unindexed_volumes: Vec::new(),
         };
         let Ok(state) = self.state.read() else {
             return fallback("index state is unavailable");
@@ -170,12 +233,15 @@ impl IndexStore {
         let mut volumes: Vec<VolumeStatus> = Vec::with_capacity(state.volumes.len());
         let mut count = 0u64;
         let mut memory_bytes = 0u64;
+        let mut truncated = 0u64;
         let mut built_at = 0i64;
         let mut elapsed_ms = 0u64;
         let mut snapshot = false;
         let mut any_ready = false;
         let mut any_building = false;
         let mut any_loading = false;
+        let mut any_syncing = false;
+        let mut any_stored = false;
         let mut any_error = false;
         let mut any_mft = false;
         let mut any_walk = false;
@@ -183,19 +249,21 @@ impl IndexStore {
         let mut messages: Vec<String> = Vec::new();
 
         for (volume, slot) in &state.volumes {
-            let (volume_count, volume_memory, engine) = match &slot.index {
+            let (volume_count, volume_memory, engine, volume_truncated) = match &slot.index {
                 Some(handle) => match handle.read() {
                     Ok(index) => (
                         index.live_count(),
                         index.memory_bytes(),
                         if index.journal_id != 0 { "mft" } else { "walk" },
+                        index.truncated_entries,
                     ),
-                    Err(_) => (0, 0, ""),
+                    Err(_) => (0, 0, "", 0),
                 },
-                None => (0, 0, ""),
+                None => (slot.stored_count, 0, slot.engine.as_str(), slot.truncated),
             };
             count += volume_count;
             memory_bytes += volume_memory;
+            truncated += volume_truncated;
             built_at = built_at.max(slot.built_at);
             elapsed_ms = elapsed_ms.max(slot.elapsed_ms);
             snapshot |= slot.snapshot;
@@ -206,20 +274,20 @@ impl IndexStore {
             }
             match slot.status.as_str() {
                 "building" => any_building = true,
+                "syncing" => any_syncing = true,
                 "loading" => any_loading = true,
+                "stored" => any_stored = true,
                 "ready" => {
                     any_ready = true;
                     if primary.is_none() {
                         primary = Some(volume.clone());
                     }
                 }
-                "error" => {
-                    any_error = true;
-                    if !slot.message.is_empty() {
-                        messages.push(format!("{volume}: {}", slot.message));
-                    }
-                }
+                "error" => any_error = true,
                 _ => {}
+            }
+            if !slot.message.is_empty() {
+                messages.push(format!("{volume}: {}", slot.message));
             }
             if primary.is_none() && slots_usable(&slot.status) {
                 primary = Some(volume.clone());
@@ -235,6 +303,8 @@ impl IndexStore {
                 can_build: slot.can_build,
                 snapshot: slot.snapshot,
                 engine: engine.to_string(),
+                truncated: volume_truncated,
+                loaded: slot.loaded,
             });
         }
 
@@ -242,10 +312,14 @@ impl IndexStore {
             state.status.clone()
         } else if any_building {
             "building".to_string()
+        } else if any_syncing {
+            "syncing".to_string()
         } else if any_loading {
             "loading".to_string()
         } else if any_ready {
             "ready".to_string()
+        } else if any_stored {
+            "stored".to_string()
         } else if any_error {
             "error".to_string()
         } else {
@@ -259,6 +333,14 @@ impl IndexStore {
         let volume = primary
             .or_else(|| state.volumes.keys().next().cloned())
             .unwrap_or_else(default_volume);
+        let unindexed_volumes = if state.status == "disabled" || state.volumes.is_empty() {
+            Vec::new()
+        } else {
+            super::commands::local_letters()
+                .into_iter()
+                .filter(|letter| !state.volumes.keys().any(|volume| volume.eq_ignore_ascii_case(letter)))
+                .collect()
+        };
 
         IndexStatus {
             status,
@@ -280,7 +362,9 @@ impl IndexStore {
                 String::new()
             },
             writable: state.writable,
+            truncated,
             volumes,
+            unindexed_volumes,
         }
     }
 
@@ -328,10 +412,27 @@ impl IndexStore {
             *guard = None;
         }
     }
+
+    /// Registers a new query, cancelling the previous one immediately.
+    pub(crate) fn begin_search(&self) -> (u64, Arc<AtomicBool>) {
+        let sequence = self.search_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let token = Arc::new(AtomicBool::new(false));
+        if let Ok(mut guard) = self.search_cancel.lock() {
+            if let Some((_, previous)) = guard.take() {
+                previous.store(true, Ordering::Relaxed);
+            }
+            *guard = Some((sequence, token.clone()));
+        }
+        (sequence, token)
+    }
+
+    pub(crate) fn is_current_search(&self, sequence: u64) -> bool {
+        self.search_seq.load(Ordering::SeqCst) == sequence
+    }
 }
 
 fn slots_usable(status: &str) -> bool {
-    status == "ready" || status == "building"
+    matches!(status, "ready" | "building" | "syncing")
 }
 
 pub(crate) fn default_volume() -> String {

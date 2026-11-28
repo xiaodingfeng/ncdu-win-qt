@@ -69,6 +69,8 @@ pub(crate) struct Index {
     pub(crate) next_usn: i64,
     pub(crate) built_at: i64,
     pub(crate) version: u64,
+    /// Candidate entries dropped by the `max_entries` cap (0 when untruncated).
+    pub(crate) truncated_entries: u64,
 
     pub(crate) names: String,
     pub(crate) name_offsets: Vec<u32>,
@@ -76,11 +78,15 @@ pub(crate) struct Index {
     pub(crate) parents: Vec<u32>,
     pub(crate) file_refs: Vec<u64>,
     pub(crate) sizes: Vec<u64>,
-    pub(crate) mtimes: Vec<i64>,
+    /// Unix seconds. u32 keeps the fixed per-entry cost low and covers
+    /// 1970-2106, which is the whole useful range here.
+    pub(crate) mtimes: Vec<u32>,
     pub(crate) ext_ids: Vec<u16>,
     pub(crate) flags: Vec<u8>,
     pub(crate) exts: Vec<String>,
-    pub(crate) ext_buckets: Vec<Vec<u32>>,
+    /// Number of slots without `FLAG_DELETED`, maintained incrementally so
+    /// status queries never scan the whole index.
+    pub(crate) live_count: u32,
 
     /// Slot indices sorted by `file_refs[slot]`. Four bytes per entry instead
     /// of a hash map's ~24, and USN lookups become a binary search.
@@ -96,6 +102,7 @@ impl Index {
             next_usn: 0,
             built_at: 0,
             version: 0,
+            truncated_entries: 0,
             names: String::new(),
             name_offsets: Vec::new(),
             name_lens: Vec::new(),
@@ -106,7 +113,7 @@ impl Index {
             ext_ids: Vec::new(),
             flags: Vec::new(),
             exts: vec![String::new()],
-            ext_buckets: vec![Vec::new()],
+            live_count: 0,
             ref_order: Vec::new(),
         };
         // Slot 0 is the volume root: an empty name whose parent is itself.
@@ -131,6 +138,7 @@ impl Index {
         self.names.get(start..end).unwrap_or("")
     }
 
+    #[cfg(test)]
     pub(crate) fn ext(&self, idx: u32) -> &str {
         self.ext_ids
             .get(idx as usize)
@@ -139,19 +147,12 @@ impl Index {
             .unwrap_or("")
     }
 
-    /// Entry slots for one extension, used to shrink `ext:` queries.
-    pub(crate) fn ext_bucket(&self, extension: &str) -> Option<&[u32]> {
-        let id = self.exts.iter().position(|value| value == extension)?;
-        self.ext_buckets.get(id).map(Vec::as_slice)
-    }
-
-    pub(crate) fn build_ext_buckets(&mut self) {
-        self.ext_buckets = vec![Vec::new(); self.exts.len()];
-        for (position, id) in self.ext_ids.iter().enumerate() {
-            if let Some(bucket) = self.ext_buckets.get_mut(*id as usize) {
-                bucket.push(position as u32);
-            }
-        }
+    /// Resolves an extension to its numeric id, used to compile `ext:` terms.
+    pub(crate) fn ext_id(&self, extension: &str) -> Option<u16> {
+        self.exts
+            .iter()
+            .position(|value| value == extension)
+            .map(|position| position as u16)
     }
 
     pub(crate) fn is_dir(&self, idx: u32) -> bool {
@@ -175,11 +176,9 @@ impl Index {
             .unwrap_or(false)
     }
 
+    /// Constant-time: deletion/insertion maintain the counter.
     pub(crate) fn live_count(&self) -> u64 {
-        self.flags
-            .iter()
-            .filter(|flags| *flags & FLAG_DELETED == 0)
-            .count() as u64
+        self.live_count as u64
     }
 
     pub(crate) fn memory_bytes(&self) -> u64 {
@@ -190,32 +189,11 @@ impl Index {
             + self.parents.len() * 4
             + self.file_refs.len() * 8
             + self.sizes.len() * 8
-            + self.mtimes.len() * 8
+            + self.mtimes.len() * 4
             + self.ext_ids.len() * 2
             + self.flags.len()
             + exts
-            + self.ext_buckets.iter().map(|bucket| bucket.len() * 4 + 24).sum::<usize>()
             + self.ref_order.len() * 4) as u64
-    }
-
-    /// Releases the growth slack left by `push`-based construction. Run once
-    /// after a build or a snapshot decode so long-lived memory matches usage.
-    pub(crate) fn compact(&mut self) {
-        self.names.shrink_to_fit();
-        self.name_offsets.shrink_to_fit();
-        self.name_lens.shrink_to_fit();
-        self.parents.shrink_to_fit();
-        self.file_refs.shrink_to_fit();
-        self.sizes.shrink_to_fit();
-        self.mtimes.shrink_to_fit();
-        self.ext_ids.shrink_to_fit();
-        self.flags.shrink_to_fit();
-        self.exts.shrink_to_fit();
-        for bucket in &mut self.ext_buckets {
-            bucket.shrink_to_fit();
-        }
-        self.ext_buckets.shrink_to_fit();
-        self.ref_order.shrink_to_fit();
     }
 
     /// Finds the slot for a file reference with a binary search over
@@ -258,17 +236,29 @@ impl Index {
         self.parents.push(parent);
         self.file_refs.push(file_ref);
         self.sizes.push(size);
-        self.mtimes.push(mtime);
+        self.mtimes.push(clamp_mtime(mtime));
         self.ext_ids.push(ext_id);
         self.flags.push(flags_for(attributes, name));
-        self.ext_buckets.resize(self.exts.len(), Vec::new());
-        if let Some(bucket) = self.ext_buckets.get_mut(ext_id as usize) {
-            bucket.push(idx);
-        }
+        self.live_count = self.live_count.saturating_add(1);
         // Appended here; `rebuild_refs` sorts the bulk build, and `upsert`
         // re-inserts a single new slot in order.
         self.ref_order.push(idx);
         idx
+    }
+
+    /// Pre-sizes every parallel array for a bulk build so no `Vec` has to grow
+    /// geometrically and no `shrink_to_fit` copy is needed afterwards.
+    pub(crate) fn reserve_entries(&mut self, count: usize, name_bytes: usize) {
+        self.name_offsets.reserve_exact(count);
+        self.name_lens.reserve_exact(count);
+        self.parents.reserve_exact(count);
+        self.file_refs.reserve_exact(count);
+        self.sizes.reserve_exact(count);
+        self.mtimes.reserve_exact(count);
+        self.ext_ids.reserve_exact(count);
+        self.flags.reserve_exact(count);
+        self.names.reserve_exact(name_bytes);
+        self.ref_order.reserve_exact(count);
     }
 
     pub(crate) fn set_parent(&mut self, idx: u32, parent: u32) {
@@ -287,8 +277,16 @@ impl Index {
         self.names.push_str(name);
     }
 
-    pub(crate) fn path_of(&self, idx: u32) -> String {
-        let mut parts: Vec<&str> = Vec::new();
+    /// Rebuilds the full path into `out`, reusing its allocation.
+    pub(crate) fn path_into(&self, idx: u32, out: &mut String) {
+        out.clear();
+        out.push_str(&self.volume);
+        out.push_str(":\\");
+        // The common case fits in a fixed stack array; deeper trees fall back
+        // to a small overflow vector.
+        let mut chain = [u32::MAX; 96];
+        let mut len = 0usize;
+        let mut overflow: Vec<u32> = Vec::new();
         let mut current = idx;
         let mut depth = 0u32;
         loop {
@@ -296,7 +294,12 @@ impl Index {
             if name.is_empty() {
                 break;
             }
-            parts.push(name);
+            if len < chain.len() {
+                chain[len] = current;
+                len += 1;
+            } else {
+                overflow.push(current);
+            }
             let Some(parent) = self.parents.get(current as usize).copied() else {
                 break;
             };
@@ -309,48 +312,93 @@ impl Index {
                 break;
             }
         }
-        let mut path = format!("{}:\\", self.volume);
-        for (position, part) in parts.iter().rev().enumerate() {
-            if position > 0 {
-                path.push('\\');
+        let mut first = true;
+        for slot in overflow.iter().rev() {
+            if !first {
+                out.push('\\');
             }
-            path.push_str(part);
+            first = false;
+            out.push_str(self.name(*slot));
         }
+        for slot in chain[..len].iter().rev() {
+            if !first {
+                out.push('\\');
+            }
+            first = false;
+            out.push_str(self.name(*slot));
+        }
+    }
+
+    pub(crate) fn path_of(&self, idx: u32) -> String {
+        let mut path = String::new();
+        self.path_into(idx, &mut path);
         path
     }
 
-    /// Marks an entry and everything below it as deleted. The index keeps its
-    /// slots so file reference numbers stay stable until the next rebuild.
-    pub(crate) fn mark_deleted(&mut self, idx: u32) {
-        let Some(slot) = self.flags.get_mut(idx as usize) else {
+    /// Marks an entry and everything below it as deleted. Several roots can be
+    /// batched so a bulk delete costs one pass instead of one per root.
+    pub(crate) fn mark_many_deleted(&mut self, roots: &[u32]) {
+        if roots.is_empty() {
             return;
-        };
-        *slot |= FLAG_DELETED;
-        loop {
-            let mut changed = false;
-            for position in 1..self.len() {
-                if self.flags[position] & FLAG_DELETED != 0 {
-                    continue;
-                }
-                let parent = self.parents[position];
-                if parent != u32::MAX
-                    && (parent as usize) < self.flags.len()
-                    && self.flags[parent as usize] & FLAG_DELETED != 0
-                {
-                    self.flags[position] |= FLAG_DELETED;
-                    changed = true;
-                }
+        }
+        // 0 unknown / 1 alive / 2 deleted. Resolving every slot once with an
+        // ancestor walk is O(n) and never rescans the table.
+        let mut memo = vec![0u8; self.flags.len()];
+        for &root in roots {
+            let slot = root as usize;
+            if slot >= self.flags.len() {
+                continue;
             }
-            if !changed {
-                break;
+            if self.flags[slot] & FLAG_DELETED != 0 {
+                memo[slot] = 2;
+                continue;
+            }
+            self.flags[slot] |= FLAG_DELETED;
+            self.live_count = self.live_count.saturating_sub(1);
+            memo[slot] = 2;
+        }
+        let mut stack: Vec<u32> = Vec::new();
+        for position in 1..self.flags.len() {
+            if memo[position] != 0 {
+                continue;
+            }
+            if self.flags[position] & FLAG_DELETED != 0 {
+                memo[position] = 2;
+                continue;
+            }
+            stack.clear();
+            let mut current = position as u32;
+            let resolved = loop {
+                let slot = current as usize;
+                if memo[slot] != 0 {
+                    break memo[slot];
+                }
+                if self.flags[slot] & FLAG_DELETED != 0 {
+                    break 2;
+                }
+                stack.push(current);
+                let parent = self.parents[slot];
+                if parent == u32::MAX || parent as usize == slot || parent as usize >= self.flags.len()
+                {
+                    break 1;
+                }
+                current = parent;
+            };
+            for &node in &stack {
+                memo[node as usize] = resolved;
+            }
+        }
+        for position in 1..self.flags.len() {
+            if memo[position] == 2 && self.flags[position] & FLAG_DELETED == 0 {
+                self.flags[position] |= FLAG_DELETED;
+                self.live_count = self.live_count.saturating_sub(1);
             }
         }
     }
 
-    pub(crate) fn mark_ref_deleted(&mut self, file_ref: u64) {
-        if let Some(idx) = self.lookup_ref(file_ref) {
-            self.mark_deleted(idx);
-        }
+    #[cfg(test)]
+    pub(crate) fn mark_deleted(&mut self, idx: u32) {
+        self.mark_many_deleted(&[idx]);
     }
 
     /// Inserts or refreshes one entry after a USN change.
@@ -365,22 +413,15 @@ impl Index {
     ) -> u32 {
         if let Some(idx) = self.lookup_ref(file_ref) {
             let slot = idx as usize;
+            let was_deleted = self.flags[slot] & FLAG_DELETED != 0;
             self.set_name(idx, name);
             self.parents[slot] = parent;
             self.sizes[slot] = size;
-            self.mtimes[slot] = mtime;
-            let previous = self.ext_ids[slot] as usize;
-            if let Some(bucket) = self.ext_buckets.get_mut(previous) {
-                if let Some(position) = bucket.iter().position(|value| *value == idx) {
-                    bucket.remove(position);
-                }
-            }
-            let ext_id = self.intern_ext(name);
-            self.ext_ids[slot] = ext_id;
+            self.mtimes[slot] = clamp_mtime(mtime);
+            self.ext_ids[slot] = self.intern_ext(name);
             self.flags[slot] = flags_for(attributes, name);
-            self.ext_buckets.resize(self.exts.len(), Vec::new());
-            if let Some(bucket) = self.ext_buckets.get_mut(ext_id as usize) {
-                bucket.push(idx);
+            if was_deleted {
+                self.live_count = self.live_count.saturating_add(1);
             }
             idx
         } else {
@@ -396,12 +437,41 @@ impl Index {
         }
     }
 
+    /// Rebuilds `ref_order` with a 4-pass LSD radix sort over the 64-bit file
+    /// references (O(n), no comparison sort).
     pub(crate) fn rebuild_refs(&mut self) {
-        self.ref_order.clear();
-        self.ref_order.extend(0..self.file_refs.len() as u32);
-        self.ref_order
-            .sort_unstable_by_key(|slot| self.file_refs[*slot as usize]);
+        let count = self.file_refs.len();
+        let mut order: Vec<u32> = (0..count as u32).collect();
+        if count < 2 {
+            self.ref_order = order;
+            return;
+        }
+        let mut buffer = vec![0u32; count];
+        for shift in (0..64).step_by(16) {
+            let mut counts = vec![0usize; 1 << 16];
+            for &slot in &order {
+                let digit = ((self.file_refs[slot as usize] >> shift) & 0xFFFF) as usize;
+                counts[digit] += 1;
+            }
+            let mut sum = 0usize;
+            for count in counts.iter_mut() {
+                let value = *count;
+                *count = sum;
+                sum += value;
+            }
+            for &slot in &order {
+                let digit = ((self.file_refs[slot as usize] >> shift) & 0xFFFF) as usize;
+                buffer[counts[digit]] = slot;
+                counts[digit] += 1;
+            }
+            std::mem::swap(&mut order, &mut buffer);
+        }
+        self.ref_order = order;
     }
+}
+
+fn clamp_mtime(value: i64) -> u32 {
+    value.clamp(0, u32::MAX as i64) as u32
 }
 
 #[cfg(test)]
@@ -417,8 +487,12 @@ mod tests {
         assert_eq!(index.path_of(0), "C:\\");
         assert_eq!(index.path_of(users), "C:\\Users");
         assert_eq!(index.path_of(file), "C:\\Users\\notes.txt");
+        let mut reuse = String::from("stale");
+        index.path_into(file, &mut reuse);
+        assert_eq!(reuse, "C:\\Users\\notes.txt");
         assert_eq!(index.ext(file), "txt");
         assert!(index.is_live(file));
+        assert_eq!(index.live_count(), index.len() as u64);
     }
 
     #[test]
@@ -430,10 +504,35 @@ mod tests {
         index.set_parent(users, 0);
         index.set_parent(folder, users);
         index.set_parent(file, folder);
+        let before = index.live_count();
         index.mark_deleted(folder);
         assert!(!index.is_live(folder));
         assert!(!index.is_live(file));
         assert!(index.is_live(users));
+        assert_eq!(index.live_count(), before - 2);
+    }
+
+    #[test]
+    fn batch_delete_marks_every_subtree_once() {
+        let mut index = Index::new("C");
+        let a = index.push_entry(10, 0, "a", ATTRIBUTE_DIRECTORY, 0, 0);
+        let a_file = index.push_entry(11, a, "x.txt", 0, 1, 0);
+        let b = index.push_entry(12, 0, "b", ATTRIBUTE_DIRECTORY, 0, 0);
+        let b_file = index.push_entry(13, b, "y.txt", 0, 1, 0);
+        index.set_parent(a, 0);
+        index.set_parent(b, 0);
+        index.set_parent(a_file, a);
+        index.set_parent(b_file, b);
+        let before = index.live_count();
+        index.mark_many_deleted(&[a, b]);
+        assert!(!index.is_live(a));
+        assert!(!index.is_live(a_file));
+        assert!(!index.is_live(b));
+        assert!(!index.is_live(b_file));
+        assert_eq!(index.live_count(), before - 4);
+        // Applying the same roots again must not double-count.
+        index.mark_many_deleted(&[a, b]);
+        assert_eq!(index.live_count(), before - 4);
     }
 
     #[test]
@@ -454,5 +553,32 @@ mod tests {
         assert_eq!(index.name(first), "new.log");
         assert_eq!(index.sizes[first as usize], 9);
         assert_eq!(index.ext(first), "log");
+    }
+
+    #[test]
+    fn upsert_revives_a_deleted_slot() {
+        let mut index = Index::new("C");
+        let idx = index.push_entry(20, 0, "gone.log", 0, 5, 0);
+        index.mark_deleted(idx);
+        assert!(!index.is_live(idx));
+        index.upsert(20, 0, "back.log", 0, 7, 10);
+        assert!(index.is_live(idx));
+        assert_eq!(index.name(idx), "back.log");
+    }
+
+    #[test]
+    fn rebuild_refs_sorts_by_file_reference() {
+        let mut index = Index::new("C");
+        index.push_entry(90, 0, "c", 0, 0, 0);
+        index.push_entry(10, 0, "a", 0, 0, 0);
+        index.push_entry(50, 0, "b", 0, 0, 0);
+        index.rebuild_refs();
+        let refs: Vec<u64> = index
+            .ref_order
+            .iter()
+            .map(|slot| index.file_refs[*slot as usize])
+            .collect();
+        assert_eq!(refs, vec![5, 10, 50, 90]);
+        assert_eq!(index.lookup_ref(50).map(|idx| index.name(idx)), Some("b"));
     }
 }

@@ -77,8 +77,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     enabled: true,
     volumes: [],
     excludes: ["$Recycle.Bin", "System Volume Information"],
-    memoryBudgetMb: 256,
-    maxEntries: 3_000_000,
+    memoryBudgetMb: 1024,
+    maxEntries: 8_000_000,
     realtime: true,
   },
 };

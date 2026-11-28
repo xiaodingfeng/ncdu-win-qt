@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  IndexDiagnosis,
   IndexProgress,
   IndexSearchArgs,
   IndexSearchResponse,
@@ -43,6 +44,10 @@ export function indexSearch(args: IndexSearchArgs): Promise<IndexSearchResponse>
     limit: args.limit ?? null,
     caseSensitive: args.caseSensitive ?? null,
   });
+}
+
+export function indexDiagnose(path: string): Promise<IndexDiagnosis> {
+  return invoke<IndexDiagnosis>("index_diagnose", { path });
 }
 
 export interface IndexEvents {

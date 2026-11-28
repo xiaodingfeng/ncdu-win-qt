@@ -3200,6 +3200,15 @@ button {
   white-space: nowrap;
 }
 
+.gs-status.gs-warn,
+.gs-scope.gs-scope-warn {
+  color: var(--warning);
+}
+
+.gs-scope.gs-scope-warn {
+  border-color: var(--warning);
+}
+
 .gs-meta-actions {
   display: flex;
   gap: 6px;

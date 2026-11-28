@@ -26,6 +26,10 @@ keyring = { version = "3", default-features = false, features = ["windows-native
 rayon = "1"
 sha2 = "0.10"
 md-5 = "0.10"
+memchr = "2"
+bytemuck = { version = "1", features = ["derive"] }
+memmap2 = "0.9"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "time"] }
@@ -47,7 +51,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 lto = true
 codegen-units = 1
 strip = true

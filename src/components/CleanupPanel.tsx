@@ -37,6 +37,8 @@ interface Props {
   root: string | null;
   /** Increments on every finished main scan so results reset only then. */
   scanSeq: number;
+  /** True while the main window scan is running; cleanup must not compete. */
+  mainScanning: boolean;
   disk: DiskInfo | null;
   onCleaned: () => void;
   onAiAnalyze: (subject: string, prompt: string) => void;
@@ -111,7 +113,14 @@ function dupKeepPriority(file: DuplicateFile): number {
 type SortKey = "name" | "path" | "size" | "count";
 type SortState = { key: SortKey; asc: boolean };
 
-export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnalyze }: Props) {
+export default function CleanupPanel({
+  root,
+  scanSeq,
+  mainScanning,
+  disk,
+  onCleaned,
+  onAiAnalyze,
+}: Props) {
   const { t } = useI18n();
   const { settings, update } = useSettings();
 
@@ -242,6 +251,7 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
 
   /** Rescan only the module of the currently selected tab. */
   const rescanCurrent = useCallback(async () => {
+    if (mainScanning) return;
     let target = root ?? rootRef.current;
     if (!target) {
       // Manual rescan is allowed before a main scan: fall back to the user
@@ -261,15 +271,17 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
     } else {
       await runDuplicateScan();
     }
-  }, [tab, root, runCategoryScan, runDuplicateScan]);
+  }, [tab, root, mainScanning, runCategoryScan, runDuplicateScan]);
 
   useEffect(() => {
-    if (!root) return;
+    // The main scan clears its summary at once, which briefly changes `root`.
+    // Wait for it to finish so cleanup never runs alongside a whole-disk scan.
+    if (!root || mainScanning) return;
     rootRef.current = root;
     void runAuto();
     // Reset and rescan only when the main folder is scanned again.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [root, scanSeq]);
+  }, [root, scanSeq, mainScanning]);
 
   useEffect(() => {
     let disposed = false;
@@ -731,7 +743,7 @@ export default function CleanupPanel({ root, scanSeq, disk, onCleaned, onAiAnaly
         )}
         <button
           className="btn small"
-          disabled={scanning || dupScanning || cleaning}
+          disabled={scanning || dupScanning || cleaning || mainScanning}
           onClick={() => void rescanCurrent()}
         >
           {t("cleanup.rescan")}

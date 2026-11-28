@@ -790,6 +790,11 @@
   "search_global.status_loading": "正在读取索引状态…",
   "search_global.loading_index": "正在加载索引…",
   "search_global.status_building": "正在建立索引 {volume}：{phase}（{n} 条）",
+  "search_global.status_syncing": "正在同步索引增量…",
+  "search_global.unindexed_volume": "未索引：{volume}:",
+  "search_global.truncated": " · 另有 {n} 个文件未索引",
+  "search_global.why_not_found": "为什么搜不到？",
+  "search_global.diagnose_hint": "诊断：{hint}",
   "search_global.phase_enumerating": "枚举 MFT",
   "search_global.phase_readingMft": "读取 $MFT",
   "search_global.phase_buildingTree": "整理索引",
@@ -845,6 +850,8 @@
   "index.badge_building": "索引建立中",
   "index.badge_loading": "索引加载中",
   "index.badge_ready": "索引 {n}",
+  "index.badge_stored": "索引已构建 · 搜索时加载",
+  "index.badge_syncing": "索引同步中",
   "index.badge_off": "索引已关闭",
   "search_global.footer_hint": "↑↓ 选择 · Enter 打开 · Ctrl+Enter 定位 · Alt+Enter 树图 · Delete 删除 · Esc 关闭"
 }

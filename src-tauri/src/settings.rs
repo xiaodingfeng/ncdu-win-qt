@@ -140,8 +140,8 @@ impl Default for IndexPrefs {
                 "$Recycle.Bin".to_string(),
                 "System Volume Information".to_string(),
             ],
-            memory_budget_mb: 256,
-            max_entries: 3_000_000,
+            memory_budget_mb: 1024,
+            max_entries: 8_000_000,
             realtime: true,
         }
     }

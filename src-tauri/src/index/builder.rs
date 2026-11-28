@@ -15,6 +15,13 @@ pub(crate) enum WalkError {
     LowMemory,
 }
 
+/// One finished volume build plus the diagnostics shown in the status line.
+pub(crate) struct BuildOutcome {
+    pub(crate) index: Index,
+    pub(crate) excluded: Vec<(String, u64)>,
+    pub(crate) truncated: u64,
+}
+
 /// Degraded fallback for non-NTFS volumes: a plain directory walk. It keeps
 /// the same index layout so search and result actions behave identically.
 pub(crate) fn walk_volume(
@@ -25,7 +32,7 @@ pub(crate) fn walk_volume(
     excludes: &[String],
     max_entries: u32,
     progress: &mut dyn FnMut(u64),
-) -> Result<Index, WalkError> {
+) -> Result<BuildOutcome, WalkError> {
     let mut index = Index::new(volume);
     index.built_at = now_secs();
     let excludes: Vec<String> = excludes
@@ -33,6 +40,7 @@ pub(crate) fn walk_volume(
         .map(|rule| rule.trim().to_ascii_lowercase())
         .filter(|rule| !rule.is_empty())
         .collect();
+    let mut excluded_hits = vec![0u64; excludes.len()];
     let limit = max_entries.max(1) as usize;
     let mut next_ref: u64 = VOLUME_ROOT_REF + 1;
     let mut stack: Vec<(std::path::PathBuf, u32)> = vec![(root.to_path_buf(), 0)];
@@ -51,12 +59,18 @@ pub(crate) fn walk_volume(
         for entry in reader.flatten() {
             if index.len() >= limit {
                 index.rebuild_refs();
-                index.build_ext_buckets();
-                index.compact();
-                return Ok(index);
+                return Ok(BuildOutcome {
+                    index,
+                    excluded: exclude_report(&excludes, &excluded_hits),
+                    truncated: 0,
+                });
             }
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.is_empty() || excludes.iter().any(|rule| fold_contains(&name, rule)) {
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(position) = excludes.iter().position(|rule| fold_contains(&name, rule)) {
+                excluded_hits[position] += 1;
                 continue;
             }
             let Ok(metadata) = entry.metadata() else {
@@ -85,9 +99,11 @@ pub(crate) fn walk_volume(
         }
     }
     index.rebuild_refs();
-    index.build_ext_buckets();
-    index.compact();
-    Ok(index)
+    Ok(BuildOutcome {
+        index,
+        excluded: exclude_report(&excludes, &excluded_hits),
+        truncated: 0,
+    })
 }
 
 pub(crate) fn build(
@@ -95,7 +111,7 @@ pub(crate) fn build(
     data: VolumeIndexData,
     excludes: &[String],
     max_entries: u32,
-) -> Index {
+) -> BuildOutcome {
     let mut index = Index::new(volume);
     index.volume_serial = data.volume_serial;
     index.journal_id = data.journal_id;
@@ -108,17 +124,44 @@ pub(crate) fn build(
         .map(|rule| rule.trim().to_ascii_lowercase())
         .filter(|rule| !rule.is_empty())
         .collect();
+    let mut excluded_hits = vec![0u64; excludes.len()];
+    let candidates = data.entries.len() as u64;
+    let mut retained = 0u64;
+    let mut root_entries = 0u64;
+    let mut excluded_total = 0u64;
 
-    // Parent references can only be resolved once every entry slot exists.
-    let mut parent_links: Vec<(u64, u32)> = Vec::with_capacity(data.entries.len());
-    for entry in data.entries {
-        if index.len() >= limit {
+    // Size the arena once. The pre-pass mirrors the main loop (root, excludes
+    // and the entry cap) so every array is allocated at its final length.
+    let mut planned = 0usize;
+    let mut planned_name_bytes = 0usize;
+    for entry in &data.entries {
+        if 1 + planned >= limit {
             break;
         }
         if entry.file_ref == VOLUME_ROOT_REF {
             continue;
         }
         if excludes.iter().any(|rule| fold_contains(&entry.name, rule)) {
+            continue;
+        }
+        planned += 1;
+        planned_name_bytes += entry.name.len();
+    }
+    index.reserve_entries(planned, planned_name_bytes);
+
+    // Parent references can only be resolved once every entry slot exists.
+    let mut parent_links: Vec<(u64, u32)> = Vec::with_capacity(planned);
+    for entry in data.entries {
+        if index.len() >= limit {
+            break;
+        }
+        if entry.file_ref == VOLUME_ROOT_REF {
+            root_entries += 1;
+            continue;
+        }
+        if let Some(position) = excludes.iter().position(|rule| fold_contains(&entry.name, rule)) {
+            excluded_hits[position] += 1;
+            excluded_total += 1;
             continue;
         }
         let idx = index.push_entry(
@@ -130,7 +173,11 @@ pub(crate) fn build(
             entry.mtime,
         );
         parent_links.push((entry.parent_ref, idx));
+        retained += 1;
     }
+    let truncated = candidates
+        .saturating_sub(retained + excluded_total + root_entries);
+    index.truncated_entries = truncated;
 
     let mut by_ref: HashMap<u64, u32> = index
         .file_refs
@@ -149,9 +196,20 @@ pub(crate) fn build(
     by_ref.clear();
 
     index.rebuild_refs();
-    index.build_ext_buckets();
-    index.compact();
-    index
+    BuildOutcome {
+        index,
+        excluded: exclude_report(&excludes, &excluded_hits),
+        truncated,
+    }
+}
+
+fn exclude_report(rules: &[String], hits: &[u64]) -> Vec<(String, u64)> {
+    rules
+        .iter()
+        .zip(hits)
+        .filter(|(_, count)| **count > 0)
+        .map(|(rule, count)| (rule.clone(), *count))
+        .collect()
 }
 
 pub(crate) fn now_secs() -> i64 {
@@ -183,6 +241,7 @@ mod tests {
             journal_id: 7,
             next_usn: 100,
             volume_serial: 9,
+            truncated_records: false,
         }
     }
 
@@ -193,7 +252,7 @@ mod tests {
             entry(11, 10, "System32", 0x10),
             entry(12, 999, "orphan.txt", 0),
         ];
-        let index = build("C", data(entries), &[], 1_000);
+        let index = build("C", data(entries), &[], 1_000).index;
         assert_eq!(index.parents[1], 0);
         assert_eq!(index.path_of(2), "C:\\Windows\\System32");
         assert_eq!(index.path_of(3), "C:\\orphan.txt");
@@ -207,11 +266,16 @@ mod tests {
             entry(10, 5, "keep", 0x10),
             entry(11, 5, "$Recycle.Bin", 0x10),
             entry(12, 5, "extra", 0),
+            entry(13, 5, "dropped", 0),
         ];
-        let index = build("C", data(entries), &["recycle.bin".to_string()], 2);
-        assert_eq!(index.len(), 2);
+        let outcome = build("C", data(entries), &["recycle.bin".to_string()], 3);
+        let index = &outcome.index;
+        assert_eq!(index.len(), 3);
+        assert_eq!(outcome.truncated, 1);
+        assert_eq!(outcome.excluded, vec![("recycle.bin".to_string(), 1)]);
         assert_eq!(index.path_of(1), "C:\\keep");
         assert!(index.lookup_ref(11).is_none());
+        assert!(index.lookup_ref(13).is_none());
     }
 
     #[test]
@@ -224,7 +288,8 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let index = walk_volume("T", &root, &cancel, &|| false, &[], 1_000, &mut |_| {})
-            .expect("walk");
+            .expect("walk")
+            .index;
         let names: Vec<&str> = (1..index.len() as u32).map(|idx| index.name(idx)).collect();
         assert!(names.contains(&"a.txt"));
         assert!(names.contains(&"b.log"));
