@@ -111,7 +111,15 @@ pub(crate) fn startup(app: AppHandle) {
                     continue;
                 }
             };
-            match maintenance_plan(&header, &journal) {
+            let effective = persist::effective_next_usn(
+                &app,
+                volume,
+                header.volume_serial,
+                header.journal_id,
+                header.index_version,
+                header.next_usn,
+            );
+            match maintenance_plan(&header, &journal, effective) {
                 Maintenance::Rebuild => {
                     log::info!("index startup: volume {volume} snapshot is stale; rebuilding");
                     to_build.push(volume.clone());
@@ -133,12 +141,15 @@ pub(crate) fn startup(app: AppHandle) {
                 volume,
                 &header,
                 &journal,
+                effective,
                 &cancel,
                 generation,
             ) {
                 log::warn!("index startup: delta sync failed for {volume}: {err:?}");
                 to_build.push(volume.clone());
+                continue;
             }
+            commands::maybe_compact_delta(&app, volume, generation);
         }
 
         if !to_build.is_empty()
@@ -162,14 +173,15 @@ enum Maintenance {
 fn maintenance_plan(
     header: &persist::IndexHeader,
     journal: &crate::mft::JournalSnapshot,
+    next_usn: i64,
 ) -> Maintenance {
     let lower = journal.first_usn.max(journal.lowest_valid_usn);
     if journal.journal_id != header.journal_id
-        || header.next_usn < lower
-        || header.next_usn > journal.next_usn
+        || next_usn < lower
+        || next_usn > journal.next_usn
     {
         Maintenance::Rebuild
-    } else if header.next_usn == journal.next_usn {
+    } else if next_usn == journal.next_usn {
         Maintenance::UpToDate
     } else {
         Maintenance::Sync
@@ -227,13 +239,14 @@ fn sync_delta(
     volume: &str,
     header: &persist::IndexHeader,
     journal: &crate::mft::JournalSnapshot,
+    from_usn: i64,
     cancel: &AtomicBool,
     generation: u64,
 ) -> Result<(), crate::mft::MftError> {
     set_syncing(app, volume);
     let letter = volume.chars().next().unwrap_or('C');
     let handle = crate::mft::open_volume(letter)?;
-    let mut cursor = header.next_usn;
+    let mut cursor = from_usn;
     let mut records: Vec<persist::DeltaRecord> = Vec::new();
     let mut metadata_budget = SYNC_METADATA_BUDGET;
     let root_prefix = format!("{letter}:\\");
@@ -359,27 +372,36 @@ mod tests {
     #[test]
     fn no_usn_progress_means_no_write() {
         assert_eq!(
-            maintenance_plan(&header(7, 200), &journal(100, 200, 7)),
+            maintenance_plan(&header(7, 200), &journal(100, 200, 7), 200),
             Maintenance::UpToDate
         );
         assert_eq!(
-            maintenance_plan(&header(7, 150), &journal(100, 200, 7)),
+            maintenance_plan(&header(7, 150), &journal(100, 200, 7), 150),
             Maintenance::Sync
+        );
+    }
+
+    #[test]
+    fn a_delta_tail_can_already_be_up_to_date() {
+        // The snapshot file ends at 150, but the committed delta reached 200.
+        assert_eq!(
+            maintenance_plan(&header(7, 150), &journal(100, 200, 7), 200),
+            Maintenance::UpToDate
         );
     }
 
     #[test]
     fn wrapped_or_replaced_journal_means_rebuild() {
         assert_eq!(
-            maintenance_plan(&header(7, 50), &journal(100, 200, 7)),
+            maintenance_plan(&header(7, 50), &journal(100, 200, 7), 50),
             Maintenance::Rebuild
         );
         assert_eq!(
-            maintenance_plan(&header(7, 150), &journal(100, 200, 8)),
+            maintenance_plan(&header(7, 150), &journal(100, 200, 8), 150),
             Maintenance::Rebuild
         );
         assert_eq!(
-            maintenance_plan(&header(7, 250), &journal(100, 200, 7)),
+            maintenance_plan(&header(7, 250), &journal(100, 200, 7), 250),
             Maintenance::Rebuild
         );
     }

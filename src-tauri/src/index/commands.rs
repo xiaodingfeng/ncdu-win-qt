@@ -645,7 +645,17 @@ pub(crate) fn ensure_loaded(app: AppHandle) {
                     let built_at = index.built_at;
                     let journal_id = index.journal_id;
                     let volume_serial = index.volume_serial;
-                    let expired = is_snapshot_expired(volume, journal_id, index.next_usn);
+                    // The delta log may already cover more than the snapshot file
+                    // itself; expire only when even the delta tail is unreachable.
+                    let effective = persist::effective_next_usn(
+                        &worker,
+                        volume,
+                        volume_serial,
+                        journal_id,
+                        index.version,
+                        index.next_usn,
+                    );
+                    let expired = is_snapshot_expired(volume, journal_id, effective);
                     // A stale snapshot must not receive a delta from a different
                     // journal generation; it is rebuilt instead.
                     if !expired {
@@ -813,17 +823,51 @@ fn apply_delta_records(
     count
 }
 
-/// A delta larger than 10% of the base (or 8MB) is folded into a new snapshot
-/// in the background, never on the first-open critical path.
-fn schedule_delta_merge(app: &AppHandle, volume: &str, volume_serial: u64, delta_size: u64) {
-    if delta_size == 0 {
-        return;
-    }
+/// Threshold above which the delta log is folded into the snapshot.
+fn delta_merge_threshold(app: &AppHandle, volume: &str) -> u64 {
     let base_size = persist::read_header(app, volume)
         .map(|header| header.count as u64 * 33)
         .unwrap_or(0);
-    let threshold = (base_size / 10).max(8 * 1024 * 1024);
-    if delta_size <= threshold {
+    (base_size / 10).max(8 * 1024 * 1024)
+}
+
+/// Folds the committed delta log into the snapshot when it grows past the merge
+/// threshold. Startup maintenance calls this so the snapshot's `next_usn` does
+/// not stay frozen and the delta never grows without bound.
+pub(crate) fn maybe_compact_delta(app: &AppHandle, volume: &str, generation: u64) {
+    if app.state::<IndexStore>().generation.load(Ordering::SeqCst) != generation {
+        return;
+    }
+    let Some(before) = persist::read_delta_state(app, volume) else {
+        return;
+    };
+    if before.delta_len <= delta_merge_threshold(app, volume) {
+        return;
+    }
+    let Ok(mut index) = persist::load(app, volume) else {
+        return;
+    };
+    replay_delta(app, volume, &mut index);
+    // Another writer may have reset or replaced the delta while we decoded;
+    // never overwrite a snapshot that moved on.
+    match persist::read_delta_state(app, volume) {
+        Some(after)
+            if after.tail_usn == before.tail_usn && after.delta_len == before.delta_len => {}
+        _ => return,
+    }
+    if app.state::<IndexStore>().generation.load(Ordering::SeqCst) != generation {
+        return;
+    }
+    if persist::save(app, &index).is_ok() {
+        persist::reset_delta(app, volume);
+        log::info!("index startup: compacted delta for volume {volume}");
+    }
+}
+
+/// A delta larger than 10% of the base (or 8MB) is folded into a new snapshot
+/// in the background, never on the first-open critical path.
+fn schedule_delta_merge(app: &AppHandle, volume: &str, volume_serial: u64, delta_size: u64) {
+    if delta_size == 0 || delta_size <= delta_merge_threshold(app, volume) {
         return;
     }
     let worker = app.clone();

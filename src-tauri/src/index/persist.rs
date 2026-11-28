@@ -645,6 +645,29 @@ pub(crate) fn read_delta_state(app: &AppHandle, volume: &str) -> Option<DeltaSta
     })
 }
 
+/// USN position actually covered by the snapshot plus its committed delta log.
+/// Falls back to the snapshot's own position when the delta is missing or was
+/// written against a different base.
+pub(crate) fn effective_next_usn(
+    app: &AppHandle,
+    volume: &str,
+    volume_serial: u64,
+    journal_id: u64,
+    base_index_version: u64,
+    snapshot_next_usn: i64,
+) -> i64 {
+    match read_delta_state(app, volume) {
+        Some(state)
+            if state.volume_serial == volume_serial
+                && state.journal_id == journal_id
+                && state.base_index_version == base_index_version =>
+        {
+            state.tail_usn
+        }
+        _ => snapshot_next_usn,
+    }
+}
+
 fn write_delta_state(app: &AppHandle, volume: &str, state: &DeltaState) -> Result<(), String> {
     let path = state_path_for(app, volume)?;
     let temporary = path.with_extension("state.tmp");
@@ -716,7 +739,7 @@ pub(crate) fn append_delta(
     let mut file = OpenOptions::new()
         .create(true)
         .read(true)
-        .append(true)
+        .write(true)
         .open(&path)
         .map_err(|err| format!("cannot open {}: {err}", path.display()))?;
     let mut length = file
@@ -752,6 +775,9 @@ pub(crate) fn append_delta(
                 .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
         }
     }
+    // Append after whatever header/base is already in the file.
+    file.seek(SeekFrom::End(0))
+        .map_err(|err| format!("cannot seek {}: {err}", path.display()))?;
     for record in records {
         if let Some(bytes) = encode_record(record) {
             file.write_all(&bytes)
